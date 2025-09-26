@@ -1,0 +1,9 @@
+geography,year,category,subcategory,unit,gwp_set,value
+GB,2024,electricity,,kWh,AR6,0.170
+GB,2024,gas,,kWh,AR6,0.184
+GB,2024,diesel,,L,AR6,2.676
+Global,2024,flight,short_haul_economy,pkm,AR6,0.145
+Global,2024,flight,long_haul_economy,pkm,AR6,0.110
+GB,2024,train,average,pkm,AR6,0.035
+GB,2024,car,average,km,AR6,0.171
+GB,2024,waste,landfill_msw,kg,AR6,0.480

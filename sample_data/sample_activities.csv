@@ -1,0 +1,8 @@
+date,category,subcategory,description,quantity,unit,geo
+2025-01-15,electricity,,HQ office electricity bill,1200,kWh,GB
+2025-01-20,gas,,HQ gas usage,800,kWh,GB
+2025-02-10,diesel,,Generator diesel,150,L,GB
+2025-02-18,flight,short_haul_economy,London-Paris return for 2 pax,900,pkm,GB
+2025-03-01,train,average,Commuter rail,1200,pkm,GB
+2025-03-12,car,average,Pool car mileage,500,km,GB
+2025-03-25,waste,landfill_msw,General waste,250,kg,GB
