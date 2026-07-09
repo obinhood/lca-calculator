@@ -10,10 +10,14 @@ Selection is deterministic and vintage-aware: factors that have been superseded
 (their id appears in another factor's ``supersedes_id``) are never proposed, and
 ties are broken by newest year then newest id — never by insertion order.
 """
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 from rapidfuzz import process, fuzz
 from typing import Optional, Tuple
 from ..models import EmissionFactor, ActivityRecord
+
+# GHG Protocol Scope 3 calculation-method hierarchy (lower = preferred).
+METHOD_RANK = {"supplier_specific": 0, "hybrid": 1, "average_data": 2, "spend_based": 3}
 
 # Only proposals at or above this confidence bind without human review.
 AUTO_BIND_THRESHOLD = 0.95
@@ -32,12 +36,18 @@ CONFIDENCE = {
 
 
 def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int]):
-    """Candidate factors: never superseded, deterministically ordered (newest first)."""
+    """Candidate factors: never superseded, deterministically ordered.
+
+    Order: preferred calculation method first (GHG Protocol Scope 3 hierarchy —
+    supplier-specific beats average-data beats spend-based), then newest year,
+    then newest id. Never insertion order.
+    """
     superseded_ids = db.query(EmissionFactor.supersedes_id)\
         .filter(EmissionFactor.supersedes_id.isnot(None))
+    method_rank = case(METHOD_RANK, value=EmissionFactor.method_type, else_=2)
     q = db.query(EmissionFactor)\
         .filter(~EmissionFactor.id.in_(superseded_ids))\
-        .order_by(EmissionFactor.year.desc(), EmissionFactor.id.desc())
+        .order_by(method_rank.asc(), EmissionFactor.year.desc(), EmissionFactor.id.desc())
     if gwp_set:
         q = q.filter(EmissionFactor.gwp_set == gwp_set)
     if year:

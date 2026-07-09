@@ -54,9 +54,18 @@ class EmissionFactor(Base):
     year = Column(Integer)
     category = Column(String) # electricity, diesel, flight, etc.
     subcategory = Column(String) # tech / route
-    unit = Column(String) # per kWh, per L, per tkm, per pkm, per kg
+    unit = Column(String) # per kWh, per L, per tkm, per pkm, per kg — or a currency code (GBP/EUR) for spend-based EEIO factors
     gwp_set = Column(String) # GWP vintage baked into `value` (aggregate factors only)
-    value = Column(Float) # kgCO2e per unit (pre-aggregated fallback)
+    value = Column(Float) # kgCO2e per unit
+    # GHG Protocol Scope 3 calculation-method hierarchy (Technical Guidance):
+    # supplier_specific > hybrid > average_data (activity-based) > spend_based (EEIO).
+    # Drives resolver preference and the primary-data-share metric.
+    method_type = Column(String, nullable=True, default="average_data")
+    # LCA system boundary of the factor (cradle_to_gate | cradle_to_grave |
+    # gate_to_gate | well_to_tank | combustion | generation | waste_treatment ...).
+    # Boundary metadata MUST live on the factor: combining e.g. a cradle-to-gate
+    # material factor with a separate use-phase factor without it double counts.
+    lca_boundary = Column(String, nullable=True)
     # Per-gas decomposition: kg of ACTUAL GAS emitted per activity unit. When set,
     # the calc engine applies the requested GWP set at CALCULATION time
     # (co2e = kg_co2*1 + kg_ch4*GWP(CH4) + kg_n2o*GWP(N2O)) — this is what makes
@@ -67,6 +76,9 @@ class EmissionFactor(Base):
     # CH4 origin routes the correct GWP variant: "fossil" (combustion sources) or
     # "biogenic" (landfill/organic). NULL falls back to the blended CH4 GWP.
     ch4_origin = Column(String, nullable=True)
+    # Biogenic CO2 (kg per unit) — ISO 14067: reported SEPARATELY, never netted
+    # into the fossil total. Kept outside total_co2e and surfaced on its own.
+    kg_co2_biogenic = Column(Float, nullable=True)
     supersedes_id = Column(Integer, nullable=True)
 
     activities = relationship("ActivityRecord", back_populates="factor",
@@ -144,6 +156,8 @@ class CalculationRun(Base):
     total_co2e = Column(Float, default=0.0)          # location-based total (headline)
     # GHG Protocol dual reporting: same total with Scope 2 swapped to market-based.
     total_co2e_market = Column(Float, default=0.0)
+    # ISO 14067: biogenic CO2 reported separately, never netted into the totals above.
+    total_biogenic_co2e = Column(Float, default=0.0)
     notes = Column(Text)  # JSON: per-activity exclusion reasons
     # Fingerprint of the org's activity set at compute time (id/factor/quantity/unit).
     # Lets a reader detect that a run is stale even when the activity COUNT is unchanged

@@ -239,6 +239,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         line_items = []
         total = 0.0          # location-based total (headline)
         total_market = 0.0   # dual reporting: Scope 2 swapped to market basis
+        total_biogenic = 0.0 # ISO 14067: separate pool, never netted into totals
         for a in acts:
             if a.id in undatable:
                 run.data_errors += 1
@@ -278,6 +279,11 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 "factor_unit": a.factor.unit,
                 "quantity": a.quantity,
                 "calc_method": "per_gas" if per_gas else "aggregate",
+                # GHG Protocol Scope 3 method hierarchy + LCA system boundary —
+                # the lineage an assurer needs to check for double counting and
+                # to compute the primary-data share.
+                "method_type": a.factor.method_type or "average_data",
+                "lca_boundary": a.factor.lca_boundary,
             }
             if per_gas:
                 gases = factor_gases(a.factor)
@@ -287,6 +293,16 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             else:
                 detail["gwp_set"] = a.factor.gwp_set
                 detail["factor_value"] = a.factor.value
+
+            # Biogenic CO2 tracked as its own pool (ISO 14067), never in total_co2e.
+            if a.factor.kg_co2_biogenic is not None:
+                try:
+                    qty_fu = convert(a.quantity, a.unit, a.factor.unit)
+                    biogenic = qty_fu * a.factor.kg_co2_biogenic
+                    detail["biogenic_co2e"] = biogenic
+                    total_biogenic += biogenic
+                except UnitConversionError:
+                    pass  # main path above already validated; defensive only
 
             scope = a.scope or SCOPE_RULES.get((a.category or "").lower(), "3")
             a.scope = scope
@@ -330,6 +346,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         db.add_all(line_items)
         run.total_co2e = total
         run.total_co2e_market = total_market
+        run.total_biogenic_co2e = total_biogenic
         run.notes = json.dumps(errors)
         run.status = "complete"
         db.commit()

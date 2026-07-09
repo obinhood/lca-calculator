@@ -54,6 +54,8 @@ def seed_factors(session):
             kg_ch4=_opt_float(r.get("kg_ch4")),
             kg_n2o=_opt_float(r.get("kg_n2o")),
             ch4_origin=(r.get("ch4_origin") or None),
+            method_type=(r.get("method_type") or "average_data"),
+            lca_boundary=(r.get("lca_boundary") or None),
             supersedes_id=None,
         )
         # Guard against catalog typos: a per-gas breakdown must recompose to the

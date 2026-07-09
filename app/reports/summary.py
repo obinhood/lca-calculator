@@ -2,7 +2,7 @@ import json
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from ..models import ActivityRecord, CalculationRun, EmissionLineItem
+from ..models import ActivityRecord, CalculationRun, EmissionLineItem, EmissionFactor
 from ..services.calc import activities_fingerprint
 
 
@@ -44,6 +44,18 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         .filter(li.run_id == run.id, li.method == "location")\
         .group_by(ActivityRecord.category).all()
 
+    # GHG Protocol Scope 3 method split: how much of the total rests on which
+    # calculation method (supplier_specific/hybrid = primary-leaning data;
+    # spend_based = lowest tier). Assurers and the Scope 3 revision ask for this.
+    method_rows = db.query(EmissionFactor.method_type, func.sum(li.co2e))\
+        .join(ActivityRecord, ActivityRecord.factor_id == EmissionFactor.id)\
+        .join(li, li.activity_id == ActivityRecord.id)\
+        .filter(li.run_id == run.id, li.method == "location")\
+        .group_by(EmissionFactor.method_type).all()
+    method_split = {(m or "average_data"): (v or 0.0) for m, v in method_rows}
+    total_methods = sum(method_split.values())
+    primary_kg = method_split.get("supplier_specific", 0.0) + method_split.get("hybrid", 0.0)
+
     scope2_location = next((v for s, v in by_scope if s == "2"), 0.0) or 0.0
     scope2_market = db.query(func.sum(li.co2e))\
         .filter(li.run_id == run.id, li.method == "market").scalar() or 0.0
@@ -72,6 +84,8 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         },
         "total_co2e": run.total_co2e,                     # location-based (headline)
         "total_co2e_market": run.total_co2e_market,       # dual reporting counterpart
+        # ISO 14067: biogenic CO2 reported separately, never netted into the above.
+        "biogenic_co2e_separate": run.total_biogenic_co2e or 0.0,
         "by_scope": [{"scope": s or "?", "co2e": v or 0.0} for s, v in by_scope],
         "by_category": [{"category": c or "?", "co2e": v or 0.0} for c, v in by_cat],
         # GHG Protocol Scope 2 Guidance: dual reporting, both bases side by side.
@@ -82,6 +96,13 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             "market_bases": bases,
             "kwh_contractual": kwh_contractual,
             "kwh_grid_fallback": kwh_grid_fallback,
+        },
+        "method_split": {
+            "co2e_by_method": method_split,
+            "primary_data_share_pct": round(100.0 * primary_kg / total_methods, 2)
+                                      if total_methods else 0.0,
+            "spend_based_share_pct": round(100.0 * method_split.get("spend_based", 0.0)
+                                           / total_methods, 2) if total_methods else 0.0,
         },
         # A partial run cannot honestly answer the question asked of it — flag it
         # at the TOP level, not only inside the nested coverage block.

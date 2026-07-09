@@ -694,3 +694,98 @@ def test_date_policy_is_per_row_and_dayfirst():
     assert iso["date"].tolist() == ["2025-01-15"]
     bad = parse_csv(b"date,category,quantity,unit\n31/31/2025,e,1,kWh\n", "d.csv")
     assert bad["date"].tolist() == [""]          # unparseable -> empty, flagged by QA
+
+
+# --- LCA methods: spend-based EEIO, method hierarchy, biogenic pool ---
+
+def _spend_factor(db, subcategory="professional_services", value=0.045, unit="GBP"):
+    f = EmissionFactor(source="EEIO_DEMO", version="1", geography="GB", year=2024,
+                       category="spend", subcategory=subcategory, unit=unit,
+                       gwp_set="AR6", value=value, method_type="spend_based",
+                       lca_boundary="cradle_to_gate")
+    db.add(f); db.commit(); db.refresh(f)
+    return f
+
+
+def test_spend_based_calculation_end_to_end(db):
+    """Spend activity (GBP) x EEIO factor (kgCO2e/GBP) computes as Scope 3."""
+    import json
+    org = _org(db)
+    f = _spend_factor(db)
+    a = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="spend",
+                       subcategory="professional_services", description="legal fees",
+                       quantity=10000, unit="GBP", geo="GB", factor_id=f.id)
+    db.add(a); db.commit(); db.refresh(a)
+    run = compute_co2e(db, org.id)
+    assert run.mapped == 1
+    assert run.total_co2e == pytest.approx(450.0)          # 10000 * 0.045
+    li = db.query(EmissionLineItem).filter(EmissionLineItem.run_id == run.id).one()
+    assert li.scope == "3"
+    d = json.loads(li.details)
+    assert d["method_type"] == "spend_based"
+    assert d["lca_boundary"] == "cradle_to_gate"
+
+
+def test_currency_mismatch_fails_closed(db):
+    """EUR spend against a GBP factor needs an audited FX rate — reject, not guess."""
+    org = _org(db)
+    f = _spend_factor(db, unit="GBP")
+    a = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="spend",
+                       subcategory="professional_services", description="", quantity=5000,
+                       unit="EUR", geo="GB", factor_id=f.id)
+    db.add(a); db.commit()
+    run = compute_co2e(db, org.id)
+    assert run.unit_errors == 1
+    assert run.mapped == 0
+
+
+def test_resolver_prefers_supplier_specific_over_spend(db):
+    """GHG Protocol hierarchy: supplier data beats EEIO at the same match tier."""
+    from app.services.resolver import propose_mapping
+    _spend_factor(db, subcategory="widgets", value=0.5)
+    sup = EmissionFactor(source="SUPPLIER", version="1", geography="GB", year=2024,
+                         category="spend", subcategory="widgets", unit="GBP",
+                         gwp_set="AR6", value=0.1, method_type="supplier_specific",
+                         lca_boundary="cradle_to_gate")
+    db.add(sup); db.commit(); db.refresh(sup)
+    factor, basis, _ = propose_mapping(db, "spend", "widgets", None, "GB")
+    assert factor.id == sup.id                               # supplier-specific wins
+    assert basis == "exact"
+
+
+def test_method_split_and_primary_share_in_summary(db):
+    org = _org(db)
+    f_el = _seed_electricity_factor(db)                      # average_data (default)
+    f_sp = _spend_factor(db)                                 # spend_based
+    _activity(db, org.id, f_el.id, quantity=1000, unit="kWh")           # 170 kg
+    a = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="spend",
+                       subcategory="professional_services", description="", quantity=10000,
+                       unit="GBP", geo="GB", factor_id=f_sp.id)
+    db.add(a); db.commit()
+    run = compute_co2e(db, org.id)
+    s = summary(db, organisation_id=org.id, run_id=run.id)
+    ms = s["method_split"]
+    assert ms["co2e_by_method"]["average_data"] == pytest.approx(170.0)
+    assert ms["co2e_by_method"]["spend_based"] == pytest.approx(450.0)
+    assert ms["spend_based_share_pct"] == pytest.approx(100 * 450 / 620, abs=0.01)
+    assert ms["primary_data_share_pct"] == 0.0               # no supplier data yet
+
+
+def test_biogenic_co2_is_separate_never_netted(db):
+    """ISO 14067: biogenic CO2 reported separately, excluded from total_co2e."""
+    org = _org(db)
+    f = EmissionFactor(source="TEST", version="1", geography="GB", year=2024,
+                       category="waste", subcategory="composting", unit="kg",
+                       gwp_set="AR6", value=0.01, method_type="average_data",
+                       lca_boundary="waste_treatment", kg_co2_biogenic=0.2)
+    db.add(f); db.commit(); db.refresh(f)
+    a = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="waste",
+                       subcategory="composting", description="", quantity=100,
+                       unit="kg", geo="GB", factor_id=f.id)
+    db.add(a); db.commit()
+    run = compute_co2e(db, org.id)
+    assert run.total_co2e == pytest.approx(1.0)              # fossil-basis total only
+    assert run.total_biogenic_co2e == pytest.approx(20.0)    # 100 * 0.2, separate pool
+    s = summary(db, organisation_id=org.id, run_id=run.id)
+    assert s["biogenic_co2e_separate"] == pytest.approx(20.0)
+    assert s["total_co2e"] == pytest.approx(1.0)             # never netted
