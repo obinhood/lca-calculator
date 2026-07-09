@@ -7,6 +7,9 @@ class Organisation(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True, nullable=False)
     sector = Column(String, nullable=True)
+    # SHA-256 hash of the org's API key (the plaintext key is returned exactly
+    # once at registration and never stored).
+    api_key_hash = Column(String, unique=True, nullable=True, index=True)
     # GHG Protocol consolidation approach: operational_control | financial_control | equity_share.
     # NOTE: stored for provenance but NOT yet wired into the calc engine — every run currently
     # includes 100% of the org's own activities. Multi-entity roll-up / equity-share weighting
@@ -28,9 +31,16 @@ class ActivityRecord(Base):
     scope = Column(String)  # 1,2,3 - set later
     mapping_confidence = Column(Float)  # 0-1
     factor_id = Column(Integer, ForeignKey("emission_factors.id"), nullable=True)
+    # Human-review gate (Gap 6): coarse resolver matches are SUGGESTED, not bound.
+    # factor_id is only set by an exact match (auto) or a human decision.
+    suggested_factor_id = Column(Integer, ForeignKey("emission_factors.id"), nullable=True)
+    mapping_status = Column(String, default="unmapped")  # unmapped | auto | needs_review | approved | overridden
+    mapping_basis = Column(String, nullable=True)  # exact | category_geo | category_only | fuzzy_subcategory
     provenance = Column(String)  # process/eeio/hybrid
 
-    factor = relationship("EmissionFactor", back_populates="activities")
+    factor = relationship("EmissionFactor", back_populates="activities",
+                          foreign_keys=[factor_id])
+    suggested_factor = relationship("EmissionFactor", foreign_keys=[suggested_factor_id])
 
 class EmissionFactor(Base):
     __tablename__ = "emission_factors"
@@ -56,7 +66,8 @@ class EmissionFactor(Base):
     ch4_origin = Column(String, nullable=True)
     supersedes_id = Column(Integer, nullable=True)
 
-    activities = relationship("ActivityRecord", back_populates="factor")
+    activities = relationship("ActivityRecord", back_populates="factor",
+                              foreign_keys="ActivityRecord.factor_id")
 
     @property
     def has_gas_breakdown(self) -> bool:

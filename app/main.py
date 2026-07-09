@@ -1,22 +1,33 @@
-from fastapi import FastAPI, UploadFile, File, Depends, Query, HTTPException
+import hashlib
+import math
+import secrets
+from typing import Optional
+
+import pandas as pd
+from fastapi import FastAPI, UploadFile, File, Depends, Query, Header, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.orm import Session
-from typing import Optional
-import pandas as pd
 
 from .database import SessionLocal
-from .models import Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun, MarketInstrument
+from .models import (
+    Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun,
+    MarketInstrument,
+)
 from .services.ingestion import parse_csv
 from .services.qa import check_records
-from .services.resolver import resolve_factor, suggest_subcategory
-from .services.calc import compute_co2e, ReportingPeriodError
+from .services.resolver import auto_map_activity
+from .services.calc import compute_co2e, ReportingPeriodError, _parse_iso_date
 from .reports.summary import summary
 
-app = FastAPI(title="Carbon Footprint MVP", version="0.2.0")
+app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 
 # Schema is managed by alembic (scripts/init_db.py runs `upgrade head` + seeds).
 # A create_all here would create unstamped tables and diverge from the migration
 # chain, so it was removed deliberately.
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_UPLOAD_ROWS = 50_000
+
 
 def get_db():
     db = SessionLocal()
@@ -25,73 +36,147 @@ def get_db():
     finally:
         db.close()
 
-def require_org(db: Session, org_name: str) -> Organisation:
-    """Resolve an organisation or 404. Never return None to a caller — an
-    unresolved org must not fall through to an unscoped ('any tenant') query."""
-    org = db.query(Organisation).filter(Organisation.name == org_name).first()
-    if not org:
-        raise HTTPException(status_code=404, detail=f"unknown organisation {org_name!r}")
+
+def _hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def current_org(x_api_key: str = Header(...), db: Session = Depends(get_db)) -> Organisation:
+    """Resolve the calling organisation from its API key — the ONLY way any
+    org-scoped endpoint identifies a tenant (org names are not credentials)."""
+    org = db.query(Organisation).filter(
+        Organisation.api_key_hash == _hash_key(x_api_key)).first()
+    if org is None:
+        raise HTTPException(status_code=401, detail="invalid API key")
     return org
 
+
+@app.post("/organisations")
+def register_organisation(name: str = Query(...), sector: Optional[str] = None,
+                          db: Session = Depends(get_db)):
+    """Register an organisation. The API key is returned ONCE — store it safely."""
+    if db.query(Organisation).filter(Organisation.name == name).first():
+        raise HTTPException(status_code=409, detail=f"organisation {name!r} already exists")
+    key = secrets.token_urlsafe(32)
+    org = Organisation(name=name, sector=sector, api_key_hash=_hash_key(key))
+    db.add(org); db.commit(); db.refresh(org)
+    return {"id": org.id, "name": org.name, "api_key": key,
+            "note": "Store this key now; it is not retrievable later."}
+
+
 @app.post("/activities/upload_csv")
-async def upload_activities(file: UploadFile = File(...), org_name: str = Query("Demo Org"), db: Session = Depends(get_db)):
+async def upload_activities(file: UploadFile = File(...),
+                            org: Organisation = Depends(current_org),
+                            db: Session = Depends(get_db)):
     content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"upload exceeds {MAX_UPLOAD_BYTES} bytes")
     df = parse_csv(content, filename=file.filename)
+    if len(df) > MAX_UPLOAD_ROWS:
+        raise HTTPException(status_code=413, detail=f"upload exceeds {MAX_UPLOAD_ROWS} rows")
     df, issues = check_records(df)
 
-    # Upsert organisation
-    org = db.query(Organisation).filter(Organisation.name==org_name).first()
-    if not org:
-        org = Organisation(name=org_name)
-        db.add(org); db.commit(); db.refresh(org)
-
-    # Persist activities
     recs = []
     for _, r in df.iterrows():
         recs.append(ActivityRecord(
-            organisation_id = org.id,
-            date = str(r["date"]),
-            category = (r["category"] or "").strip().lower(),
-            subcategory = (str(r["subcategory"]) if r["subcategory"] is not None else "").strip(),
-            description = r["description"],
-            quantity = float(r["quantity"]) if pd.notna(r["quantity"]) else None,
-            unit = (r["unit"] or "").strip(),
-            geo = (r["geo"] or "GB").strip(),
-            source_file = r["source_file"],
-            provenance = "process"
+            organisation_id=org.id,
+            date=str(r["date"]),
+            category=(r["category"] or "").strip().lower(),
+            subcategory=(str(r["subcategory"]) if r["subcategory"] is not None else "").strip(),
+            description=r["description"],
+            quantity=float(r["quantity"]) if pd.notna(r["quantity"]) else None,
+            unit=(r["unit"] or "").strip(),
+            geo=(r["geo"] or "GB").strip(),
+            source_file=r["source_file"],
+            provenance="process",
         ))
     db.add_all(recs); db.commit()
 
-    # Auto map simple factors (deterministic) — scoped to THIS org's unmapped rows only.
-    acts = db.query(ActivityRecord).filter(
-        ActivityRecord.organisation_id == org.id,
-        ActivityRecord.factor_id == None,
-    ).all()
-    for a in acts:
-        # try subcategory suggestion from description if missing
-        subcat = a.subcategory or suggest_subcategory(db, a.category, a.description or "")
-        ef = resolve_factor(db, a.category, subcat or "", a.geo, gwp_set="AR6")
-        if ef:
-            a.factor_id = ef.id
-            a.mapping_confidence = 1.0 if subcat or a.subcategory else 0.8
+    # Mapping policy (Gap 6): exact matches bind automatically; coarser matches
+    # become suggestions in the review queue; nothing coarse binds silently.
+    statuses = {"auto": 0, "needs_review": 0, "unmapped": 0}
+    for a in db.query(ActivityRecord).filter(
+            ActivityRecord.organisation_id == org.id,
+            ActivityRecord.factor_id.is_(None),
+            ActivityRecord.mapping_status.in_(["unmapped", None])).all():
+        statuses[auto_map_activity(db, a)] += 1
     db.commit()
 
-    return JSONResponse({"records_ingested": len(recs), "organisation_id": org.id, "issues": issues})
+    return JSONResponse({"records_ingested": len(recs), "organisation_id": org.id,
+                         "mapping": statuses, "issues": issues})
+
+
+@app.get("/mappings/review")
+def list_review_queue(org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    acts = db.query(ActivityRecord).filter(
+        ActivityRecord.organisation_id == org.id,
+        ActivityRecord.mapping_status == "needs_review").limit(500).all()
+    out = []
+    for a in acts:
+        sf = a.suggested_factor
+        out.append({
+            "activity_id": a.id, "date": a.date, "category": a.category,
+            "subcategory": a.subcategory, "description": a.description,
+            "quantity": a.quantity, "unit": a.unit, "geo": a.geo,
+            "mapping_basis": a.mapping_basis, "mapping_confidence": a.mapping_confidence,
+            "suggested_factor": None if sf is None else {
+                "id": sf.id, "source": sf.source, "version": sf.version,
+                "category": sf.category, "subcategory": sf.subcategory,
+                "geography": sf.geography, "unit": sf.unit, "value": sf.value,
+            },
+        })
+    return out
+
+
+def _get_own_activity(db: Session, org: Organisation, activity_id: int) -> ActivityRecord:
+    a = db.get(ActivityRecord, activity_id)
+    if a is None or a.organisation_id != org.id:
+        raise HTTPException(status_code=404, detail="activity not found for this organisation")
+    return a
+
+
+@app.post("/mappings/{activity_id}/approve")
+def approve_mapping(activity_id: int, org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+    a = _get_own_activity(db, org, activity_id)
+    if a.mapping_status != "needs_review" or a.suggested_factor_id is None:
+        raise HTTPException(status_code=400, detail="activity is not awaiting review")
+    a.factor_id = a.suggested_factor_id
+    a.mapping_status = "approved"
+    db.commit()
+    return {"activity_id": a.id, "factor_id": a.factor_id, "mapping_status": a.mapping_status}
+
+
+@app.post("/mappings/{activity_id}/override")
+def override_mapping(activity_id: int, factor_id: int = Query(...),
+                     org: Organisation = Depends(current_org),
+                     db: Session = Depends(get_db)):
+    a = _get_own_activity(db, org, activity_id)
+    factor = db.get(EmissionFactor, factor_id)
+    if factor is None:
+        raise HTTPException(status_code=404, detail="emission factor not found")
+    a.factor_id = factor.id
+    a.mapping_status = "overridden"
+    a.mapping_confidence = 1.0   # human decision
+    db.commit()
+    return {"activity_id": a.id, "factor_id": a.factor_id, "mapping_status": a.mapping_status}
+
 
 @app.post("/reporting_periods")
-def create_reporting_period(org_name: str = Query(...), label: str = Query(...),
+def create_reporting_period(label: str = Query(...),
                             start_date: Optional[str] = None, end_date: Optional[str] = None,
+                            org: Organisation = Depends(current_org),
                             db: Session = Depends(get_db)):
-    org = require_org(db, org_name)
     period = ReportingPeriod(organisation_id=org.id, label=label,
                              start_date=start_date, end_date=end_date, frozen=False)
     db.add(period); db.commit(); db.refresh(period)
     return {"id": period.id, "organisation_id": org.id, "label": period.label}
 
+
 @app.post("/reporting_periods/{period_id}/freeze")
-def freeze_reporting_period(period_id: int, org_name: str = Query(...),
+def freeze_reporting_period(period_id: int, org: Organisation = Depends(current_org),
                             db: Session = Depends(get_db)):
-    org = require_org(db, org_name)
     period = db.get(ReportingPeriod, period_id)
     if period is None or period.organisation_id != org.id:
         raise HTTPException(status_code=404, detail="reporting period not found for this organisation")
@@ -99,20 +184,17 @@ def freeze_reporting_period(period_id: int, org_name: str = Query(...),
     db.commit()
     return {"id": period.id, "frozen": True}
 
+
 @app.post("/market_instruments")
-def create_market_instrument(org_name: str = Query(...),
-                             instrument_type: str = Query(...),
+def create_market_instrument(instrument_type: str = Query(...),
                              kg_co2e_per_kwh: float = Query(...),
                              coverage_kwh: Optional[float] = None,
                              gwp_set: str = Query("AR6"),
                              start_date: Optional[str] = None,
                              end_date: Optional[str] = None,
                              description: Optional[str] = None,
+                             org: Organisation = Depends(current_org),
                              db: Session = Depends(get_db)):
-    import math
-    from .services.calc import _parse_iso_date
-
-    org = require_org(db, org_name)
     allowed = {"supplier_specific", "ppa", "rec", "residual_mix"}
     contractual = {"supplier_specific", "ppa", "rec"}
     if instrument_type not in allowed:
@@ -139,38 +221,44 @@ def create_market_instrument(org_name: str = Query(...),
             "kg_co2e_per_kwh": inst.kg_co2e_per_kwh, "coverage_kwh": inst.coverage_kwh,
             "gwp_set": inst.gwp_set}
 
+
 @app.post("/calculate/run")
-def run_calculation(org_name: str = Query("Demo Org"), gwp_set: str = Query("AR6"),
-                    reporting_period_id: Optional[int] = None, db: Session = Depends(get_db)):
-    org = require_org(db, org_name)
+def run_calculation(gwp_set: str = Query("AR6"),
+                    reporting_period_id: Optional[int] = None,
+                    org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
     try:
         run = compute_co2e(db, org.id, gwp_set=gwp_set, reporting_period_id=reporting_period_id)
     except ReportingPeriodError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return JSONResponse(summary(db, organisation_id=org.id, run_id=run.id))
 
+
 @app.get("/results/summary")
-def get_summary(org_name: str = Query("Demo Org"), run_id: Optional[int] = None,
+def get_summary(run_id: Optional[int] = None,
+                org: Organisation = Depends(current_org),
                 db: Session = Depends(get_db)):
-    org = require_org(db, org_name)
     return JSONResponse(summary(db, organisation_id=org.id, run_id=run_id))
 
+
 @app.get("/runs")
-def list_runs(org_name: str = Query("Demo Org"), db: Session = Depends(get_db)):
-    org = require_org(db, org_name)
+def list_runs(org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     runs = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
         .order_by(CalculationRun.id.desc()).limit(50).all()
     return [{"id": r.id, "created_at": r.created_at, "gwp_set": r.gwp_set, "status": r.status,
-             "total_co2e": r.total_co2e, "mapped": r.mapped, "total_activities": r.total_activities}
+             "total_co2e": r.total_co2e, "total_co2e_market": r.total_co2e_market,
+             "mapped": r.mapped, "total_activities": r.total_activities}
             for r in runs]
 
+
 @app.get("/reports/summary.txt")
-def get_plain_report(org_name: str = Query("Demo Org"), run_id: Optional[int] = None,
+def get_plain_report(run_id: Optional[int] = None,
+                     org: Organisation = Depends(current_org),
                      db: Session = Depends(get_db)):
-    org = require_org(db, org_name)
     s = summary(db, organisation_id=org.id, run_id=run_id)
-    lines = [f"Total: {s['total_co2e']:.2f} kgCO2e"]
+    lines = [f"Total (location-based): {s['total_co2e']:.2f} kgCO2e"]
     if s.get("run"):
+        lines.append(f"Total (market-based):   {s.get('total_co2e_market', 0.0):.2f} kgCO2e")
         lines.append(f"(run #{s['run']['id']}, {s['run']['gwp_set']}, {s['run']['created_at']})")
     lines.append("\nBy scope:")
     for row in s["by_scope"]:
@@ -184,17 +272,22 @@ def get_plain_report(org_name: str = Query("Demo Org"), run_id: Optional[int] = 
                      f"{cov['activities_calculated']}/{cov['activities_total']} activities")
         if cov.get("warning"):
             lines.append("WARNING: " + cov["warning"])
+    if s.get("partial"):
+        lines.append(f"PARTIAL RUN — excluded: {s.get('partial_reasons')}")
     if s.get("notes"):
         lines.append("\nNotes: " + s["notes"])
     return PlainTextResponse("\n".join(lines))
 
+
 @app.get("/factors")
-def list_factors(db: Session = Depends(get_db), category: Optional[str]=None, geo: Optional[str]=None):
+def list_factors(db: Session = Depends(get_db), category: Optional[str] = None,
+                 geo: Optional[str] = None):
     q = db.query(EmissionFactor)
     if category:
-        q = q.filter(EmissionFactor.category==category)
+        q = q.filter(EmissionFactor.category == category)
     if geo:
-        q = q.filter(EmissionFactor.geography==geo)
+        q = q.filter(EmissionFactor.geography == geo)
     facs = q.limit(200).all()
     return [{"id": f.id, "src": f.source, "ver": f.version, "geo": f.geography, "year": f.year,
-             "cat": f.category, "subcat": f.subcategory, "unit": f.unit, "gwp": f.gwp_set, "value": f.value} for f in facs]
+             "cat": f.category, "subcat": f.subcategory, "unit": f.unit, "gwp": f.gwp_set,
+             "value": f.value} for f in facs]

@@ -1,32 +1,46 @@
+"""Ingestion QA: flag problems loudly, never silently drop or guess.
+
+Earlier versions dropped non-positive rows and guessed missing units from the
+category (gas billed in kWh vs m3 makes that a silent order-of-magnitude bet).
+Now every row is KEPT and surfaced as an issue; the fail-closed calc engine
+routes bad quantities/units into visible data/unit-error buckets instead.
+"""
 from typing import List, Tuple
 import pandas as pd
 
+
 def check_records(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     issues = []
-    # Basic checks
-    if (df["quantity"] <= 0).any():
-        bad = df[df["quantity"] <= 0].index.tolist()
-        issues.append(f"Non-positive quantities in rows: {bad[:10]}{'...' if len(bad)>10 else ''}")
-        df = df[df["quantity"] > 0]
+
+    def _rows(mask):
+        r = df[mask].index.tolist()
+        return f"{r[:10]}{'...' if len(r) > 10 else ''}"
+
+    nonpos = df["quantity"].notna() & (df["quantity"] <= 0)
+    if nonpos.any():
+        issues.append(f"Non-positive quantities in rows: {_rows(nonpos)} "
+                      f"(kept; negatives are excluded from totals as data errors)")
+
+    missing_qty = df["quantity"].isna()
+    if missing_qty.any():
+        issues.append(f"Missing quantities in rows: {_rows(missing_qty)} "
+                      f"(kept; excluded from totals as data errors)")
 
     missing_date = df["date"].isna() | (df["date"].astype(str).str.strip() == "")
     if missing_date.any():
-        rows = df[missing_date].index.tolist()
-        issues.append(f"Missing/unparseable dates in rows: {rows[:10]}{'...' if len(rows)>10 else ''} "
+        issues.append(f"Missing/unparseable dates in rows: {_rows(missing_date)} "
                       f"(kept; excluded from period-scoped runs as data errors)")
 
     missing_unit = df["unit"].isna() | (df["unit"].astype(str).str.strip() == "")
     if missing_unit.any():
-        rows = df[missing_unit].index.tolist()
-        issues.append(f"Missing units in rows: {rows[:10]}{'...' if len(rows)>10 else ''}")
-        df.loc[missing_unit, "unit"] = df.loc[missing_unit, "category"].map({
-            "electricity":"kWh",
-            "gas":"kWh",
-            "diesel":"L",
-            "flight":"pkm",
-            "train":"pkm",
-            "car":"km",
-            "waste":"kg"
-        }).fillna("unit")
+        issues.append(f"Missing units in rows: {_rows(missing_unit)} "
+                      f"(kept; units are never guessed — these rows will fail "
+                      f"unit conversion until corrected)")
+
+    dup = df.duplicated(subset=["date", "category", "subcategory", "quantity", "unit"],
+                        keep=False) & df["quantity"].notna()
+    if dup.any():
+        issues.append(f"Possible duplicate rows (same date/category/subcategory/"
+                      f"quantity/unit): {_rows(dup)} (kept; review before reporting)")
 
     return df, issues

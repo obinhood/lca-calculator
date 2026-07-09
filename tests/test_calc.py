@@ -581,3 +581,37 @@ def test_summary_partial_flag_and_market_bases(db):
     assert s["partial"] is True
     assert s["partial_reasons"] == {"unmapped": 1}
     assert s["scope2"]["market_bases"] == {"grid_average_fallback": 1}
+
+
+# --- Phase 3: mapping review gate (Gap 6) ---
+
+def test_resolver_gates_coarse_matches(db):
+    """Exact binds; Global exact binds; coarse fallbacks only suggest."""
+    from app.services.resolver import auto_map_activity
+    org = _org(db)
+    f_gb = _seed_electricity_factor(db)                    # GB, subcategory ""
+    f_fl = EmissionFactor(source="TEST", version="1", geography="Global", year=2024,
+                          category="flight", subcategory="short_haul_economy",
+                          unit="pkm", gwp_set="AR6", value=0.145)
+    db.add(f_fl); db.commit(); db.refresh(f_fl)
+
+    a1 = _activity(db, org.id, None, quantity=100, unit="kWh")               # exact GB
+    a2 = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="flight",
+                        subcategory="short_haul_economy", description="", quantity=900,
+                        unit="pkm", geo="GB")
+    a3 = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="electricity",
+                        subcategory="", description="", quantity=500, unit="kWh", geo="DE")
+    db.add_all([a2, a3]); db.commit(); db.refresh(a2); db.refresh(a3)
+
+    assert auto_map_activity(db, a1) == "auto"             # exact -> bound
+    assert a1.factor_id == f_gb.id
+    assert auto_map_activity(db, a2) == "auto"             # Global exact -> bound
+    assert a2.factor_id == f_fl.id and a2.mapping_basis == "exact_global"
+    assert auto_map_activity(db, a3) == "needs_review"     # coarse -> suggested only
+    assert a3.factor_id is None and a3.suggested_factor_id == f_gb.id
+    db.commit()
+
+    # Unreviewed suggestion stays OUT of totals (visible as unmapped).
+    run = compute_co2e(db, org.id)
+    assert run.unmapped == 1
+    assert run.mapped == 2

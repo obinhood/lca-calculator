@@ -22,6 +22,12 @@ def parse_csv(file_bytes: bytes, filename: str) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = None
 
+    # Normalise string columns: missing cells become "" — never the string
+    # "nan", which would defeat exact factor matching downstream.
+    for col in ("category", "subcategory", "description", "unit", "geo"):
+        df[col] = df[col].fillna("").astype(str).str.strip()
+        df.loc[df[col].str.lower() == "nan", col] = ""
+
     # Ensure types
     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
     # Normalise dates to zero-padded ISO (YYYY-MM-DD); unparseable/missing -> ""
