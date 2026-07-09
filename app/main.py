@@ -18,6 +18,7 @@ from .services.qa import check_records
 from .services.resolver import auto_map_activity
 from .services.calc import compute_co2e, ReportingPeriodError, _parse_iso_date
 from .reports.summary import summary
+from .reports.secr import secr_report
 
 app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 
@@ -300,6 +301,21 @@ def get_plain_report(run_id: Optional[int] = None,
     if s.get("notes"):
         lines.append("\nNotes: " + s["notes"])
     return PlainTextResponse("\n".join(lines))
+
+
+@app.get("/reports/secr")
+def get_secr_report(run_id: Optional[int] = None,
+                    intensity_denominator: Optional[float] = None,
+                    intensity_denominator_unit: Optional[str] = None,
+                    org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+    """UK SECR disclosure payload with pre-submission validation gates."""
+    if intensity_denominator is not None and (
+            not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
+        raise HTTPException(status_code=400, detail="intensity_denominator must be a finite number > 0")
+    return JSONResponse(secr_report(db, org.id, run_id=run_id,
+                                    intensity_denominator=intensity_denominator,
+                                    intensity_denominator_unit=intensity_denominator_unit))
 
 
 @app.get("/factors")

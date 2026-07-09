@@ -1,0 +1,137 @@
+"""UK SECR (Streamlined Energy & Carbon Reporting) disclosure renderer.
+
+Renders one immutable CalculationRun into the SECR datapoints a large unquoted
+UK company / LLP must publish in its directors' report:
+  * UK energy use (kWh) — electricity, gas, transport fuel
+  * Associated Scope 1 & 2 GHG emissions (tCO2e), Scope 2 dual-reported
+  * At least one intensity ratio
+  * A methodology statement
+
+Fail-closed disclosure: the report always states whether it is disclosure-ready
+and WHY NOT if it isn't (partial run, unmapped activities, stale run) — a
+pre-submission validation gate, not a silent pass.
+"""
+import json
+from typing import Optional
+
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+from ..models import ActivityRecord, CalculationRun, EmissionLineItem, EmissionFactor
+from ..services.units import convert, UnitConversionError
+from .summary import summary
+
+# Energy content used to express transport fuel as kWh for the SECR energy
+# figure. DEMO constant (net CV, DEFRA-style); replace with the licensed
+# DEFRA value for real use — deliberately named and surfaced in the report.
+DIESEL_KWH_PER_LITRE_DEMO = 10.0
+
+# Carriers that count toward the SECR "energy use" figure and how to get kWh.
+_ENERGY_CARRIERS = ("electricity", "gas", "diesel")
+
+
+def _energy_kwh(db: Session, run: CalculationRun) -> dict:
+    """kWh of energy use per carrier for the activities in this run."""
+    rows = db.query(ActivityRecord).join(
+        EmissionLineItem, EmissionLineItem.activity_id == ActivityRecord.id)\
+        .filter(EmissionLineItem.run_id == run.id,
+                EmissionLineItem.method == "location",
+                ActivityRecord.category.in_(_ENERGY_CARRIERS)).all()
+    out = {c: 0.0 for c in _ENERGY_CARRIERS}
+    notes = []
+    for a in rows:
+        try:
+            if a.category == "diesel":
+                litres = convert(a.quantity, a.unit, "L")
+                out["diesel"] += litres * DIESEL_KWH_PER_LITRE_DEMO
+                notes.append(f"diesel converted at DEMO constant "
+                             f"{DIESEL_KWH_PER_LITRE_DEMO} kWh/L")
+            else:
+                out[a.category] += convert(a.quantity, a.unit, "kWh")
+        except UnitConversionError as exc:
+            notes.append(f"activity {a.id} excluded from energy figure: {exc}")
+    out["total_kwh"] = sum(v for k, v in out.items() if k in _ENERGY_CARRIERS)
+    out["notes"] = sorted(set(notes))
+    return out
+
+
+def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
+                intensity_denominator: Optional[float] = None,
+                intensity_denominator_unit: Optional[str] = None) -> dict:
+    """SECR disclosure payload for one run (latest for the org by default)."""
+    s = summary(db, organisation_id=organisation_id, run_id=run_id)
+    run_info = s.get("run")
+    if run_info is None:
+        return {"disclosure_ready": False,
+                "blockers": ["no calculation run exists — upload activities and run a calculation"]}
+    run = db.get(CalculationRun, run_info["id"])
+
+    by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}
+    scope1_kg = by_scope.get("1", 0.0)
+    scope2_loc_kg = s["scope2"]["location_based"]
+    scope2_mkt_kg = s["scope2"]["market_based"]
+    scope3_kg = by_scope.get("3", 0.0)
+
+    # Pre-submission validation gates (fail-closed disclosure).
+    blockers = []
+    cov = s["coverage"]
+    if s.get("partial"):
+        blockers.append(f"run is PARTIAL — excluded activities: {s['partial_reasons']}")
+    if cov["stale"]:
+        blockers.append("run is STALE relative to current activity data — recompute first")
+    if cov["coverage_pct"] < 100.0:
+        blockers.append(f"coverage is {cov['coverage_pct']}% (count-based) — "
+                        f"resolve unmapped/errored activities or document exclusions")
+
+    energy = _energy_kwh(db, run)
+
+    intensity = None
+    if intensity_denominator and intensity_denominator > 0:
+        intensity = {
+            "tco2e_scope1_and_2_location": round((scope1_kg + scope2_loc_kg) / 1000.0
+                                                 / intensity_denominator, 6),
+            "denominator": intensity_denominator,
+            "denominator_unit": intensity_denominator_unit or "unit",
+        }
+    else:
+        blockers.append("no intensity ratio denominator supplied "
+                        "(SECR requires at least one intensity ratio)")
+
+    ef_sources = db.query(EmissionFactor.source, EmissionFactor.version)\
+        .join(ActivityRecord, ActivityRecord.factor_id == EmissionFactor.id)\
+        .join(EmissionLineItem, EmissionLineItem.activity_id == ActivityRecord.id)\
+        .filter(EmissionLineItem.run_id == run.id).distinct().all()
+
+    methodology = (
+        f"Prepared in accordance with the GHG Protocol Corporate Standard using the "
+        f"operational approach reflected in the underlying activity data. Emission factors: "
+        f"{', '.join(sorted(f'{src} v{ver}' for src, ver in ef_sources)) or 'none'}. "
+        f"GWP set {run.gwp_set} (IPCC 100-year), applied per gas at calculation time where "
+        f"per-gas factors are available. Scope 2 dual-reported (location- and market-based, "
+        f"GHG Protocol Scope 2 Guidance, volume-matched instruments). "
+        f"Immutable calculation run #{run.id} of {run.created_at}; every figure is traceable "
+        f"to source records and pinned factor versions. "
+        f"Coverage: {cov['coverage_pct']}% of activity records ({cov['coverage_basis']})."
+    )
+
+    return {
+        "framework": "UK SECR",
+        "disclosure_ready": not blockers,
+        "blockers": blockers,
+        "run": run_info,
+        "reporting_period_id": run.reporting_period_id,
+        "emissions_tco2e": {
+            "scope1": round(scope1_kg / 1000.0, 6),
+            "scope2_location_based": round(scope2_loc_kg / 1000.0, 6),
+            "scope2_market_based": round(scope2_mkt_kg / 1000.0, 6),
+            "scope1_and_2_location": round((scope1_kg + scope2_loc_kg) / 1000.0, 6),
+            "scope3_voluntary": round(scope3_kg / 1000.0, 6),
+            "total_location_based": round(run.total_co2e / 1000.0, 6),
+            "total_market_based": round(run.total_co2e_market / 1000.0, 6),
+        },
+        "energy_use_kwh": energy,
+        "intensity_ratio": intensity,
+        "methodology_statement": methodology,
+        "coverage": cov,
+        "exclusions": s["exclusions"],
+    }
