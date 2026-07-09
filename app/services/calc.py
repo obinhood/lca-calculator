@@ -5,6 +5,7 @@ from typing import Optional, List
 from sqlalchemy.orm import Session
 from ..models import (
     ActivityRecord, EmissionFactor, CalculationRun, EmissionLineItem, ReportingPeriod,
+    MarketInstrument,
 )
 from .units import convert, UnitConversionError, QuantityError
 from .gwp import co2e_from_gases, gwp
@@ -22,6 +23,34 @@ SCOPE_RULES = {
 
 class ReportingPeriodError(ValueError):
     """Invalid reporting period for a calculation (wrong org, frozen, or missing)."""
+
+
+# GHG Protocol Scope 2 Guidance instrument hierarchy (lower rank = higher precedence).
+_INSTRUMENT_RANK = {"supplier_specific": 0, "ppa": 0, "rec": 0, "residual_mix": 1}
+
+
+def _resolve_market_instrument(db: Session, organisation_id: int,
+                               activity_date: Optional[str]) -> Optional[MarketInstrument]:
+    """Best market-based instrument for an activity, per the Scope 2 hierarchy.
+
+    Contractual instruments (supplier-specific / PPA / REC) beat residual mix;
+    an instrument with a date window only applies to activities inside it.
+    Returns None when nothing applies (caller falls back to the grid average).
+    """
+    candidates = db.query(MarketInstrument).filter(
+        MarketInstrument.organisation_id == organisation_id).all()
+    applicable = []
+    for inst in candidates:
+        if activity_date:
+            if inst.start_date and activity_date < inst.start_date:
+                continue
+            if inst.end_date and activity_date > inst.end_date:
+                continue
+        applicable.append(inst)
+    if not applicable:
+        return None
+    applicable.sort(key=lambda i: (_INSTRUMENT_RANK.get(i.instrument_type, 2), i.id))
+    return applicable[0]
 
 
 def _utcnow_iso() -> str:
@@ -116,7 +145,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         db.flush()  # assign run.id for the line-item FK
 
         line_items = []
-        total = 0.0
+        total = 0.0          # location-based total (headline)
+        total_market = 0.0   # dual reporting: Scope 2 swapped to market basis
         for a in acts:
             if not a.factor:
                 run.unmapped += 1
@@ -170,8 +200,41 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             total += co2e
             run.mapped += 1
 
+            # GHG Protocol dual Scope 2: every Scope 2 activity ALSO gets a
+            # market-based line item (contractual instrument, else grid fallback).
+            if scope == "2":
+                market_co2e, market_detail = co2e, dict(detail)
+                inst = _resolve_market_instrument(db, organisation_id, a.date)
+                if inst is not None:
+                    try:
+                        kwh = convert(a.quantity, a.unit, "kWh")
+                        market_co2e = kwh * inst.kg_co2e_per_kwh
+                        market_detail = {
+                            "instrument_id": inst.id,
+                            "instrument_type": inst.instrument_type,
+                            "kg_co2e_per_kwh": inst.kg_co2e_per_kwh,
+                            "quantity_kwh": kwh,
+                            "method_basis": "contractual_instrument",
+                        }
+                    except UnitConversionError as exc:
+                        # Activity not expressible in kWh: fall back, but say so.
+                        market_detail["method_basis"] = "grid_average_fallback"
+                        market_detail["fallback_reason"] = str(exc)
+                else:
+                    # No instrument (and no residual mix on file): Scope 2 Guidance
+                    # falls back to the grid-average (= location) figure.
+                    market_detail["method_basis"] = "grid_average_fallback"
+                line_items.append(EmissionLineItem(
+                    run_id=run.id, activity_id=a.id, scope=scope, method="market",
+                    co2e=market_co2e, details=json.dumps(market_detail),
+                ))
+                total_market += market_co2e
+            else:
+                total_market += co2e
+
         db.add_all(line_items)
         run.total_co2e = total
+        run.total_co2e_market = total_market
         run.notes = json.dumps(errors)
         run.status = "complete"
         db.commit()

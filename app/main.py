@@ -5,7 +5,7 @@ from typing import Optional
 import pandas as pd
 
 from .database import SessionLocal, engine
-from .models import Base, Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun
+from .models import Base, Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun, MarketInstrument
 from .services.ingestion import parse_csv
 from .services.qa import check_records
 from .services.resolver import resolve_factor, suggest_subcategory
@@ -97,6 +97,27 @@ def freeze_reporting_period(period_id: int, org_name: str = Query(...),
     period.frozen = True
     db.commit()
     return {"id": period.id, "frozen": True}
+
+@app.post("/market_instruments")
+def create_market_instrument(org_name: str = Query(...),
+                             instrument_type: str = Query(...),
+                             kg_co2e_per_kwh: float = Query(...),
+                             start_date: Optional[str] = None,
+                             end_date: Optional[str] = None,
+                             description: Optional[str] = None,
+                             db: Session = Depends(get_db)):
+    org = require_org(db, org_name)
+    allowed = {"supplier_specific", "ppa", "rec", "residual_mix"}
+    if instrument_type not in allowed:
+        raise HTTPException(status_code=400, detail=f"instrument_type must be one of {sorted(allowed)}")
+    if kg_co2e_per_kwh < 0:
+        raise HTTPException(status_code=400, detail="kg_co2e_per_kwh must be >= 0")
+    inst = MarketInstrument(organisation_id=org.id, instrument_type=instrument_type,
+                            kg_co2e_per_kwh=kg_co2e_per_kwh, start_date=start_date,
+                            end_date=end_date, description=description)
+    db.add(inst); db.commit(); db.refresh(inst)
+    return {"id": inst.id, "organisation_id": org.id, "instrument_type": inst.instrument_type,
+            "kg_co2e_per_kwh": inst.kg_co2e_per_kwh}
 
 @app.post("/calculate/run")
 def run_calculation(org_name: str = Query("Demo Org"), gwp_set: str = Query("AR6"),

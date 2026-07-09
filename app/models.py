@@ -59,6 +59,23 @@ class EmissionFactor(Base):
     def has_gas_breakdown(self) -> bool:
         return any(v is not None for v in (self.kg_co2, self.kg_ch4, self.kg_n2o))
 
+class MarketInstrument(Base):
+    """A contractual instrument for market-based Scope 2 (GHG Protocol Scope 2 Guidance).
+
+    Hierarchy honoured by the calc engine: supplier_specific / ppa / rec first,
+    then residual_mix, then grid-average fallback (= the location factor).
+    ``kg_co2e_per_kwh`` is the contractual emission rate (0.0 for RECs/renewable PPAs).
+    """
+    __tablename__ = "market_instruments"
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    instrument_type = Column(String, nullable=False)  # supplier_specific | ppa | rec | residual_mix
+    kg_co2e_per_kwh = Column(Float, nullable=False)
+    start_date = Column(String, nullable=True)  # ISO; window the instrument covers
+    end_date = Column(String, nullable=True)
+    description = Column(Text)
+
+
 class ReportingPeriod(Base):
     """A named reporting window for an organisation (e.g. FY2025).
 
@@ -95,7 +112,9 @@ class CalculationRun(Base):
     unit_errors = Column(Integer, default=0)
     data_errors = Column(Integer, default=0)
     gwp_mismatch = Column(Integer, default=0)
-    total_co2e = Column(Float, default=0.0)
+    total_co2e = Column(Float, default=0.0)          # location-based total (headline)
+    # GHG Protocol dual reporting: same total with Scope 2 swapped to market-based.
+    total_co2e_market = Column(Float, default=0.0)
     notes = Column(Text)  # JSON: per-activity exclusion reasons
     # Fingerprint of the org's activity set at compute time (id/factor/quantity/unit).
     # Lets a reader detect that a run is stale even when the activity COUNT is unchanged

@@ -2,7 +2,7 @@ import pytest
 
 from app.models import (
     EmissionFactor, ActivityRecord, EmissionLineItem, Organisation, CalculationRun,
-    ReportingPeriod,
+    ReportingPeriod, MarketInstrument,
 )
 from app.services.calc import compute_co2e, compute_activity_co2e, ReportingPeriodError
 from app.services.units import UnitConversionError
@@ -44,7 +44,9 @@ def test_mwh_activity_is_unit_converted(db):
     f = _seed_electricity_factor(db)
     a = _activity(db, org.id, f.id, quantity=1.2, unit="MWh")
     run = compute_co2e(db, org.id)
-    li = db.query(EmissionLineItem).filter(EmissionLineItem.activity_id == a.id).one()
+    li = db.query(EmissionLineItem).filter(
+        EmissionLineItem.activity_id == a.id,
+        EmissionLineItem.method == "location").one()
     assert li.co2e == pytest.approx(204.0)
     assert run.mapped == 1
 
@@ -79,8 +81,9 @@ def test_runs_are_immutable_history(db):
     assert run2.id != run1.id
     assert db.query(CalculationRun).count() == 2
     # run1's line items are NOT deleted by run2 (no destructive global recompute).
-    assert len(_items(db, run1)) == 1
-    assert len(_items(db, run2)) == 1
+    # Scope 2 electricity => 2 lines per run (location + market dual reporting).
+    assert len(_items(db, run1)) == 2
+    assert len(_items(db, run2)) == 2
 
 
 def test_calculation_is_org_scoped(db):
@@ -325,3 +328,101 @@ def test_aggregate_factor_still_vintage_checked(db):
     run = compute_co2e(db, org.id, gwp_set="AR5")
     assert run.gwp_mismatch == 1
     assert run.mapped == 0
+
+
+# --- Phase 2c: dual Scope 2 (location + market) — Gap 3 ---
+
+def _market_lines(db, run):
+    return db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id, EmissionLineItem.method == "market").all()
+
+
+def test_scope2_gets_dual_line_items_with_grid_fallback(db):
+    """No instrument on file -> market line exists and equals location (fallback)."""
+    import json
+    org = _org(db)
+    f = _seed_electricity_factor(db)                      # 0.17/kWh grid average
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    run = compute_co2e(db, org.id)
+    market = _market_lines(db, run)
+    assert len(market) == 1
+    assert market[0].co2e == pytest.approx(170.0)
+    assert json.loads(market[0].details)["method_basis"] == "grid_average_fallback"
+    assert run.total_co2e_market == pytest.approx(run.total_co2e)
+
+
+def test_rec_zeroes_market_scope2(db):
+    """A REC (0 kgCO2e/kWh) zeroes market-based Scope 2; location unchanged."""
+    org = _org(db)
+    f = _seed_electricity_factor(db)
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0)); db.commit()
+    run = compute_co2e(db, org.id)
+    assert run.total_co2e == pytest.approx(170.0)          # location headline unchanged
+    assert run.total_co2e_market == pytest.approx(0.0)     # market zeroed by REC
+    s = summary(db, organisation_id=org.id, run_id=run.id)
+    assert s["scope2"]["location_based"] == pytest.approx(170.0)
+    assert s["scope2"]["market_based"] == pytest.approx(0.0)
+
+
+def test_supplier_specific_beats_residual_mix(db):
+    """Instrument hierarchy: contractual instrument outranks residual mix."""
+    import json
+    org = _org(db)
+    f = _seed_electricity_factor(db)
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="residual_mix",
+                            kg_co2e_per_kwh=0.25))
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="supplier_specific",
+                            kg_co2e_per_kwh=0.05))
+    db.commit()
+    run = compute_co2e(db, org.id)
+    m = _market_lines(db, run)[0]
+    assert json.loads(m.details)["instrument_type"] == "supplier_specific"
+    assert m.co2e == pytest.approx(50.0)                   # 1000 kWh * 0.05
+
+
+def test_instrument_date_window_respected(db):
+    """An instrument outside the activity date window must not apply."""
+    import json
+    org = _org(db)
+    f = _seed_electricity_factor(db)
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")  # dated 2025-01-01
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0,
+                            start_date="2026-01-01", end_date="2026-12-31"))
+    db.commit()
+    run = compute_co2e(db, org.id)
+    m = _market_lines(db, run)[0]
+    assert json.loads(m.details)["method_basis"] == "grid_average_fallback"
+    assert run.total_co2e_market == pytest.approx(run.total_co2e)
+
+
+def test_market_instrument_is_org_scoped(db):
+    """OrgB's REC must not zero OrgA's market Scope 2."""
+    orgA, orgB = _org(db, "A"), _org(db, "B")
+    f = _seed_electricity_factor(db)
+    _activity(db, orgA.id, f.id, quantity=1000, unit="kWh")
+    db.add(MarketInstrument(organisation_id=orgB.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0)); db.commit()
+    run = compute_co2e(db, orgA.id)
+    assert run.total_co2e_market == pytest.approx(170.0)   # B's REC did not apply
+
+
+def test_scope1_and_3_have_no_market_lines_and_no_double_count(db):
+    org = _org(db)
+    f_gas = EmissionFactor(source="TEST", version="1", geography="GB", year=2024,
+                           category="gas", subcategory="", unit="kWh", gwp_set="AR6", value=0.184)
+    db.add(f_gas); db.commit(); db.refresh(f_gas)
+    f_el = _seed_electricity_factor(db)
+    _activity(db, org.id, f_gas.id, quantity=100, unit="kWh", category="gas")     # scope 1
+    _activity(db, org.id, f_el.id, quantity=1000, unit="kWh")                     # scope 2
+    run = compute_co2e(db, org.id)
+    assert len(_market_lines(db, run)) == 1                # only the scope-2 activity
+    s = summary(db, organisation_id=org.id, run_id=run.id)
+    # by_scope sums location lines only: 18.4 (scope 1) + 170 (scope 2) = total.
+    assert sum(r["co2e"] for r in s["by_scope"]) == pytest.approx(run.total_co2e)
+    assert run.total_co2e == pytest.approx(188.4)
+    # market total swaps only scope 2 (no instrument -> equal here).
+    assert run.total_co2e_market == pytest.approx(188.4)

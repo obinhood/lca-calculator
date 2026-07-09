@@ -35,11 +35,20 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         }
 
     li = EmissionLineItem
+    # Aggregations use the location-based line items only; market-based Scope 2
+    # is a parallel view of the same activities, not additional emissions.
     by_scope = db.query(li.scope, func.sum(li.co2e))\
-        .filter(li.run_id == run.id).group_by(li.scope).all()
+        .filter(li.run_id == run.id, li.method == "location").group_by(li.scope).all()
     by_cat = db.query(ActivityRecord.category, func.sum(li.co2e))\
         .join(li, li.activity_id == ActivityRecord.id)\
-        .filter(li.run_id == run.id).group_by(ActivityRecord.category).all()
+        .filter(li.run_id == run.id, li.method == "location")\
+        .group_by(ActivityRecord.category).all()
+
+    scope2_location = next((v for s, v in by_scope if s == "2"), 0.0) or 0.0
+    scope2_market = db.query(func.sum(li.co2e))\
+        .filter(li.run_id == run.id, li.method == "market").scalar() or 0.0
+    n_market_lines = db.query(func.count(li.id))\
+        .filter(li.run_id == run.id, li.method == "market").scalar() or 0
 
     return {
         "run": {
@@ -50,14 +59,21 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             "reporting_period_id": run.reporting_period_id,
             "status": run.status,
         },
-        "total_co2e": run.total_co2e,
+        "total_co2e": run.total_co2e,                     # location-based (headline)
+        "total_co2e_market": run.total_co2e_market,       # dual reporting counterpart
         "by_scope": [{"scope": s or "?", "co2e": v or 0.0} for s, v in by_scope],
         "by_category": [{"category": c or "?", "co2e": v or 0.0} for c, v in by_cat],
+        # GHG Protocol Scope 2 Guidance: dual reporting, both bases side by side.
+        "scope2": {
+            "location_based": scope2_location,
+            "market_based": scope2_market,
+            "market_line_items": n_market_lines,
+        },
         "coverage": coverage(db, run),
         # Per-activity exclusion reasons captured at compute time (assurer lineage).
         "exclusions": json.loads(run.notes or "[]"),
         "notes": "Quantities are unit-converted to factor units; incompatible units are "
-                 "rejected (not guessed). Per-gas GWP and dual Scope 2 land in Phase 2b/2c.",
+                 "rejected (not guessed). Scope 2 is dual-reported (location + market).",
     }
 
 
