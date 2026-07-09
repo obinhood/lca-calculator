@@ -73,3 +73,28 @@ def test_owner_can_read_own_run(client_env):
     body = r.json()
     assert body["run"] is not None
     assert body["total_co2e"] == pytest.approx(9999 * 0.17)
+
+
+def test_non_finite_instrument_rate_rejected(client_env):
+    """C3: inf/nan rates must 400 BEFORE any DB write (they poison totals)."""
+    client, _ = client_env
+    for bad in ("inf", "nan", "-inf"):
+        r = client.post("/market_instruments",
+                        params={"org_name": "B", "instrument_type": "residual_mix",
+                                "kg_co2e_per_kwh": bad})
+        assert r.status_code in (400, 422), bad
+
+
+def test_contractual_instrument_requires_dates(client_env):
+    client, _ = client_env
+    r = client.post("/market_instruments",
+                    params={"org_name": "B", "instrument_type": "rec",
+                            "kg_co2e_per_kwh": 0.0})
+    assert r.status_code == 400
+    assert "start_date" in r.json()["detail"]
+    # with valid dates it succeeds
+    r2 = client.post("/market_instruments",
+                     params={"org_name": "B", "instrument_type": "rec",
+                             "kg_co2e_per_kwh": 0.0, "coverage_kwh": 100,
+                             "start_date": "2025-01-01", "end_date": "2025-12-31"})
+    assert r2.status_code == 200

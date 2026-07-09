@@ -24,6 +24,9 @@ def parse_csv(file_bytes: bytes, filename: str) -> pd.DataFrame:
 
     # Ensure types
     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
-    df["date"] = df["date"].astype(str)
+    # Normalise dates to zero-padded ISO (YYYY-MM-DD); unparseable/missing -> ""
+    # (never the string "nan", which downstream date logic would have to guess at).
+    parsed = pd.to_datetime(df["date"], errors="coerce")
+    df["date"] = parsed.dt.strftime("%Y-%m-%d").fillna("")
     df["source_file"] = filename
     return df[CANON_COLUMNS]

@@ -47,8 +47,19 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
     scope2_location = next((v for s, v in by_scope if s == "2"), 0.0) or 0.0
     scope2_market = db.query(func.sum(li.co2e))\
         .filter(li.run_id == run.id, li.method == "market").scalar() or 0.0
-    n_market_lines = db.query(func.count(li.id))\
-        .filter(li.run_id == run.id, li.method == "market").scalar() or 0
+
+    # Aggregate market-basis disclosure (Scope 2 Guidance): how much consumption
+    # is contractually covered vs falling back to the grid average.
+    market_lines = db.query(li.details)\
+        .filter(li.run_id == run.id, li.method == "market").all()
+    bases = {}
+    kwh_contractual = 0.0
+    kwh_grid_fallback = 0.0
+    for (details,) in market_lines:
+        d = json.loads(details or "{}")
+        bases[d.get("method_basis", "?")] = bases.get(d.get("method_basis", "?"), 0) + 1
+        kwh_contractual += d.get("kwh_contractual", 0.0) or 0.0
+        kwh_grid_fallback += d.get("kwh_grid_fallback", 0.0) or 0.0
 
     return {
         "run": {
@@ -67,7 +78,19 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         "scope2": {
             "location_based": scope2_location,
             "market_based": scope2_market,
-            "market_line_items": n_market_lines,
+            "market_line_items": len(market_lines),
+            "market_bases": bases,
+            "kwh_contractual": kwh_contractual,
+            "kwh_grid_fallback": kwh_grid_fallback,
+        },
+        # A partial run cannot honestly answer the question asked of it — flag it
+        # at the TOP level, not only inside the nested coverage block.
+        "partial": (run.mapped or 0) < (run.total_activities or 0),
+        "partial_reasons": {
+            k: v for k, v in {
+                "unmapped": run.unmapped, "unit_errors": run.unit_errors,
+                "data_errors": run.data_errors, "gwp_mismatch": run.gwp_mismatch,
+            }.items() if v
         },
         "coverage": coverage(db, run),
         # Per-activity exclusion reasons captured at compute time (assurer lineage).
@@ -132,7 +155,7 @@ def coverage(db: Session, run: CalculationRun):
         "coverage_pct": round(100.0 * n_calc / n_total, 2) if n_total else 0.0,
         "coverage_basis": "activity_count",
         "coverage_caveat": "Count-based, NOT emissions-weighted; see largest_unmapped. "
-                           "Emissions-weighted coverage lands in Phase 2b.",
+                           "Emissions-weighted coverage is planned (analytics phase).",
         "unmapped_by_category": {c or "?": n for c, n in unmapped_by_cat},
         "largest_unmapped": [
             {"category": c or "?", "quantity": q, "unit": u} for c, q, u in largest_unmapped

@@ -4,8 +4,8 @@ from sqlalchemy.orm import Session
 from typing import Optional
 import pandas as pd
 
-from .database import SessionLocal, engine
-from .models import Base, Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun, MarketInstrument
+from .database import SessionLocal
+from .models import Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun, MarketInstrument
 from .services.ingestion import parse_csv
 from .services.qa import check_records
 from .services.resolver import resolve_factor, suggest_subcategory
@@ -14,8 +14,9 @@ from .reports.summary import summary
 
 app = FastAPI(title="Carbon Footprint MVP", version="0.2.0")
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# Schema is managed by alembic (scripts/init_db.py runs `upgrade head` + seeds).
+# A create_all here would create unstamped tables and diverge from the migration
+# chain, so it was removed deliberately.
 
 def get_db():
     db = SessionLocal()
@@ -102,22 +103,41 @@ def freeze_reporting_period(period_id: int, org_name: str = Query(...),
 def create_market_instrument(org_name: str = Query(...),
                              instrument_type: str = Query(...),
                              kg_co2e_per_kwh: float = Query(...),
+                             coverage_kwh: Optional[float] = None,
+                             gwp_set: str = Query("AR6"),
                              start_date: Optional[str] = None,
                              end_date: Optional[str] = None,
                              description: Optional[str] = None,
                              db: Session = Depends(get_db)):
+    import math
+    from .services.calc import _parse_iso_date
+
     org = require_org(db, org_name)
     allowed = {"supplier_specific", "ppa", "rec", "residual_mix"}
+    contractual = {"supplier_specific", "ppa", "rec"}
     if instrument_type not in allowed:
         raise HTTPException(status_code=400, detail=f"instrument_type must be one of {sorted(allowed)}")
-    if kg_co2e_per_kwh < 0:
-        raise HTTPException(status_code=400, detail="kg_co2e_per_kwh must be >= 0")
+    # Finiteness BEFORE any write: inf/nan would poison every future market total.
+    if not math.isfinite(kg_co2e_per_kwh) or kg_co2e_per_kwh < 0:
+        raise HTTPException(status_code=400, detail="kg_co2e_per_kwh must be a finite number >= 0")
+    if coverage_kwh is not None and (not math.isfinite(coverage_kwh) or coverage_kwh <= 0):
+        raise HTTPException(status_code=400, detail="coverage_kwh must be a finite number > 0")
+    # Real certificates have a vintage: contractual instruments must be dated so a
+    # single-year REC can't silently blanket an org's entire history.
+    if instrument_type in contractual:
+        if not (start_date and end_date):
+            raise HTTPException(status_code=400,
+                                detail="contractual instruments (rec/ppa/supplier_specific) require start_date and end_date")
+        if _parse_iso_date(start_date) is None or _parse_iso_date(end_date) is None:
+            raise HTTPException(status_code=400, detail="dates must be ISO format YYYY-MM-DD")
     inst = MarketInstrument(organisation_id=org.id, instrument_type=instrument_type,
-                            kg_co2e_per_kwh=kg_co2e_per_kwh, start_date=start_date,
+                            kg_co2e_per_kwh=kg_co2e_per_kwh, coverage_kwh=coverage_kwh,
+                            gwp_set=gwp_set, start_date=start_date,
                             end_date=end_date, description=description)
     db.add(inst); db.commit(); db.refresh(inst)
     return {"id": inst.id, "organisation_id": org.id, "instrument_type": inst.instrument_type,
-            "kg_co2e_per_kwh": inst.kg_co2e_per_kwh}
+            "kg_co2e_per_kwh": inst.kg_co2e_per_kwh, "coverage_kwh": inst.coverage_kwh,
+            "gwp_set": inst.gwp_set}
 
 @app.post("/calculate/run")
 def run_calculation(org_name: str = Query("Demo Org"), gwp_set: str = Query("AR6"),

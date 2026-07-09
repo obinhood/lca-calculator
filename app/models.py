@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Boolean, Text, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Boolean, Text, UniqueConstraint, CheckConstraint
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -51,6 +51,9 @@ class EmissionFactor(Base):
     kg_co2 = Column(Float, nullable=True)
     kg_ch4 = Column(Float, nullable=True)
     kg_n2o = Column(Float, nullable=True)
+    # CH4 origin routes the correct GWP variant: "fossil" (combustion sources) or
+    # "biogenic" (landfill/organic). NULL falls back to the blended CH4 GWP.
+    ch4_origin = Column(String, nullable=True)
     supersedes_id = Column(Integer, nullable=True)
 
     activities = relationship("ActivityRecord", back_populates="factor")
@@ -65,12 +68,24 @@ class MarketInstrument(Base):
     Hierarchy honoured by the calc engine: supplier_specific / ppa / rec first,
     then residual_mix, then grid-average fallback (= the location factor).
     ``kg_co2e_per_kwh`` is the contractual emission rate (0.0 for RECs/renewable PPAs).
+
+    Volume matching (Scope 2 Guidance Ch. 4): ``coverage_kwh`` is the kWh the
+    instrument actually covers; the calc engine allocates it cumulatively across
+    the run's electricity consumption and the remainder falls through to the next
+    instrument or the grid average. NULL = unbounded (only sensible for
+    residual_mix). ``gwp_set`` is the vintage the contractual rate was computed
+    with; an instrument is not applied to a run requesting a different set.
     """
     __tablename__ = "market_instruments"
+    __table_args__ = (
+        CheckConstraint("kg_co2e_per_kwh >= 0", name="ck_instrument_rate_nonneg"),
+    )
     id = Column(Integer, primary_key=True)
     organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
     instrument_type = Column(String, nullable=False)  # supplier_specific | ppa | rec | residual_mix
     kg_co2e_per_kwh = Column(Float, nullable=False)
+    coverage_kwh = Column(Float, nullable=True)  # kWh covered; NULL = unbounded
+    gwp_set = Column(String, nullable=True, default="AR6")
     start_date = Column(String, nullable=True)  # ISO; window the instrument covers
     end_date = Column(String, nullable=True)
     description = Column(Text)

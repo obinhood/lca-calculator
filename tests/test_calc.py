@@ -379,7 +379,9 @@ def test_supplier_specific_beats_residual_mix(db):
     db.commit()
     run = compute_co2e(db, org.id)
     m = _market_lines(db, run)[0]
-    assert json.loads(m.details)["instrument_type"] == "supplier_specific"
+    d = json.loads(m.details)
+    assert d["method_basis"] == "contractual_instrument"
+    assert d["allocations"][0]["instrument_type"] == "supplier_specific"
     assert m.co2e == pytest.approx(50.0)                   # 1000 kWh * 0.05
 
 
@@ -426,3 +428,156 @@ def test_scope1_and_3_have_no_market_lines_and_no_double_count(db):
     assert run.total_co2e == pytest.approx(188.4)
     # market total swaps only scope 2 (no instrument -> equal here).
     assert run.total_co2e_market == pytest.approx(188.4)
+
+
+# --- Phase 2b/2c verification-panel hardening ---
+
+def test_ch4_origin_routes_gwp_variant():
+    """Fossil vs biogenic CH4 must use their own GWPs, not the blended value."""
+    class F:
+        unit = "kg"; value = None
+        kg_co2 = 0.0; kg_ch4 = 1.0; kg_n2o = None
+        has_gas_breakdown = True
+        ch4_origin = "fossil"
+    fossil = compute_activity_co2e(1.0, "kg", F(), gwp_set="AR6")
+    F.ch4_origin = "biogenic"
+    biogenic = compute_activity_co2e(1.0, "kg", F(), gwp_set="AR6")
+    F.ch4_origin = None
+    blended = compute_activity_co2e(1.0, "kg", F(), gwp_set="AR6")
+    assert fossil == pytest.approx(29.8)
+    assert biogenic == pytest.approx(27.0)
+    assert blended == pytest.approx(27.9)
+
+
+def test_rec_volume_matching_partial_coverage(db):
+    """Scope 2 Guidance Ch.4: a 400 kWh REC covers 400 of 1000 kWh, not all of it."""
+    import json
+    org = _org(db)
+    f = _seed_electricity_factor(db)                      # grid 0.17/kWh
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=400.0)); db.commit()
+    run = compute_co2e(db, org.id)
+    m = _market_lines(db, run)[0]
+    d = json.loads(m.details)
+    # 400 kWh at 0.0 + 600 kWh at grid 0.17 = 102.0
+    assert m.co2e == pytest.approx(102.0)
+    assert d["method_basis"] == "partial_contractual"
+    assert d["kwh_contractual"] == pytest.approx(400.0)
+    assert d["kwh_grid_fallback"] == pytest.approx(600.0)
+    assert run.total_co2e_market == pytest.approx(102.0)
+    assert run.total_co2e == pytest.approx(170.0)
+
+
+def test_rec_volume_exhausts_across_activities(db):
+    """Volume is consumed cumulatively across the run, not reset per activity."""
+    org = _org(db)
+    f = _seed_electricity_factor(db)
+    _activity(db, org.id, f.id, quantity=400, unit="kWh")
+    _activity(db, org.id, f.id, quantity=600, unit="kWh")
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=500.0)); db.commit()
+    run = compute_co2e(db, org.id)
+    # 500 kWh covered total; remaining 500 kWh at 0.17 = 85.0
+    assert run.total_co2e_market == pytest.approx(85.0)
+    assert run.total_co2e == pytest.approx(170.0)
+
+
+def test_instrument_gwp_vintage_mismatch_not_applied(db):
+    """An AR6-vintage instrument must not enter an AR5 run's market total."""
+    import json
+    org = _org(db)
+    f = _seed_waste_factor_per_gas(db)                    # per-gas, AR5-computable
+    # electricity per-gas factor so the AR5 run computes scope 2 too
+    fe = EmissionFactor(source="TEST", version="1", geography="GB", year=2024,
+                        category="electricity", subcategory="", unit="kWh", gwp_set="AR6",
+                        value=0.17, kg_co2=0.168337, kg_ch4=0.00001, kg_n2o=0.000005,
+                        ch4_origin="fossil")
+    db.add(fe); db.commit(); db.refresh(fe)
+    _activity(db, org.id, fe.id, quantity=1000, unit="kWh")
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, gwp_set="AR6")); db.commit()
+    run5 = compute_co2e(db, org.id, gwp_set="AR5")
+    m = _market_lines(db, run5)[0]
+    d = json.loads(m.details)
+    assert d["method_basis"] == "grid_average_fallback"   # instrument skipped
+    assert d["instruments_skipped_gwp_vintage"] != []
+    # market == location under AR5 (no vintage-mixed number)
+    assert run5.total_co2e_market == pytest.approx(run5.total_co2e)
+
+
+def test_dated_instrument_never_covers_undated_activity(db):
+    """C1: an activity with no/malformed date must not match a dated instrument."""
+    import json
+    org = _org(db)
+    f = _seed_electricity_factor(db)
+    a = _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    a.date = ""; db.commit()
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0,
+                            start_date="2025-01-01", end_date="2025-12-31")); db.commit()
+    run = compute_co2e(db, org.id)
+    d = json.loads(_market_lines(db, run)[0].details)
+    assert d["method_basis"] == "grid_average_fallback"
+    assert run.total_co2e_market == pytest.approx(170.0)
+
+
+def test_malformed_date_fails_closed_in_window_check(db):
+    """C2: '2025-9-5' must not be string-compared; unparseable -> no dated match."""
+    import json
+    org = _org(db)
+    f = _seed_electricity_factor(db)
+    a = _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    a.date = "2025-9-5"; db.commit()                       # not zero-padded
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0,
+                            start_date="2025-01-01", end_date="2025-12-31")); db.commit()
+    run = compute_co2e(db, org.id)
+    d = json.loads(_market_lines(db, run)[0].details)
+    assert d["method_basis"] == "grid_average_fallback"
+
+
+def test_non_electricity_scope2_never_gets_electricity_instrument(db):
+    """C4: purchased heat/gas preset to scope 2 must not be zeroed by a REC."""
+    import json
+    org = _org(db)
+    f_gas = EmissionFactor(source="TEST", version="1", geography="GB", year=2024,
+                           category="gas", subcategory="", unit="kWh", gwp_set="AR6", value=0.184)
+    db.add(f_gas); db.commit(); db.refresh(f_gas)
+    a = _activity(db, org.id, f_gas.id, quantity=1000, unit="kWh", category="gas")
+    a.scope = "2"; db.commit()                             # preset scope 2 (purchased heat-like)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0)); db.commit()
+    run = compute_co2e(db, org.id)
+    m = _market_lines(db, run)[0]
+    d = json.loads(m.details)
+    assert d["method_basis"] == "grid_average_fallback"
+    assert "non-electricity" in d["fallback_reason"]
+    assert m.co2e == pytest.approx(184.0)                  # NOT zeroed by the REC
+
+
+def test_period_run_flags_missing_dates_as_data_errors(db):
+    org = _org(db)
+    f = _seed_electricity_factor(db)
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")   # dated 2025-01-01
+    a2 = _activity(db, org.id, f.id, quantity=500, unit="kWh")
+    a2.date = ""; db.commit()                                # undatable
+    p = ReportingPeriod(organisation_id=org.id, label="FY25",
+                        start_date="2025-01-01", end_date="2025-12-31", frozen=False)
+    db.add(p); db.commit(); db.refresh(p)
+    run = compute_co2e(db, org.id, reporting_period_id=p.id)
+    assert run.total_activities == 2                         # kept, not vanished
+    assert run.mapped == 1
+    assert run.data_errors == 1
+
+
+def test_summary_partial_flag_and_market_bases(db):
+    org = _org(db)
+    f = _seed_electricity_factor(db)
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    _activity(db, org.id, None, quantity=5, unit="kg", category="w")   # unmapped
+    run = compute_co2e(db, org.id)
+    s = summary(db, organisation_id=org.id, run_id=run.id)
+    assert s["partial"] is True
+    assert s["partial_reasons"] == {"unmapped": 1}
+    assert s["scope2"]["market_bases"] == {"grid_average_fallback": 1}
