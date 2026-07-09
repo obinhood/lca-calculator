@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Boolean, Text
+from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Boolean, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -7,6 +7,11 @@ class Organisation(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True, nullable=False)
     sector = Column(String, nullable=True)
+    # GHG Protocol consolidation approach: operational_control | financial_control | equity_share.
+    # NOTE: stored for provenance but NOT yet wired into the calc engine — every run currently
+    # includes 100% of the org's own activities. Multi-entity roll-up / equity-share weighting
+    # (which needs a parent/child org hierarchy + ownership %) is future work; do not assume live.
+    consolidation_approach = Column(String, nullable=True, default="operational_control")
 
 class ActivityRecord(Base):
     __tablename__ = "activities"
@@ -43,9 +48,66 @@ class EmissionFactor(Base):
 
     activities = relationship("ActivityRecord", back_populates="factor")
 
-class Result(Base):
-    __tablename__ = "results"
+class ReportingPeriod(Base):
+    """A named reporting window for an organisation (e.g. FY2025).
+
+    A period can be frozen once its inventory is finalised for disclosure; a
+    frozen period should not accept new activities into its calculation runs.
+    """
+    __tablename__ = "reporting_periods"
     id = Column(Integer, primary_key=True)
-    activity_id = Column(Integer, ForeignKey("activities.id"))
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    label = Column(String, nullable=False)  # e.g. "FY2025"
+    start_date = Column(String)  # ISO
+    end_date = Column(String)    # ISO
+    frozen = Column(Boolean, default=False)
+
+class CalculationRun(Base):
+    """An immutable snapshot of one calculation for one organisation.
+
+    Every /calculate/run creates a NEW run; prior runs are never mutated or
+    deleted, so any historical number is reproducible (Gap 5). The coverage
+    counters are frozen at compute time, so a run's reported completeness can
+    never silently contradict later re-mapping.
+    """
+    __tablename__ = "calculation_runs"
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    reporting_period_id = Column(Integer, ForeignKey("reporting_periods.id"), nullable=True)
+    created_at = Column(String)  # ISO timestamp (UTC)
+    gwp_set = Column(String)     # AR5 / AR6 applied
+    status = Column(String)      # pending | complete
+    # frozen coverage snapshot
+    total_activities = Column(Integer, default=0)
+    mapped = Column(Integer, default=0)
+    unmapped = Column(Integer, default=0)
+    unit_errors = Column(Integer, default=0)
+    data_errors = Column(Integer, default=0)
+    gwp_mismatch = Column(Integer, default=0)
+    total_co2e = Column(Float, default=0.0)
+    notes = Column(Text)  # JSON: per-activity exclusion reasons
+    # Fingerprint of the org's activity set at compute time (id/factor/quantity/unit).
+    # Lets a reader detect that a run is stale even when the activity COUNT is unchanged
+    # (e.g. an activity was re-mapped to a different factor).
+    activities_fingerprint = Column(String)
+
+class EmissionLineItem(Base):
+    """One computed emission line, tied to an immutable run (replaces Result).
+
+    Carries the lineage an assurer needs: which run, which activity, scope,
+    method (location vs market-based for Scope 2), and a JSON detail blob tracing
+    factor id/version, unit conversion and quantity.
+    """
+    __tablename__ = "emission_line_items"
+    __table_args__ = (
+        # One line per (run, activity, method) — guards against accumulation and is
+        # required once Scope 2 adds a second "market" method per activity (Phase 2c).
+        UniqueConstraint("run_id", "activity_id", "method", name="uq_lineitem_run_activity_method"),
+    )
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
+    activity_id = Column(Integer, ForeignKey("activities.id"), nullable=False)
+    scope = Column(String)
+    method = Column(String, default="location")  # location | market (Scope 2 dual reporting)
     co2e = Column(Float)
     details = Column(Text)  # JSON string of calculation context

@@ -18,8 +18,8 @@ st.sidebar.markdown("---")
 st.sidebar.caption("Tips:\n- Start your API first: `uvicorn app.main:app --reload`\n- Seed DB (once): `python -m scripts.init_db`")
 
 # Helper
-def api_get(path):
-    r = requests.get(f"{api_url}{path}")
+def api_get(path, params=None):
+    r = requests.get(f"{api_url}{path}", params=params)
     r.raise_for_status()
     return r.json()
 
@@ -53,14 +53,17 @@ with col1:
 with col2:
     if st.button("Run calculation"):
         try:
-            res = api_post("/calculate/run")
-            st.success("Calculation completed")
+            res = api_post("/calculate/run", params={"org_name": org_name})
+            cov = (res or {}).get("coverage") or {}
+            st.success(f"Calculation completed — {cov.get('coverage_pct', '?')}% coverage")
+            if cov.get("warning"):
+                st.warning(cov["warning"])
         except Exception as e:
             st.exception(e)
 
 st.header("2) Summary results")
 try:
-    s = api_get("/results/summary")
+    s = api_get("/results/summary", params={"org_name": org_name})
     st.json(s)
 except Exception as e:
     st.info("No results yet. Upload data and run calculation.")
