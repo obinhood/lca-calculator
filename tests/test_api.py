@@ -170,3 +170,35 @@ def test_oversized_upload_rejected(env):
     r = client.post("/activities/upload_csv", headers=hdr_a,
                     files={"file": ("big.csv", io.BytesIO(big), "text/csv")})
     assert r.status_code == 413
+
+
+def test_duplicate_upload_rejected(env):
+    client, hdr_a, _, _ = env
+    csv_data = ("date,category,subcategory,description,quantity,unit,geo\n"
+                "2025-01-15,electricity,,HQ,1000,kWh,GB\n")
+    f = lambda: {"file": ("same.csv", io.BytesIO(csv_data.encode()), "text/csv")}
+    assert client.post("/activities/upload_csv", headers=hdr_a, files=f()).status_code == 200
+    r2 = client.post("/activities/upload_csv", headers=hdr_a, files=f())
+    assert r2.status_code == 409                 # identical content -> no double count
+
+
+def test_empty_csv_is_clean_400(env):
+    client, hdr_a, _, _ = env
+    r = client.post("/activities/upload_csv", headers=hdr_a,
+                    files={"file": ("empty.csv", io.BytesIO(b""), "text/csv")})
+    assert r.status_code == 400
+
+
+def test_override_endpoint_over_http(env):
+    client, hdr_a, _, _ = env
+    csv_data = ("date,category,subcategory,description,quantity,unit,geo\n"
+                "2025-02-01,electricity,,office,500,kWh,DE\n")
+    client.post("/activities/upload_csv", headers=hdr_a,
+                files={"file": ("o.csv", io.BytesIO(csv_data.encode()), "text/csv")})
+    item = client.get("/mappings/review", headers=hdr_a).json()[0]
+    factor_id = client.get("/factors").json()[0]["id"]
+    r = client.post(f"/mappings/{item['activity_id']}/override",
+                    params={"factor_id": factor_id}, headers=hdr_a)
+    assert r.status_code == 200
+    assert r.json()["mapping_status"] == "overridden"
+    assert client.get("/mappings/review", headers=hdr_a).json() == []

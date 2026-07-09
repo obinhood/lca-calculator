@@ -615,3 +615,82 @@ def test_resolver_gates_coarse_matches(db):
     run = compute_co2e(db, org.id)
     assert run.unmapped == 1
     assert run.mapped == 2
+
+
+# --- Phase 3 verification-panel hardening ---
+
+def test_superseded_factor_never_proposed(db):
+    """A corrected factor supersedes the old one; the old row must never bind."""
+    from app.services.resolver import propose_mapping
+    old = _seed_electricity_factor(db, value=0.999)                 # stale, inserted first
+    new = EmissionFactor(source="TEST", version="2", geography="GB", year=2024,
+                         category="electricity", subcategory="", unit="kWh",
+                         gwp_set="AR6", value=0.17, supersedes_id=old.id)
+    db.add(new); db.commit(); db.refresh(new)
+    factor, basis, conf = propose_mapping(db, "electricity", "", None, "GB")
+    assert factor.id == new.id                                      # never the superseded row
+    assert basis == "exact" and conf == 1.0
+
+
+def test_resolver_prefers_newest_year(db):
+    from app.services.resolver import propose_mapping
+    f2023 = EmissionFactor(source="TEST", version="1", geography="GB", year=2023,
+                           category="electricity", subcategory="", unit="kWh",
+                           gwp_set="AR6", value=0.20)
+    f2024 = EmissionFactor(source="TEST", version="1", geography="GB", year=2024,
+                           category="electricity", subcategory="", unit="kWh",
+                           gwp_set="AR6", value=0.17)
+    db.add_all([f2023, f2024]); db.commit()
+    factor, _, _ = propose_mapping(db, "electricity", "", None, "GB")
+    assert factor.year == 2024                                      # deterministic, newest
+
+
+def test_mistyped_subcategory_gets_fuzzy_correction(db):
+    """'Short-Haul Economy' must fuzzy-match, not fall to a subcategory-blind pick."""
+    from app.services.resolver import propose_mapping
+    short = EmissionFactor(source="TEST", version="1", geography="Global", year=2024,
+                           category="flight", subcategory="short_haul_economy",
+                           unit="pkm", gwp_set="AR6", value=0.145)
+    lng = EmissionFactor(source="TEST", version="1", geography="Global", year=2024,
+                         category="flight", subcategory="long_haul_economy",
+                         unit="pkm", gwp_set="AR6", value=0.110)
+    db.add_all([short, lng]); db.commit()
+    factor, basis, conf = propose_mapping(db, "flight", "Short-Haul Economy", None, "GB")
+    assert basis == "fuzzy_subcategory"
+    assert factor.subcategory == "short_haul_economy"               # right variant suggested
+    assert conf < 0.95                                              # still review-gated
+
+
+def test_needs_review_upgrades_when_catalog_improves(db):
+    """Re-running the mapper on a needs_review row picks up a new exact factor."""
+    from app.services.resolver import auto_map_activity
+    org = _org(db)
+    f_gb = _seed_electricity_factor(db)                             # GB only
+    a = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="electricity",
+                       subcategory="", description="", quantity=500, unit="kWh", geo="DE")
+    db.add(a); db.commit(); db.refresh(a)
+    assert auto_map_activity(db, a) == "needs_review"               # coarse suggestion
+    f_de = EmissionFactor(source="TEST", version="1", geography="DE", year=2024,
+                          category="electricity", subcategory="", unit="kWh",
+                          gwp_set="AR6", value=0.30)
+    db.add(f_de); db.commit(); db.refresh(f_de)
+    assert auto_map_activity(db, a) == "auto"                       # upgraded to exact
+    assert a.factor_id == f_de.id
+    assert a.suggested_factor_id is None
+
+
+def test_date_policy_is_per_row_and_dayfirst():
+    """'01/02/2025' is ALWAYS 1 Feb (day-first policy), never sibling-dependent."""
+    from app.services.ingestion import parse_csv
+    csv1 = b"date,category,quantity,unit\n01/02/2025,electricity,1,kWh\n"
+    csv2 = (b"date,category,quantity,unit\n"
+            b"01/02/2025,electricity,1,kWh\n"
+            b"15/01/2025,electricity,2,kWh\n")   # sibling that used to flip inference
+    d1 = parse_csv(csv1, "a.csv")["date"].tolist()
+    d2 = parse_csv(csv2, "b.csv")["date"].tolist()
+    assert d1 == ["2025-02-01"]
+    assert d2 == ["2025-02-01", "2025-01-15"]    # same string, same answer
+    iso = parse_csv(b"date,category,quantity,unit\n2025-01-15,e,1,kWh\n", "c.csv")
+    assert iso["date"].tolist() == ["2025-01-15"]
+    bad = parse_csv(b"date,category,quantity,unit\n31/31/2025,e,1,kWh\n", "d.csv")
+    assert bad["date"].tolist() == [""]          # unparseable -> empty, flagged by QA

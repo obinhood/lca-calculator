@@ -28,6 +28,9 @@ class ActivityRecord(Base):
     unit = Column(String)  # kWh, L, kg, tkm, pkm
     geo = Column(String)   # country/region code
     source_file = Column(String)
+    # SHA-256 of the uploaded file content; used to reject accidental re-uploads
+    # of the same file (double-counted emissions on a retry/double-click).
+    upload_hash = Column(String, nullable=True, index=True)
     scope = Column(String)  # 1,2,3 - set later
     mapping_confidence = Column(Float)  # 0-1
     factor_id = Column(Integer, ForeignKey("emission_factors.id"), nullable=True)

@@ -16,10 +16,16 @@ def check_records(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         r = df[mask].index.tolist()
         return f"{r[:10]}{'...' if len(r) > 10 else ''}"
 
-    nonpos = df["quantity"].notna() & (df["quantity"] <= 0)
-    if nonpos.any():
-        issues.append(f"Non-positive quantities in rows: {_rows(nonpos)} "
-                      f"(kept; negatives are excluded from totals as data errors)")
+    negative = df["quantity"].notna() & (df["quantity"] < 0)
+    if negative.any():
+        issues.append(f"Negative quantities in rows: {_rows(negative)} "
+                      f"(kept; excluded from totals as data errors)")
+
+    zero = df["quantity"].notna() & (df["quantity"] == 0)
+    if zero.any():
+        issues.append(f"Zero quantities in rows: {_rows(zero)} "
+                      f"(kept; computed as zero emissions and counted as mapped — "
+                      f"verify these are real zero-consumption records)")
 
     missing_qty = df["quantity"].isna()
     if missing_qty.any():
@@ -37,7 +43,8 @@ def check_records(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
                       f"(kept; units are never guessed — these rows will fail "
                       f"unit conversion until corrected)")
 
-    dup = df.duplicated(subset=["date", "category", "subcategory", "quantity", "unit"],
+    dup = df.duplicated(subset=["date", "category", "subcategory", "quantity", "unit",
+                                "geo", "description"],
                         keep=False) & df["quantity"].notna()
     if dup.any():
         issues.append(f"Possible duplicate rows (same date/category/subcategory/"

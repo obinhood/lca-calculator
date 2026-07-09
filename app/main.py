@@ -71,10 +71,22 @@ async def upload_activities(file: UploadFile = File(...),
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"upload exceeds {MAX_UPLOAD_BYTES} bytes")
-    df = parse_csv(content, filename=file.filename)
+    try:
+        df = parse_csv(content, filename=file.filename)
+    except Exception:
+        raise HTTPException(status_code=400, detail="unable to parse CSV file")
     if len(df) > MAX_UPLOAD_ROWS:
         raise HTTPException(status_code=413, detail=f"upload exceeds {MAX_UPLOAD_ROWS} rows")
     df, issues = check_records(df)
+
+    # Idempotency: an identical file already ingested for this org would silently
+    # double-count every activity in it on a retry/double-click.
+    upload_hash = hashlib.sha256(content).hexdigest()
+    if db.query(ActivityRecord).filter(
+            ActivityRecord.organisation_id == org.id,
+            ActivityRecord.upload_hash == upload_hash).first():
+        raise HTTPException(status_code=409,
+                            detail="this exact file was already uploaded for this organisation")
 
     recs = []
     for _, r in df.iterrows():
@@ -88,19 +100,30 @@ async def upload_activities(file: UploadFile = File(...),
             unit=(r["unit"] or "").strip(),
             geo=(r["geo"] or "GB").strip(),
             source_file=r["source_file"],
+            upload_hash=upload_hash,
             provenance="process",
         ))
     db.add_all(recs); db.commit()
 
     # Mapping policy (Gap 6): exact matches bind automatically; coarser matches
     # become suggestions in the review queue; nothing coarse binds silently.
+    # needs_review rows are RE-proposed so a later, better catalog entry (e.g. a
+    # new exact factor) upgrades or refreshes stale suggestions.
     statuses = {"auto": 0, "needs_review": 0, "unmapped": 0}
-    for a in db.query(ActivityRecord).filter(
-            ActivityRecord.organisation_id == org.id,
-            ActivityRecord.factor_id.is_(None),
-            ActivityRecord.mapping_status.in_(["unmapped", None])).all():
-        statuses[auto_map_activity(db, a)] += 1
-    db.commit()
+    try:
+        for a in db.query(ActivityRecord).filter(
+                ActivityRecord.organisation_id == org.id,
+                ActivityRecord.factor_id.is_(None),
+                ActivityRecord.mapping_status.in_(["unmapped", "needs_review", None])).all():
+            statuses[auto_map_activity(db, a)] += 1
+        db.commit()
+    except Exception:
+        db.rollback()   # activities stay ingested (unmapped); mapping can be retried
+        return JSONResponse(status_code=207, content={
+            "records_ingested": len(recs), "organisation_id": org.id,
+            "mapping": None, "issues": issues + [
+                "automatic mapping failed; activities are ingested but unmapped — retry upload or map via review queue"],
+        })
 
     return JSONResponse({"records_ingested": len(recs), "organisation_id": org.id,
                          "mapping": statuses, "issues": issues})
