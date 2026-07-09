@@ -42,11 +42,22 @@ class EmissionFactor(Base):
     category = Column(String) # electricity, diesel, flight, etc.
     subcategory = Column(String) # tech / route
     unit = Column(String) # per kWh, per L, per tkm, per pkm, per kg
-    gwp_set = Column(String) # AR5 or AR6
-    value = Column(Float) # kgCO2e per unit
+    gwp_set = Column(String) # GWP vintage baked into `value` (aggregate factors only)
+    value = Column(Float) # kgCO2e per unit (pre-aggregated fallback)
+    # Per-gas decomposition: kg of ACTUAL GAS emitted per activity unit. When set,
+    # the calc engine applies the requested GWP set at CALCULATION time
+    # (co2e = kg_co2*1 + kg_ch4*GWP(CH4) + kg_n2o*GWP(N2O)) — this is what makes
+    # the AR5/AR6 switch real. When NULL, `value` is used with a gwp_set check.
+    kg_co2 = Column(Float, nullable=True)
+    kg_ch4 = Column(Float, nullable=True)
+    kg_n2o = Column(Float, nullable=True)
     supersedes_id = Column(Integer, nullable=True)
 
     activities = relationship("ActivityRecord", back_populates="factor")
+
+    @property
+    def has_gas_breakdown(self) -> bool:
+        return any(v is not None for v in (self.kg_co2, self.kg_ch4, self.kg_n2o))
 
 class ReportingPeriod(Base):
     """A named reporting window for an organisation (e.g. FY2025).

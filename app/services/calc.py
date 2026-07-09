@@ -7,6 +7,7 @@ from ..models import (
     ActivityRecord, EmissionFactor, CalculationRun, EmissionLineItem, ReportingPeriod,
 )
 from .units import convert, UnitConversionError, QuantityError
+from .gwp import co2e_from_gases, gwp
 
 SCOPE_RULES = {
     "electricity":"2",
@@ -36,17 +37,36 @@ def activities_fingerprint(acts: List[ActivityRecord]) -> str:
     parts = sorted(f"{a.id}:{a.factor_id}:{a.quantity}:{a.unit}" for a in acts)
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
-def compute_activity_co2e(quantity: Optional[float], unit: str, factor: EmissionFactor) -> float:
+def factor_gases(factor: EmissionFactor) -> dict:
+    """Per-gas masses (kg gas per activity unit) for a factor with a gas breakdown."""
+    gases = {}
+    if factor.kg_co2 is not None:
+        gases["CO2"] = factor.kg_co2
+    if factor.kg_ch4 is not None:
+        gases["CH4"] = factor.kg_ch4
+    if factor.kg_n2o is not None:
+        gases["N2O"] = factor.kg_n2o
+    return gases
+
+
+def compute_activity_co2e(quantity: Optional[float], unit: str, factor: EmissionFactor,
+                          gwp_set: Optional[str] = None) -> float:
     """kg CO2e for one activity.
 
     The quantity is converted from the activity's unit into the factor's unit
     BEFORE multiplying. Incompatible units raise ``UnitConversionError`` and a
     None/non-finite/non-numeric quantity raises ``QuantityError`` (a subclass) —
     a wrong-by-orders-of-magnitude number is worse than a rejected row (Gap 1).
+
+    If the factor carries a per-gas breakdown AND ``gwp_set`` is given, the GWP
+    set is applied HERE, at calculation time (Gap 2: the AR5/AR6 switch changes
+    the number). Otherwise the pre-aggregated ``factor.value`` is used.
     """
     if factor is None:
         raise ValueError("no emission factor supplied")
     qty_in_factor_unit = convert(quantity, unit, factor.unit)
+    if gwp_set and getattr(factor, "has_gas_breakdown", False):
+        return qty_in_factor_unit * co2e_from_gases(factor_gases(factor), gwp_set)
     return qty_in_factor_unit * factor.value
 
 def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
@@ -101,7 +121,11 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             if not a.factor:
                 run.unmapped += 1
                 continue
-            if a.factor.gwp_set and gwp_set and a.factor.gwp_set != gwp_set:
+            per_gas = a.factor.has_gas_breakdown
+            # Aggregate factors bake a GWP vintage into `value`, so a vintage
+            # mismatch is unresolvable at calc time. Per-gas factors are vintage-
+            # free: GWP is applied below from the requested set, so no check needed.
+            if not per_gas and a.factor.gwp_set and gwp_set and a.factor.gwp_set != gwp_set:
                 run.gwp_mismatch += 1
                 errors.append({"activity_id": a.id,
                                "error": f"factor GWP set {a.factor.gwp_set} != requested {gwp_set}"})
@@ -111,7 +135,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 errors.append({"activity_id": a.id, "error": "negative quantity"})
                 continue
             try:
-                co2e = compute_activity_co2e(a.quantity, a.unit, a.factor)
+                co2e = compute_activity_co2e(a.quantity, a.unit, a.factor, gwp_set=gwp_set)
             except QuantityError as exc:          # None / non-finite / non-numeric
                 run.data_errors += 1
                 errors.append({"activity_id": a.id, "error": str(exc)})
@@ -121,18 +145,27 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 errors.append({"activity_id": a.id, "error": str(exc)})
                 continue
 
+            detail = {
+                "factor_id": a.factor_id,
+                "activity_unit": a.unit,
+                "factor_unit": a.factor.unit,
+                "quantity": a.quantity,
+                "calc_method": "per_gas" if per_gas else "aggregate",
+            }
+            if per_gas:
+                gases = factor_gases(a.factor)
+                detail["gwp_set_applied"] = gwp_set
+                detail["gases_kg_per_unit"] = gases
+                detail["gwp_values"] = {g: gwp(g, gwp_set) for g in gases}
+            else:
+                detail["gwp_set"] = a.factor.gwp_set
+                detail["factor_value"] = a.factor.value
+
             scope = a.scope or SCOPE_RULES.get((a.category or "").lower(), "3")
             a.scope = scope
             line_items.append(EmissionLineItem(
                 run_id=run.id, activity_id=a.id, scope=scope, method="location", co2e=co2e,
-                details=json.dumps({
-                    "factor_id": a.factor_id,
-                    "gwp_set": a.factor.gwp_set,
-                    "activity_unit": a.unit,
-                    "factor_unit": a.factor.unit,
-                    "quantity": a.quantity,
-                    "factor_value": a.factor.value,
-                }),
+                details=json.dumps(detail),
             ))
             total += co2e
             run.mapped += 1

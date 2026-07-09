@@ -243,3 +243,85 @@ def test_period_ownership_enforced(db):
     db.add(p_b); db.commit(); db.refresh(p_b)
     with pytest.raises(ReportingPeriodError):
         compute_co2e(db, orgA.id, reporting_period_id=p_b.id)   # OrgA using OrgB's period
+
+
+# --- Phase 2b: per-gas factors make the AR5/AR6 switch REAL (Gap 2) ---
+
+def _seed_waste_factor_per_gas(db):
+    """Landfill MSW, CH4-dominated: AR6 aggregate = 0.48 kgCO2e/kg exactly."""
+    f = EmissionFactor(
+        source="TEST", version="1", geography="GB", year=2024,
+        category="waste", subcategory="landfill_msw", unit="kg", gwp_set="AR6",
+        value=0.48, kg_co2=0.00297, kg_ch4=0.017, kg_n2o=0.00001,
+    )
+    db.add(f); db.commit(); db.refresh(f)
+    return f
+
+
+def test_per_gas_ar6_matches_aggregate_value():
+    """AR6 recomposition of the decomposed factor equals the published value."""
+    class F:
+        unit = "kg"; value = 0.48
+        kg_co2 = 0.00297; kg_ch4 = 0.017; kg_n2o = 0.00001
+        has_gas_breakdown = True
+    ar6 = compute_activity_co2e(1.0, "kg", F(), gwp_set="AR6")
+    assert ar6 == pytest.approx(0.48, abs=1e-12)
+
+
+def test_ar5_and_ar6_produce_different_numbers():
+    """THE Gap 2 fix: same factor row, different GWP set -> different CO2e."""
+    class F:
+        unit = "kg"; value = 0.48
+        kg_co2 = 0.00297; kg_ch4 = 0.017; kg_n2o = 0.00001
+        has_gas_breakdown = True
+    ar5 = compute_activity_co2e(1.0, "kg", F(), gwp_set="AR5")
+    ar6 = compute_activity_co2e(1.0, "kg", F(), gwp_set="AR6")
+    # AR5: 0.00297 + 0.017*28.0 + 0.00001*265.0 = 0.48162
+    assert ar5 == pytest.approx(0.48162, abs=1e-9)
+    assert ar5 != ar6
+
+
+def test_ar5_run_works_with_per_gas_factors(db):
+    """An AR5 run against per-gas factors computes (no gwp_mismatch dead-end)."""
+    org = _org(db)
+    f = _seed_waste_factor_per_gas(db)
+    _activity(db, org.id, f.id, quantity=250, unit="kg", category="waste")
+    run = compute_co2e(db, org.id, gwp_set="AR5")
+    assert run.gwp_mismatch == 0
+    assert run.mapped == 1
+    assert run.total_co2e == pytest.approx(250 * 0.48162, rel=1e-9)
+
+
+def test_run_gwp_set_changes_the_total(db):
+    org = _org(db)
+    f = _seed_waste_factor_per_gas(db)
+    _activity(db, org.id, f.id, quantity=250, unit="kg", category="waste")
+    run6 = compute_co2e(db, org.id, gwp_set="AR6")
+    run5 = compute_co2e(db, org.id, gwp_set="AR5")
+    assert run6.total_co2e == pytest.approx(120.0)          # 250 * 0.48
+    assert run5.total_co2e == pytest.approx(120.405)        # 250 * 0.48162
+    assert run5.total_co2e != run6.total_co2e
+
+
+def test_per_gas_lineage_in_details(db):
+    import json
+    org = _org(db)
+    f = _seed_waste_factor_per_gas(db)
+    _activity(db, org.id, f.id, quantity=250, unit="kg", category="waste")
+    run = compute_co2e(db, org.id, gwp_set="AR6")
+    li = db.query(EmissionLineItem).filter(EmissionLineItem.run_id == run.id).one()
+    d = json.loads(li.details)
+    assert d["calc_method"] == "per_gas"
+    assert d["gwp_set_applied"] == "AR6"
+    assert d["gases_kg_per_unit"] == {"CO2": 0.00297, "CH4": 0.017, "N2O": 0.00001}
+    assert d["gwp_values"]["CH4"] == 27.9
+
+
+def test_aggregate_factor_still_vintage_checked(db):
+    """Factors WITHOUT a gas breakdown keep the strict vintage mismatch check."""
+    org = _org(db)
+    f = _seed_electricity_factor(db, gwp_set="AR6")   # aggregate only
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    run = compute_co2e(db, org.id, gwp_set="AR5")
+    assert run.gwp_mismatch == 1
+    assert run.mapped == 0

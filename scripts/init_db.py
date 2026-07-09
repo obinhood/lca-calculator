@@ -9,6 +9,9 @@ def seed_factors(session):
     with path.open() as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+    def _opt_float(v):
+        return float(v) if v not in (None, "") else None
+
     for r in rows:
         session.add(EmissionFactor(
             source="DEFRA_DEMO",
@@ -20,6 +23,9 @@ def seed_factors(session):
             unit=r["unit"],
             gwp_set=r["gwp_set"],
             value=float(r["value"]),
+            kg_co2=_opt_float(r.get("kg_co2")),
+            kg_ch4=_opt_float(r.get("kg_ch4")),
+            kg_n2o=_opt_float(r.get("kg_n2o")),
             supersedes_id=None
         ))
     session.commit()

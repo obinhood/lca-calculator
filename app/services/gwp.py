@@ -1,12 +1,11 @@
 """Global Warming Potential tables (100-year) and per-gas CO2e aggregation.
 
-This module is the *foundation* for applying GWP at calculation time from per-gas
-masses (kg CO2 / kg CH4 / kg N2O), which is what will make the AR5/AR6 switch real
-rather than cosmetic (Gap 2). NOTE: it is not yet wired into ``calc.compute_co2e``
-— the demo emission factors are still pre-aggregated kg CO2e per unit, so the
-calculation multiplies that flat value. Per-gas factors + wiring land in Phase 2;
-until then ``compute_co2e`` only *validates* that a factor's ``gwp_set`` matches the
-requested set, and this module is exercised directly by its own tests.
+GWP is applied at CALCULATION time from per-gas masses (kg CO2 / kg CH4 / kg N2O)
+for any ``EmissionFactor`` carrying a gas breakdown — see
+``calc.compute_activity_co2e`` — which is what makes the AR5/AR6 switch real
+rather than cosmetic (Gap 2): the same factor row yields different CO2e under
+AR5 vs AR6. Factors WITHOUT a breakdown fall back to their pre-aggregated
+``value`` and are vintage-checked against the requested set instead.
 
 Values are the IPCC 100-year GWPs:
 
