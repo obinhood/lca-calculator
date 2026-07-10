@@ -454,6 +454,10 @@ def add_cbam_default(cn_code_prefix: str = Query(...), good_category: str = Quer
                     ("indirect_t_co2e_per_t", indirect_t_co2e_per_t)):
         if not math.isfinite(v) or v < 0:
             raise HTTPException(status_code=400, detail=f"{name} must be a finite number >= 0")
+    # An empty/short prefix would match (hijack) every CN code.
+    if not cn_code_prefix.strip().isdigit() or len(cn_code_prefix.strip()) < 2:
+        raise HTTPException(status_code=400,
+                            detail="cn_code_prefix must be numeric, at least 2 digits")
     row = CbamDefaultValue(cn_code_prefix=cn_code_prefix.strip(),
                            good_category=good_category, valid_year=valid_year,
                            direct_t_co2e_per_t=direct_t_co2e_per_t,
