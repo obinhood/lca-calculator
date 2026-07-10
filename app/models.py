@@ -79,6 +79,11 @@ class EmissionFactor(Base):
     # Biogenic CO2 (kg per unit) — ISO 14067: reported SEPARATELY, never netted
     # into the fossil total. Kept outside total_co2e and surfaced on its own.
     kg_co2_biogenic = Column(Float, nullable=True)
+    # Spend-based (EEIO) economics. A spend factor is priced per currency-unit of a
+    # SPECIFIC base year at a SPECIFIC price basis — spend must be inflation-adjusted
+    # to base_year and FX-converted at the base-year rate before applying `value`.
+    base_year = Column(Integer, nullable=True)             # e.g. 2019 for EXIOBASE
+    price_basis = Column(String, nullable=True)            # basic | purchaser
     supersedes_id = Column(Integer, nullable=True)
 
     activities = relationship("ActivityRecord", back_populates="factor",
@@ -87,6 +92,41 @@ class EmissionFactor(Base):
     @property
     def has_gas_breakdown(self) -> bool:
         return any(v is not None for v in (self.kg_co2, self.kg_ch4, self.kg_n2o))
+
+class FxRate(Base):
+    """Reference FX rate: 1 base_currency = `rate` quote_currency in `year`.
+
+    Spend-based EEIO conversion uses the rate of the FACTOR's base year, not the
+    spot rate (GHG Protocol / EEIO practice). Global reference data, not per-org.
+    """
+    __tablename__ = "fx_rates"
+    __table_args__ = (
+        UniqueConstraint("base_currency", "quote_currency", "year", name="uq_fx"),
+        CheckConstraint("rate > 0", name="ck_fx_rate_pos"),
+    )
+    id = Column(Integer, primary_key=True)
+    base_currency = Column(String, nullable=False)   # e.g. GBP
+    quote_currency = Column(String, nullable=False)  # e.g. EUR
+    year = Column(Integer, nullable=False)
+    rate = Column(Float, nullable=False)             # quote per 1 base
+
+
+class PriceIndex(Base):
+    """CPI-style deflator to inflation-adjust spend to a factor's base year.
+
+    index is relative to a fixed reference (ratio of two years' index deflates
+    a spend amount between years). Keyed by currency/economy.
+    """
+    __tablename__ = "price_indices"
+    __table_args__ = (
+        UniqueConstraint("currency", "year", name="uq_price_index"),
+        CheckConstraint("index_value > 0", name="ck_price_index_pos"),
+    )
+    id = Column(Integer, primary_key=True)
+    currency = Column(String, nullable=False)  # economy proxy, e.g. GBP
+    year = Column(Integer, nullable=False)
+    index_value = Column(Float, nullable=False)
+
 
 class MarketInstrument(Base):
     """A contractual instrument for market-based Scope 2 (GHG Protocol Scope 2 Guidance).

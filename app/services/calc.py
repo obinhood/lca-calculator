@@ -1,4 +1,5 @@
 import json
+import math
 import hashlib
 from datetime import date as date_cls, datetime, timezone
 from typing import Optional, List
@@ -10,6 +11,7 @@ from ..models import (
 from .units import convert, UnitConversionError, QuantityError
 from .gwp import co2e_from_gases, gwp
 from .dq import line_dq
+from .spend import normalize_spend, SpendNormalizationError
 
 SCOPE_RULES = {
     "electricity":"2",
@@ -264,18 +266,42 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 run.data_errors += 1
                 errors.append({"activity_id": a.id, "error": "negative quantity"})
                 continue
-            try:
-                co2e = compute_activity_co2e(a.quantity, a.unit, a.factor, gwp_set=gwp_set)
-            except QuantityError as exc:          # None / non-finite / non-numeric
-                run.data_errors += 1
-                errors.append({"activity_id": a.id, "error": str(exc)})
-                continue
-            except UnitConversionError as exc:    # incompatible / ambiguous / malformed
-                run.unit_errors += 1
-                errors.append({"activity_id": a.id, "error": str(exc)})
-                continue
 
             _pdate = _parse_iso_date(a.date)
+            spend_steps = None
+            if (a.factor.method_type or "") == "spend_based":
+                # Spend-based EEIO: normalize the amount to the factor's currency
+                # and base year (inflation + base-year FX), fail-closed on missing
+                # reference data, then apply the per-currency factor.
+                try:
+                    amt = float(a.quantity)
+                    if not math.isfinite(amt):
+                        raise ValueError("non-finite amount")
+                except (TypeError, ValueError):
+                    run.data_errors += 1
+                    errors.append({"activity_id": a.id, "error": "non-numeric/non-finite spend amount"})
+                    continue
+                try:
+                    spend_steps = normalize_spend(
+                        db, amt, a.unit, _pdate.year if _pdate else None,
+                        a.factor.unit, a.factor.base_year)
+                except SpendNormalizationError as exc:
+                    run.data_errors += 1
+                    errors.append({"activity_id": a.id, "error": str(exc)})
+                    continue
+                co2e = spend_steps["amount_in_factor_currency"] * a.factor.value
+            else:
+                try:
+                    co2e = compute_activity_co2e(a.quantity, a.unit, a.factor, gwp_set=gwp_set)
+                except QuantityError as exc:          # None / non-finite / non-numeric
+                    run.data_errors += 1
+                    errors.append({"activity_id": a.id, "error": str(exc)})
+                    continue
+                except UnitConversionError as exc:    # incompatible / ambiguous / malformed
+                    run.unit_errors += 1
+                    errors.append({"activity_id": a.id, "error": str(exc)})
+                    continue
+
             dq = line_dq(a.factor, a, a.mapping_basis, _pdate.year if _pdate else None)
             detail = {
                 "factor_id": a.factor_id,
@@ -291,6 +317,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 # ecoinvent pedigree data-quality score + lognormal uncertainty.
                 "data_quality": dq,
             }
+            if spend_steps is not None:
+                detail["spend_normalization"] = spend_steps
             if per_gas:
                 gases = factor_gases(a.factor)
                 detail["gwp_set_applied"] = gwp_set

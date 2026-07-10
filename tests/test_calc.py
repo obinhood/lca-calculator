@@ -727,7 +727,8 @@ def test_spend_based_calculation_end_to_end(db):
 
 
 def test_currency_mismatch_fails_closed(db):
-    """EUR spend against a GBP factor needs an audited FX rate — reject, not guess."""
+    """EUR spend against a GBP factor with NO FX rate on file — reject, not guess.
+    (A missing FX rate is a data-availability failure -> data_errors bucket.)"""
     org = _org(db)
     f = _spend_factor(db, unit="GBP")
     a = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="spend",
@@ -735,7 +736,7 @@ def test_currency_mismatch_fails_closed(db):
                        unit="EUR", geo="GB", factor_id=f.id)
     db.add(a); db.commit()
     run = compute_co2e(db, org.id)
-    assert run.unit_errors == 1
+    assert run.data_errors == 1
     assert run.mapped == 0
 
 

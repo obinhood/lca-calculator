@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import (
     Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun,
-    MarketInstrument,
+    MarketInstrument, FxRate, PriceIndex,
 )
 from .services.ingestion import parse_csv
 from .services.qa import check_records
@@ -301,6 +301,39 @@ def get_plain_report(run_id: Optional[int] = None,
     if s.get("notes"):
         lines.append("\nNotes: " + s["notes"])
     return PlainTextResponse("\n".join(lines))
+
+
+@app.post("/reference/fx_rates")
+def upsert_fx_rate(base_currency: str = Query(...), quote_currency: str = Query(...),
+                   year: int = Query(...), rate: float = Query(...),
+                   org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    if not math.isfinite(rate) or rate <= 0:
+        raise HTTPException(status_code=400, detail="rate must be a finite number > 0")
+    base, quote = base_currency.upper(), quote_currency.upper()
+    row = db.query(FxRate).filter(FxRate.base_currency == base,
+                                  FxRate.quote_currency == quote, FxRate.year == year).first()
+    if row:
+        row.rate = rate
+    else:
+        db.add(FxRate(base_currency=base, quote_currency=quote, year=year, rate=rate))
+    db.commit()
+    return {"base_currency": base, "quote_currency": quote, "year": year, "rate": rate}
+
+
+@app.post("/reference/price_indices")
+def upsert_price_index(currency: str = Query(...), year: int = Query(...),
+                       index_value: float = Query(...),
+                       org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    if not math.isfinite(index_value) or index_value <= 0:
+        raise HTTPException(status_code=400, detail="index_value must be a finite number > 0")
+    cur = currency.upper()
+    row = db.query(PriceIndex).filter(PriceIndex.currency == cur, PriceIndex.year == year).first()
+    if row:
+        row.index_value = index_value
+    else:
+        db.add(PriceIndex(currency=cur, year=year, index_value=index_value))
+    db.commit()
+    return {"currency": cur, "year": year, "index_value": index_value}
 
 
 @app.get("/reports/secr")

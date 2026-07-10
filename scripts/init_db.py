@@ -56,6 +56,8 @@ def seed_factors(session):
             ch4_origin=(r.get("ch4_origin") or None),
             method_type=(r.get("method_type") or "average_data"),
             lca_boundary=(r.get("lca_boundary") or None),
+            base_year=(int(r["base_year"]) if r.get("base_year") else None),
+            price_basis=(r.get("price_basis") or None),
             supersedes_id=None,
         )
         # Guard against catalog typos: a per-gas breakdown must recompose to the
