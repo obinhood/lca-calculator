@@ -825,3 +825,51 @@ def test_biogenic_not_duplicated_across_location_market_lineage(db):
     with_bio = [i for i in items if "biogenic_co2e" in json.loads(i.details)]
     assert len(with_bio) == 1                                # only the location line
     assert with_bio[0].method == "location"
+
+
+# --- Phase 6: data-quality scoring + uncertainty ---
+
+def test_run_records_emissions_weighted_dq(db):
+    org = _org(db)
+    f = _seed_electricity_factor(db)               # average_data, exact -> mid DQ
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    run = compute_co2e(db, org.id)
+    assert 1.0 <= run.data_quality_score <= 5.0
+    s = summary(db, organisation_id=org.id, run_id=run.id)["data_quality"]
+    assert s["emissions_weighted_score"] == run.data_quality_score
+    assert s["approx_ci95_high"] > run.total_co2e     # band above point estimate
+    assert s["approx_ci95_low"] < run.total_co2e
+
+
+def test_dq_rating_mix_reflects_methods(db):
+    org = _org(db)
+    f_sup = EmissionFactor(source="SUP", version="1", geography="GB", year=2024,
+                           category="widgets", subcategory="", unit="kg", gwp_set="AR6",
+                           value=0.1, method_type="supplier_specific", lca_boundary="cradle_to_gate")
+    f_spend = _spend_factor(db, subcategory="services", value=0.2)
+    db.add(f_sup); db.commit(); db.refresh(f_sup)
+    _activity(db, org.id, f_sup.id, quantity=1000, unit="kg", category="widgets")   # high DQ
+    a = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="spend",
+                       subcategory="services", description="", quantity=1000, unit="GBP",
+                       geo="GB", factor_id=f_spend.id)
+    db.add(a); db.commit()
+    run = compute_co2e(db, org.id)
+    dq = summary(db, organisation_id=org.id, run_id=run.id)["data_quality"]
+    # Supplier-specific -> high; well-matched spend-based -> medium (reliability 5
+    # but good geo/year/tech). The mix reflects method quality either way.
+    assert dq["co2e_by_rating"]["high"] > 0       # supplier-specific line (100)
+    assert dq["co2e_by_rating"]["medium"] > 0     # spend-based line (200)
+    assert dq["co2e_by_rating"]["high"] < dq["co2e_by_rating"]["medium"]
+
+
+def test_dq_frozen_after_remap(db):
+    """DQ is read from frozen lineage — a re-map can't change a past run's DQ."""
+    org = _org(db)
+    f = _seed_electricity_factor(db)
+    a = _activity(db, org.id, f.id, quantity=1000, unit="kWh")
+    run = compute_co2e(db, org.id)
+    before = run.data_quality_score
+    f2 = _spend_factor(db, subcategory="x", value=0.1)
+    a.factor_id = f2.id; db.commit()
+    dq_after = summary(db, organisation_id=org.id, run_id=run.id)["data_quality"]
+    assert dq_after["emissions_weighted_score"] == before

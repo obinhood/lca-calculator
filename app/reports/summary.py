@@ -107,6 +107,7 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             "spend_based_share_pct": round(100.0 * method_split.get("spend_based", 0.0)
                                            / total_methods, 2) if total_methods else 0.0,
         },
+        "data_quality": _data_quality(db, run, li),
         # A partial run cannot honestly answer the question asked of it — flag it
         # at the TOP level, not only inside the nested coverage block.
         "partial": (run.mapped or 0) < (run.total_activities or 0),
@@ -121,6 +122,38 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         "exclusions": json.loads(run.notes or "[]"),
         "notes": "Quantities are unit-converted to factor units; incompatible units are "
                  "rejected (not guessed). Scope 2 is dual-reported (location + market).",
+    }
+
+
+def _data_quality(db: Session, run: CalculationRun, li):
+    """Portfolio data-quality: emissions-weighted score, rating mix, and an
+    approximate emissions-weighted 95% uncertainty band (pedigree lognormal).
+
+    Read from frozen per-line detail so a re-map cannot relabel the run's DQ.
+    The band is a weighted mean of per-line CI multipliers — an approximation,
+    not full lognormal propagation — and is labelled as such.
+    """
+    rows = db.query(li.details, li.co2e)\
+        .filter(li.run_id == run.id, li.method == "location").all()
+    total = 0.0
+    by_rating = {"high": 0.0, "medium": 0.0, "low": 0.0}
+    lo_w = hi_w = 0.0
+    for details, co2e in rows:
+        dq = (json.loads(details or "{}")).get("data_quality")
+        if not dq or not co2e:
+            continue
+        total += co2e
+        by_rating[dq.get("rating", "medium")] = by_rating.get(dq.get("rating", "medium"), 0.0) + co2e
+        lo_w += co2e * dq.get("ci95_low_mult", 1.0)
+        hi_w += co2e * dq.get("ci95_high_mult", 1.0)
+    return {
+        "emissions_weighted_score": run.data_quality_score or 0.0,
+        "scale": "1 best .. 5 worst (ecoinvent pedigree)",
+        "co2e_by_rating": {k: round(v, 4) for k, v in by_rating.items()},
+        "approx_ci95_low": round(total * (lo_w / total), 4) if total else 0.0,
+        "approx_ci95_high": round(total * (hi_w / total), 4) if total else 0.0,
+        "uncertainty_note": "Approximate emissions-weighted 95% band (pedigree "
+                            "lognormal); not full Monte-Carlo propagation.",
     }
 
 

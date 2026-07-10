@@ -9,6 +9,7 @@ from ..models import (
 )
 from .units import convert, UnitConversionError, QuantityError
 from .gwp import co2e_from_gases, gwp
+from .dq import line_dq
 
 SCOPE_RULES = {
     "electricity":"2",
@@ -240,6 +241,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         total = 0.0          # location-based total (headline)
         total_market = 0.0   # dual reporting: Scope 2 swapped to market basis
         total_biogenic = 0.0 # ISO 14067: separate pool, never netted into totals
+        dq_weighted_sum = 0.0  # emissions-weighted data-quality accumulator
         for a in acts:
             if a.id in undatable:
                 run.data_errors += 1
@@ -273,6 +275,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 errors.append({"activity_id": a.id, "error": str(exc)})
                 continue
 
+            _pdate = _parse_iso_date(a.date)
+            dq = line_dq(a.factor, a, a.mapping_basis, _pdate.year if _pdate else None)
             detail = {
                 "factor_id": a.factor_id,
                 "activity_unit": a.unit,
@@ -284,6 +288,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 # to compute the primary-data share.
                 "method_type": a.factor.method_type or "average_data",
                 "lca_boundary": a.factor.lca_boundary,
+                # ecoinvent pedigree data-quality score + lognormal uncertainty.
+                "data_quality": dq,
             }
             if per_gas:
                 gases = factor_gases(a.factor)
@@ -310,6 +316,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 details=json.dumps(detail),
             ))
             total += co2e
+            dq_weighted_sum += co2e * dq["overall"]
             run.mapped += 1
 
             # GHG Protocol dual Scope 2: every Scope 2 activity ALSO gets a
@@ -349,6 +356,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         run.total_co2e = total
         run.total_co2e_market = total_market
         run.total_biogenic_co2e = total_biogenic
+        # Emissions-weighted data-quality score (1 best .. 5 worst); 0.0 = no data.
+        run.data_quality_score = round(dq_weighted_sum / total, 3) if total else 0.0
         run.notes = json.dumps(errors)
         run.status = "complete"
         db.commit()

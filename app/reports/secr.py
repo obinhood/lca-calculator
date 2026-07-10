@@ -111,7 +111,10 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         f"GHG Protocol Scope 2 Guidance, volume-matched instruments). "
         f"Immutable calculation run #{run.id} of {run.created_at}; every figure is traceable "
         f"to source records and pinned factor versions. "
-        f"Coverage: {cov['coverage_pct']}% of activity records ({cov['coverage_basis']})."
+        f"Coverage: {cov['coverage_pct']}% of activity records ({cov['coverage_basis']}). "
+        f"Emissions-weighted data-quality score {run.data_quality_score} "
+        f"(1 best..5 worst, ecoinvent pedigree); primary-data share "
+        f"{s['method_split']['primary_data_share_pct']}%."
     )
 
     return {

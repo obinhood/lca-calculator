@@ -158,6 +158,8 @@ class CalculationRun(Base):
     total_co2e_market = Column(Float, default=0.0)
     # ISO 14067: biogenic CO2 reported separately, never netted into the totals above.
     total_biogenic_co2e = Column(Float, default=0.0)
+    # Emissions-weighted pedigree data-quality score (1 best .. 5 worst).
+    data_quality_score = Column(Float, default=0.0)
     notes = Column(Text)  # JSON: per-activity exclusion reasons
     # Fingerprint of the org's activity set at compute time (id/factor/quantity/unit).
     # Lets a reader detect that a run is stale even when the activity COUNT is unchanged
