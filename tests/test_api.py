@@ -233,3 +233,20 @@ def test_reference_writes_need_admin_key(env, monkeypatch):
                                  "year": 2021, "rate": bad},
                          headers={"X-Admin-Key": "s3cret"})
         assert rb.status_code in (400, 422), bad
+
+
+def test_run_lineage_endpoint(env):
+    client, hdr_a, hdr_b, run_b_id = env
+    # Owner gets full lineage with frozen detail + source activity.
+    r = client.get(f"/runs/{run_b_id}/lineage", headers=hdr_b)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["run"]["id"] == run_b_id
+    lines = body["line_items"]
+    assert len(lines) == 2                                  # location + market (scope 2)
+    loc = next(l for l in lines if l["method"] == "location")
+    assert loc["co2e"] == pytest.approx(9999 * 0.17)
+    assert loc["detail"]["factor_id"] is not None           # frozen lineage present
+    assert loc["activity"]["quantity"] == 9999
+    # Cross-tenant read is blocked.
+    assert client.get(f"/runs/{run_b_id}/lineage", headers=hdr_a).status_code == 404

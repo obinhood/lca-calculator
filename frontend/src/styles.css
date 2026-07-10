@@ -1,0 +1,38 @@
+:root {
+  --bg: #0f1419; --panel: #1a2129; --border: #2c3947;
+  --text: #e6edf3; --muted: #8b98a5; --accent: #4ade80;
+  --warn: #fbbf24; --bad: #f87171; --link: #60a5fa;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); }
+#root { max-width: 1180px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 20px; } h2 { font-size: 16px; margin: 0 0 10px; }
+.panel { background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+input, select { background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; }
+button { background: #234; color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 13px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: #14532d; border-color: var(--accent); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; }
+.muted { color: var(--muted); font-size: 12px; }
+.ok { color: var(--accent); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.kpi .v { font-size: 20px; font-weight: 600; } .kpi .l { color: var(--muted); font-size: 12px; }
+.bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); }
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.tabs button.active { background: #14532d; border-color: var(--accent); }
+pre.detail { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px; font-size: 11px; overflow-x: auto; margin: 6px 0; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px;
+  border: 1px solid var(--border); }
+.badge.high { color: var(--accent); } .badge.medium { color: var(--warn); }
+.badge.low { color: var(--bad); }
+.blockers { border-left: 3px solid var(--bad); padding-left: 10px; }

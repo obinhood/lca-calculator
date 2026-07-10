@@ -24,6 +24,19 @@ from .reports.esrs_e1 import esrs_e1_report
 
 app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 
+# Browser SPA (frontend/) runs on a different origin in dev; restrict to
+# localhost by default, override with ALLOWED_ORIGINS for deployments.
+import os as _os
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_os.environ.get(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173").split(","),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Schema is managed by alembic (scripts/init_db.py runs `upgrade head` + seeds).
 # A create_all here would create unstamped tables and diverge from the migration
 # chain, so it was removed deliberately.
@@ -275,6 +288,41 @@ def list_runs(org: Organisation = Depends(current_org), db: Session = Depends(ge
              "total_co2e": r.total_co2e, "total_co2e_market": r.total_co2e_market,
              "mapped": r.mapped, "total_activities": r.total_activities}
             for r in runs]
+
+
+@app.get("/runs/{run_id}/lineage")
+def get_run_lineage(run_id: int, org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+    """Full lineage for one immutable run: every line item with its FROZEN
+    calculation detail (factor id/version, unit conversion, per-gas GWPs,
+    market allocation, spend normalization, DQ) joined to its source activity.
+    The assurer drill-down: any figure -> source record -> pinned factor."""
+    import json as _json
+    from .models import CalculationRun, EmissionLineItem
+    run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                          CalculationRun.organisation_id == org.id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found for this organisation")
+    rows = db.query(EmissionLineItem, ActivityRecord)\
+        .join(ActivityRecord, ActivityRecord.id == EmissionLineItem.activity_id)\
+        .filter(EmissionLineItem.run_id == run.id)\
+        .order_by(EmissionLineItem.id).all()
+    return {
+        "run": {"id": run.id, "created_at": run.created_at, "gwp_set": run.gwp_set,
+                "status": run.status, "total_co2e": run.total_co2e,
+                "total_co2e_market": run.total_co2e_market,
+                "total_biogenic_co2e": run.total_biogenic_co2e,
+                "reporting_period_id": run.reporting_period_id},
+        "exclusions": _json.loads(run.notes or "[]"),
+        "line_items": [{
+            "id": li.id, "scope": li.scope, "method": li.method, "co2e": li.co2e,
+            "detail": _json.loads(li.details or "{}"),
+            "activity": {"id": a.id, "date": a.date, "category": a.category,
+                         "subcategory": a.subcategory, "description": a.description,
+                         "quantity": a.quantity, "unit": a.unit, "geo": a.geo,
+                         "source_file": a.source_file},
+        } for li, a in rows],
+    }
 
 
 @app.get("/reports/summary.txt")
