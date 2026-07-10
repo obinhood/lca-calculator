@@ -1,26 +1,38 @@
 """Data-quality scoring and uncertainty (ecoinvent pedigree matrix -> lognormal).
 
 Five representativeness indicators, each scored 1 (best) to 5 (worst), mapped to
-ecoinvent's published uncertainty factors and combined into a lognormal geometric
-standard deviation; the 95% interval follows from the log-scale sigma. A simpler
-1-5 overall rating + high/medium/low label is also produced for disclosure.
+the published pedigree uncertainty factors and combined into a lognormal
+geometric standard deviation; the 95% interval follows from the log-scale sigma.
+A simpler 1-5 overall rating + high/medium/low label is also produced for
+disclosure.
 
-Cite: ecoinvent data-quality guideline (pedigree matrix); the indicators mirror
-GHG Protocol Scope 3 data-quality guidance (reliability driven by the calculation
-method: supplier-specific = best, spend-based EEIO = worst).
+Conservative-by-default (GHG Protocol Quantitative Inventory Uncertainty
+guidance): when the information needed to score an indicator is MISSING, the
+indicator defaults to POOR (5), never to a flattering mid score — "we don't
+know" must widen the band, not narrow it. The one exception: a factor bound by
+an explicit human decision (approved/overridden) scores technological 2 even
+without a resolver basis, because a person verified the match.
 """
 import math
 from typing import Optional
 
-# ecoinvent pedigree uncertainty factors, indicator score 1..5 (index 0..4).
+# Pedigree uncertainty factors, indicator score 1..5 (index 0..4), aligned to the
+# GHG Protocol Quantitative Inventory Uncertainty pedigree table.
 _UF = {
     "reliability":   [1.00, 1.05, 1.10, 1.20, 1.50],
     "completeness":  [1.00, 1.02, 1.05, 1.10, 1.20],
     "temporal":      [1.00, 1.03, 1.10, 1.20, 1.50],
-    "geographical":  [1.00, 1.01, 1.02, 1.00, 1.10],
+    "geographical":  [1.00, 1.01, 1.02, 1.05, 1.10],
     "technological": [1.00, 1.05, 1.20, 1.50, 2.00],
 }
-_BASIC_UNCERTAINTY = 1.05  # default basic uncertainty factor (Ub)
+
+# Basic uncertainty factor (Ub) by activity category, per the GHG Protocol
+# guidance's category defaults (transport services 2.00; others default 1.05).
+_BASIC_UNCERTAINTY_BY_CATEGORY = {
+    "flight": 2.00, "train": 2.00, "car": 2.00,
+    "waste": 1.50,   # CH4/N2O-dominated treatment processes
+}
+_BASIC_UNCERTAINTY_DEFAULT = 1.05
 
 # GHG Protocol calculation method -> reliability indicator (1 = best).
 _METHOD_RELIABILITY = {
@@ -35,6 +47,8 @@ _BASIS_TECH = {
     "category_geo": 4, "category_only": 5,
 }
 
+_MISSING = 5  # conservative default for any indicator we cannot actually score
+
 
 def _clamp(n: int) -> int:
     return max(1, min(5, int(n)))
@@ -42,14 +56,14 @@ def _clamp(n: int) -> int:
 
 def temporal_score(activity_year: Optional[int], factor_year: Optional[int]) -> int:
     if activity_year is None or factor_year is None:
-        return 3
+        return _MISSING
     d = abs(activity_year - factor_year)
     return 1 if d <= 1 else 2 if d <= 3 else 3 if d <= 6 else 4 if d <= 10 else 5
 
 
 def geographical_score(activity_geo: Optional[str], factor_geo: Optional[str]) -> int:
-    if not factor_geo:
-        return 3
+    if not factor_geo or not activity_geo:
+        return _MISSING
     if factor_geo == activity_geo:
         return 1
     if factor_geo == "Global":
@@ -57,31 +71,69 @@ def geographical_score(activity_geo: Optional[str], factor_geo: Optional[str]) -
     return 4  # a different, specific geography
 
 
+def completeness_score(has_gas_breakdown: bool, has_date: bool,
+                       has_context: bool) -> int:
+    """Proxy completeness from what the record actually carries.
+
+    Starts at 1 and degrades for each missing element: per-gas decomposition on
+    the factor, a usable activity date, and descriptive context (subcategory or
+    description). A proxy, not a sample-adequacy audit — but it varies with the
+    data instead of being a constant.
+    """
+    return _clamp(1 + (0 if has_gas_breakdown else 1)
+                    + (0 if has_date else 1)
+                    + (0 if has_context else 1))
+
+
+def technological_score(mapping_basis: Optional[str], mapping_status: Optional[str]) -> int:
+    if mapping_basis in _BASIS_TECH:
+        return _BASIS_TECH[mapping_basis]
+    if mapping_status in ("approved", "overridden"):
+        return 2  # explicit human decision, basis unknown
+    return _MISSING
+
+
 def indicators(method_type: Optional[str], mapping_basis: Optional[str],
                activity_geo: Optional[str], factor_geo: Optional[str],
                activity_year: Optional[int], factor_year: Optional[int],
-               completeness: int = 2) -> dict:
+               completeness: Optional[int] = None,
+               mapping_status: Optional[str] = None) -> dict:
     return {
-        "reliability": _clamp(_METHOD_RELIABILITY.get(method_type or "average_data", 3)),
-        "completeness": _clamp(completeness),
+        "reliability": _clamp(_METHOD_RELIABILITY.get(method_type, _MISSING)
+                              if method_type else _MISSING),
+        "completeness": _clamp(completeness) if completeness is not None else _MISSING,
         "temporal": temporal_score(activity_year, factor_year),
         "geographical": geographical_score(activity_geo, factor_geo),
-        "technological": _clamp(_BASIS_TECH.get(mapping_basis or "", 3)),
+        "technological": technological_score(mapping_basis, mapping_status),
     }
 
 
-def score(ind: dict) -> dict:
-    """Overall DQ (mean of indicators, 1-5), rating label, and lognormal uncertainty."""
+def score(ind: dict, category: Optional[str] = None) -> dict:
+    """Overall DQ (1-5), rating label, and lognormal uncertainty.
+
+    The rating is capped by the WORST indicator, not just the mean — a line
+    resting on the worst method tier must not read as "high quality" because
+    its other indicators are pristine.
+    """
     vals = [ind[k] for k in _UF]
     overall = sum(vals) / len(vals)
-    logvar = sum(math.log(_UF[k][ind[k] - 1]) ** 2 for k in _UF) \
-        + math.log(_BASIC_UNCERTAINTY) ** 2
+    worst = max(vals)
+    ub = _BASIC_UNCERTAINTY_BY_CATEGORY.get((category or "").lower(),
+                                            _BASIC_UNCERTAINTY_DEFAULT)
+    logvar = sum(math.log(_UF[k][ind[k] - 1]) ** 2 for k in _UF) + math.log(ub) ** 2
     sigma = math.sqrt(logvar)
-    rating = "high" if overall <= 2 else "medium" if overall <= 3.5 else "low"
+    if overall <= 2 and worst <= 3:
+        rating = "high"
+    elif overall <= 3.5 and worst <= 4:
+        rating = "medium"
+    else:
+        rating = "low"
     return {
         "indicators": ind,
         "overall": round(overall, 2),
+        "worst_indicator": worst,
         "rating": rating,
+        "basic_uncertainty": ub,
         "sigma_log": round(sigma, 4),
         "gsd": round(math.exp(sigma), 4),
         "ci95_low_mult": round(math.exp(-1.96 * sigma), 4),
@@ -92,6 +144,12 @@ def score(ind: dict) -> dict:
 def line_dq(factor, activity, mapping_basis: Optional[str],
             activity_year: Optional[int]) -> dict:
     """Convenience: pedigree score for one activity/factor pair."""
+    completeness = completeness_score(
+        has_gas_breakdown=bool(getattr(factor, "has_gas_breakdown", False)),
+        has_date=activity_year is not None,
+        has_context=bool((getattr(activity, "subcategory", "") or "").strip()
+                         or (getattr(activity, "description", "") or "").strip()),
+    )
     ind = indicators(
         method_type=getattr(factor, "method_type", None),
         mapping_basis=mapping_basis,
@@ -99,5 +157,7 @@ def line_dq(factor, activity, mapping_basis: Optional[str],
         factor_geo=getattr(factor, "geography", None),
         activity_year=activity_year,
         factor_year=getattr(factor, "year", None),
+        completeness=completeness,
+        mapping_status=getattr(activity, "mapping_status", None),
     )
-    return score(ind)
+    return score(ind, category=getattr(activity, "category", None))

@@ -146,14 +146,20 @@ def _data_quality(db: Session, run: CalculationRun, li):
         by_rating[dq.get("rating", "medium")] = by_rating.get(dq.get("rating", "medium"), 0.0) + co2e
         lo_w += co2e * dq.get("ci95_low_mult", 1.0)
         hi_w += co2e * dq.get("ci95_high_mult", 1.0)
+    # No emitting lines -> no score. None (not 0.0) so nothing reads as
+    # "better than the best possible 1.0" on the 1..5 scale.
+    has_data = total > 0
     return {
-        "emissions_weighted_score": run.data_quality_score or 0.0,
+        "has_data": has_data,
+        "emissions_weighted_score": run.data_quality_score if has_data else None,
         "scale": "1 best .. 5 worst (ecoinvent pedigree)",
         "co2e_by_rating": {k: round(v, 4) for k, v in by_rating.items()},
-        "approx_ci95_low": round(total * (lo_w / total), 4) if total else 0.0,
-        "approx_ci95_high": round(total * (hi_w / total), 4) if total else 0.0,
+        "approx_ci95_low": round(lo_w, 4) if has_data else None,
+        "approx_ci95_high": round(hi_w, 4) if has_data else None,
         "uncertainty_note": "Approximate emissions-weighted 95% band (pedigree "
-                            "lognormal); not full Monte-Carlo propagation.",
+                            "lognormal), assuming FULLY CORRELATED line errors: "
+                            "the relative band does not narrow as the portfolio "
+                            "grows (conservative vs independent-error Monte Carlo).",
     }
 
 

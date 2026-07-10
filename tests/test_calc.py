@@ -849,18 +849,21 @@ def test_dq_rating_mix_reflects_methods(db):
                            value=0.1, method_type="supplier_specific", lca_boundary="cradle_to_gate")
     f_spend = _spend_factor(db, subcategory="services", value=0.2)
     db.add(f_sup); db.commit(); db.refresh(f_sup)
-    _activity(db, org.id, f_sup.id, quantity=1000, unit="kg", category="widgets")   # high DQ
+    a_sup = _activity(db, org.id, f_sup.id, quantity=1000, unit="kg", category="widgets")
+    a_sup.mapping_basis = "exact"; a_sup.mapping_status = "auto"        # verified mapping
     a = ActivityRecord(organisation_id=org.id, date="2025-01-01", category="spend",
                        subcategory="services", description="", quantity=1000, unit="GBP",
-                       geo="GB", factor_id=f_spend.id)
+                       geo="GB", factor_id=f_spend.id,
+                       mapping_basis="exact", mapping_status="auto")
     db.add(a); db.commit()
     run = compute_co2e(db, org.id)
     dq = summary(db, organisation_id=org.id, run_id=run.id)["data_quality"]
-    # Supplier-specific -> high; well-matched spend-based -> medium (reliability 5
-    # but good geo/year/tech). The mix reflects method quality either way.
+    # Supplier-specific + exact mapping -> high. Spend-based is the worst method
+    # tier (reliability 5): the worst-indicator cap makes it LOW no matter how
+    # well-matched — EEIO data must never read as high-quality.
     assert dq["co2e_by_rating"]["high"] > 0       # supplier-specific line (100)
-    assert dq["co2e_by_rating"]["medium"] > 0     # spend-based line (200)
-    assert dq["co2e_by_rating"]["high"] < dq["co2e_by_rating"]["medium"]
+    assert dq["co2e_by_rating"]["low"] > 0        # spend-based line (200)
+    assert dq["co2e_by_rating"]["high"] < dq["co2e_by_rating"]["low"]
 
 
 def test_dq_frozen_after_remap(db):
