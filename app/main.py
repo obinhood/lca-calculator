@@ -19,6 +19,7 @@ from .services.resolver import auto_map_activity
 from .services.calc import compute_co2e, ReportingPeriodError, _parse_iso_date
 from .reports.summary import summary
 from .reports.secr import secr_report
+from .reports.sb253 import sb253_report
 
 app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 
@@ -334,6 +335,18 @@ def upsert_price_index(currency: str = Query(...), year: int = Query(...),
         db.add(PriceIndex(currency=cur, year=year, index_value=index_value))
     db.commit()
     return {"currency": cur, "year": year, "index_value": index_value}
+
+
+@app.get("/reports/sb253")
+def get_sb253_report(run_id: Optional[int] = None,
+                     assurance_level: str = "none",
+                     assurance_provider: Optional[str] = None,
+                     org: Organisation = Depends(current_org),
+                     db: Session = Depends(get_db)):
+    """California SB 253 (CCDAA) filing payload with pre-submission gates."""
+    return JSONResponse(sb253_report(db, org.id, run_id=run_id,
+                                     assurance_level=assurance_level,
+                                     assurance_provider=assurance_provider))
 
 
 @app.get("/reports/secr")
