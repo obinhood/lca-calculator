@@ -65,6 +65,18 @@ _ALIASES = {
 # Units whose pint default silently disagrees with GHG-accounting convention.
 _AMBIGUOUS = {"ton", "tons", "gal", "gallon", "gallons", "mt"}
 
+# Currency codes (ISO 4217 subset) for spend-based EEIO factors. Currencies must
+# NEVER reach pint's dimensional analysis: mis-cased codes collide with real pint
+# units ("Gbp" = gigapoint, "myr" = milliyear, "php" = picohorsepower) and would
+# produce a silently WRONG number instead of a rejection. Currency handling is
+# identity-or-reject: same code (case-insensitive) converts 1:1; anything else
+# needs an audited FX rate and fails closed.
+_CURRENCIES = {
+    "GBP", "EUR", "USD", "CHF", "JPY", "CNY", "AUD", "CAD", "SEK", "NOK", "DKK",
+    "PLN", "CZK", "HUF", "INR", "BRL", "MXN", "ZAR", "SGD", "HKD", "NZD", "KRW",
+    "TRY", "MYR", "PHP", "THB", "IDR", "AED", "SAR", "ILS",
+}
+
 # A well-formed unit token: letters, digits, and operator/separator characters only.
 _ALLOWED_UNIT_RE = re.compile(r"^[A-Za-z0-9_./*^+\- ]+$")
 
@@ -88,6 +100,15 @@ def convert(quantity: Optional[float], from_unit: str, to_unit: str) -> float:
     raw_from, raw_to = (from_unit or "").strip(), (to_unit or "").strip()
     if not raw_from or not raw_to:
         raise UnitConversionError(f"missing unit: from={from_unit!r} to={to_unit!r}")
+
+    # 2a. Currency short-circuit (identity-or-reject; never pint).
+    cur_from, cur_to = raw_from.upper() in _CURRENCIES, raw_to.upper() in _CURRENCIES
+    if cur_from or cur_to:
+        if cur_from and cur_to and raw_from.upper() == raw_to.upper():
+            return q
+        raise UnitConversionError(
+            f"cannot convert {from_unit!r} -> {to_unit!r}: currency conversion "
+            f"requires an audited FX rate (and currencies never mix with physical units)")
     for raw in (raw_from, raw_to):
         if raw.lower() in _AMBIGUOUS:
             raise UnitConversionError(

@@ -93,3 +93,37 @@ def test_pkm_tkm_passthrough():
 def test_quantity_error_is_unit_conversion_error():
     # Subclass relationship: broad handlers still catch quantity problems.
     assert issubclass(QuantityError, UnitConversionError)
+
+
+# --- Currency handling: identity-or-reject, never pint (verifier findings 1,2) ---
+
+def test_same_currency_is_identity():
+    assert convert(10000, "GBP", "GBP") == 10000.0
+
+
+def test_currency_case_insensitive_identity():
+    # Spreadsheet exports emit lowercase; "gbp" must equal "GBP", not be rejected.
+    assert convert(10000, "gbp", "GBP") == 10000.0
+    assert convert(10000, "GBP", "gbp") == 10000.0
+
+
+def test_cross_currency_rejected():
+    with pytest.raises(UnitConversionError):
+        convert(10000, "EUR", "GBP")
+
+
+def test_miscased_currency_never_parses_as_pint_unit():
+    # "Gbp" is gigapoint (length) in pint, "myr"=milliyear, "php"=picohorsepower.
+    # These must REJECT, never silently produce a number.
+    for bad in ("Gbp", "myr", "Myr", "php", "Php"):
+        with pytest.raises(UnitConversionError):
+            convert(1000, "km", bad)
+        with pytest.raises(UnitConversionError):
+            convert(1000, bad, "km")
+
+
+def test_currency_vs_physical_rejected():
+    with pytest.raises(UnitConversionError):
+        convert(100, "GBP", "kWh")
+    with pytest.raises(UnitConversionError):
+        convert(100, "kWh", "GBP")

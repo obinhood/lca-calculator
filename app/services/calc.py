@@ -295,14 +295,13 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 detail["factor_value"] = a.factor.value
 
             # Biogenic CO2 tracked as its own pool (ISO 14067), never in total_co2e.
+            # convert() cannot fail here — the same args already succeeded in
+            # compute_activity_co2e above — so no guard is needed.
             if a.factor.kg_co2_biogenic is not None:
-                try:
-                    qty_fu = convert(a.quantity, a.unit, a.factor.unit)
-                    biogenic = qty_fu * a.factor.kg_co2_biogenic
-                    detail["biogenic_co2e"] = biogenic
-                    total_biogenic += biogenic
-                except UnitConversionError:
-                    pass  # main path above already validated; defensive only
+                qty_fu = convert(a.quantity, a.unit, a.factor.unit)
+                biogenic = qty_fu * a.factor.kg_co2_biogenic
+                detail["biogenic_co2e"] = biogenic
+                total_biogenic += biogenic
 
             scope = a.scope or SCOPE_RULES.get((a.category or "").lower(), "3")
             a.scope = scope
@@ -319,6 +318,9 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             # commodities (heat/steam) fall back to the location figure.
             if scope == "2":
                 market_co2e, market_detail = co2e, dict(detail)
+                # Biogenic belongs to the (single) location line only; don't let it
+                # appear twice across the location+market lineage pair.
+                market_detail.pop("biogenic_co2e", None)
                 is_electricity = (a.category or "").lower() == "electricity"
                 if is_electricity and instruments:
                     try:

@@ -789,3 +789,39 @@ def test_biogenic_co2_is_separate_never_netted(db):
     s = summary(db, organisation_id=org.id, run_id=run.id)
     assert s["biogenic_co2e_separate"] == pytest.approx(20.0)
     assert s["total_co2e"] == pytest.approx(1.0)             # never netted
+
+
+# --- Phase 5 verifier hardening ---
+
+def test_method_split_uses_frozen_lineage_not_live_mapping(db):
+    """Re-mapping an activity after a run must NOT relabel that run's method mix."""
+    org = _org(db)
+    f_avg = _seed_electricity_factor(db, value=0.9)         # average_data
+    a = _activity(db, org.id, f_avg.id, quantity=1000, unit="kWh")
+    run = compute_co2e(db, org.id)                          # 900 kg, average_data
+    before = summary(db, organisation_id=org.id, run_id=run.id)["method_split"]
+    assert before["co2e_by_method"] == {"average_data": pytest.approx(900.0)}
+    # Re-map the SAME activity to a spend_based factor; do NOT re-run.
+    f_spend = _spend_factor(db, subcategory="misc", value=0.1)
+    a.factor_id = f_spend.id; db.commit()
+    after = summary(db, organisation_id=org.id, run_id=run.id)["method_split"]
+    # Frozen run keeps its true method label and figure.
+    assert after["co2e_by_method"] == {"average_data": pytest.approx(900.0)}
+
+
+def test_biogenic_not_duplicated_across_location_market_lineage(db):
+    """A scope-2 activity's biogenic amount appears in ONE line's detail, counted once."""
+    import json
+    org = _org(db)
+    f = EmissionFactor(source="TEST", version="1", geography="GB", year=2024,
+                       category="electricity", subcategory="", unit="kWh", gwp_set="AR6",
+                       value=0.17, method_type="average_data", lca_boundary="generation",
+                       kg_co2_biogenic=0.01)
+    db.add(f); db.commit(); db.refresh(f)
+    _activity(db, org.id, f.id, quantity=1000, unit="kWh")   # scope 2 -> location+market
+    run = compute_co2e(db, org.id)
+    assert run.total_biogenic_co2e == pytest.approx(10.0)    # counted once
+    items = db.query(EmissionLineItem).filter(EmissionLineItem.run_id == run.id).all()
+    with_bio = [i for i in items if "biogenic_co2e" in json.loads(i.details)]
+    assert len(with_bio) == 1                                # only the location line
+    assert with_bio[0].method == "location"

@@ -2,7 +2,7 @@ import json
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from ..models import ActivityRecord, CalculationRun, EmissionLineItem, EmissionFactor
+from ..models import ActivityRecord, CalculationRun, EmissionLineItem
 from ..services.calc import activities_fingerprint
 
 
@@ -47,12 +47,15 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
     # GHG Protocol Scope 3 method split: how much of the total rests on which
     # calculation method (supplier_specific/hybrid = primary-leaning data;
     # spend_based = lowest tier). Assurers and the Scope 3 revision ask for this.
-    method_rows = db.query(EmissionFactor.method_type, func.sum(li.co2e))\
-        .join(ActivityRecord, ActivityRecord.factor_id == EmissionFactor.id)\
-        .join(li, li.activity_id == ActivityRecord.id)\
-        .filter(li.run_id == run.id, li.method == "location")\
-        .group_by(EmissionFactor.method_type).all()
-    method_split = {(m or "average_data"): (v or 0.0) for m, v in method_rows}
+    # Read from the FROZEN per-line detail (method_type captured at compute time),
+    # NOT the live activity->factor mapping — a re-map after the run must not
+    # relabel this immutable run's method mix.
+    method_split = {}
+    for details, line_co2e in db.query(li.details, li.co2e)\
+            .filter(li.run_id == run.id, li.method == "location").all():
+        d = json.loads(details or "{}")
+        m = d.get("method_type") or "average_data"
+        method_split[m] = method_split.get(m, 0.0) + (line_co2e or 0.0)
     total_methods = sum(method_split.values())
     primary_kg = method_split.get("supplier_specific", 0.0) + method_split.get("hybrid", 0.0)
 
