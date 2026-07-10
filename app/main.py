@@ -22,6 +22,9 @@ from .reports.secr import secr_report
 from .reports.sb253 import sb253_report
 from .reports.esrs_e1 import esrs_e1_report
 from .reports.cbam import cbam_declaration
+from .reports.issb_s2 import issb_s2_report
+from .reports.gri import gri_report
+from .reports.cdp import cdp_export
 
 app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 
@@ -465,6 +468,51 @@ def add_cbam_default(cn_code_prefix: str = Query(...), good_category: str = Quer
                            recorded_at=_utcnow_iso())
     db.add(row); db.commit(); db.refresh(row)
     return {"id": row.id, "cn_code_prefix": row.cn_code_prefix}
+
+
+@app.get("/reports/issb_s2")
+def get_issb_s2_report(run_id: Optional[int] = None,
+                       jurisdiction: str = "ISSB",
+                       org: Organisation = Depends(current_org),
+                       db: Session = Depends(get_db)):
+    """IFRS S2 payload; jurisdiction: ISSB | UK_SRS | JP_SSBJ | SG_SGX | HK_HKEX."""
+    return JSONResponse(issb_s2_report(db, org.id, run_id=run_id,
+                                       jurisdiction=jurisdiction))
+
+
+@app.get("/reports/gri")
+def get_gri_report(run_id: Optional[int] = None,
+                   base_run_id: Optional[int] = None,
+                   intensity_denominator: Optional[float] = None,
+                   intensity_denominator_unit: Optional[str] = None,
+                   org: Organisation = Depends(current_org),
+                   db: Session = Depends(get_db)):
+    """GRI 305/302 content-index payload (305-5 needs base_run_id)."""
+    if intensity_denominator is not None and (
+            not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
+        raise HTTPException(status_code=400,
+                            detail="intensity_denominator must be a finite number > 0")
+    return JSONResponse(gri_report(db, org.id, run_id=run_id, base_run_id=base_run_id,
+                                   intensity_denominator=intensity_denominator,
+                                   intensity_denominator_unit=intensity_denominator_unit))
+
+
+@app.get("/reports/cdp")
+def get_cdp_export(run_id: Optional[int] = None,
+                   intensity_denominator: Optional[float] = None,
+                   intensity_denominator_unit: Optional[str] = None,
+                   verification_status: str = "no_third_party_verification",
+                   org: Organisation = Depends(current_org),
+                   db: Session = Depends(get_db)):
+    """CDP Climate questionnaire export (classic C-codes, labelled)."""
+    if intensity_denominator is not None and (
+            not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
+        raise HTTPException(status_code=400,
+                            detail="intensity_denominator must be a finite number > 0")
+    return JSONResponse(cdp_export(db, org.id, run_id=run_id,
+                                   intensity_denominator=intensity_denominator,
+                                   intensity_denominator_unit=intensity_denominator_unit,
+                                   verification_status=verification_status))
 
 
 @app.get("/reports/esrs_e1")
