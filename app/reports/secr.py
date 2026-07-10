@@ -11,15 +11,14 @@ Fail-closed disclosure: the report always states whether it is disclosure-ready
 and WHY NOT if it isn't (partial run, unmapped activities, stale run) — a
 pre-submission validation gate, not a silent pass.
 """
-import json
+import math
 from typing import Optional
 
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 
-from ..models import ActivityRecord, CalculationRun, EmissionLineItem, EmissionFactor
+from ..models import ActivityRecord, CalculationRun, EmissionLineItem
 from ..services.units import convert, UnitConversionError
-from .summary import summary
+from .summary import summary, run_factor_sources
 
 # Energy content used to express transport fuel as kWh for the SECR energy
 # figure. DEMO constant (net CV, DEFRA-style); replace with the licensed
@@ -30,13 +29,21 @@ DIESEL_KWH_PER_LITRE_DEMO = 10.0
 _ENERGY_CARRIERS = ("electricity", "gas", "diesel")
 
 
-def _energy_kwh(db: Session, run: CalculationRun) -> dict:
-    """kWh of energy use per carrier for the activities in this run."""
-    rows = db.query(ActivityRecord).join(
+def _energy_kwh(db: Session, run: CalculationRun, scopes=None) -> dict:
+    """kWh of energy use per carrier for the activities in this run.
+
+    ``scopes`` filters by the line items' FROZEN scope (e.g. ("1", "2") for
+    ESRS E1-5 own-operations energy); None means unscoped (SECR's total UK
+    energy use is deliberately scope-agnostic).
+    """
+    q = db.query(ActivityRecord).join(
         EmissionLineItem, EmissionLineItem.activity_id == ActivityRecord.id)\
         .filter(EmissionLineItem.run_id == run.id,
                 EmissionLineItem.method == "location",
-                ActivityRecord.category.in_(_ENERGY_CARRIERS)).all()
+                ActivityRecord.category.in_(_ENERGY_CARRIERS))
+    if scopes is not None:
+        q = q.filter(EmissionLineItem.scope.in_(scopes))
+    rows = q.all()
     out = {c: 0.0 for c in _ENERGY_CARRIERS}
     notes = []
     for a in rows:
@@ -86,7 +93,7 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
     energy = _energy_kwh(db, run)
 
     intensity = None
-    if intensity_denominator and intensity_denominator > 0:
+    if intensity_denominator and math.isfinite(intensity_denominator) and intensity_denominator > 0:
         intensity = {
             "tco2e_scope1_and_2_location": round((scope1_kg + scope2_loc_kg) / 1000.0
                                                  / intensity_denominator, 6),
@@ -97,15 +104,14 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         blockers.append("no intensity ratio denominator supplied "
                         "(SECR requires at least one intensity ratio)")
 
-    ef_sources = db.query(EmissionFactor.source, EmissionFactor.version)\
-        .join(ActivityRecord, ActivityRecord.factor_id == EmissionFactor.id)\
-        .join(EmissionLineItem, EmissionLineItem.activity_id == ActivityRecord.id)\
-        .filter(EmissionLineItem.run_id == run.id).distinct().all()
+    # Frozen lineage: NEVER via the live activity->factor mapping (a post-run
+    # re-map must not rewrite an immutable run's methodology statement).
+    ef_sources = run_factor_sources(db, run)
 
     methodology = (
         f"Prepared in accordance with the GHG Protocol Corporate Standard using the "
         f"operational approach reflected in the underlying activity data. Emission factors: "
-        f"{', '.join(sorted(f'{src} v{ver}' for src, ver in ef_sources)) or 'none'}. "
+        f"{', '.join(ef_sources) or 'none'}. "
         f"GWP set {run.gwp_set} (IPCC 100-year), applied per gas at calculation time where "
         f"per-gas factors are available. Scope 2 dual-reported (location- and market-based, "
         f"GHG Protocol Scope 2 Guidance, volume-matched instruments). "
@@ -132,6 +138,9 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
             "scope3_voluntary": round(scope3_kg / 1000.0, 6),
             "total_location_based": round(run.total_co2e / 1000.0, 6),
             "total_market_based": round(run.total_co2e_market / 1000.0, 6),
+            # Reported separately across ALL renderers (ISO 14067) — omission
+            # here would be a silent cross-framework inconsistency.
+            "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
         },
         "energy_use_kwh": energy,
         "intensity_ratio": intensity,

@@ -16,8 +16,8 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import ActivityRecord, CalculationRun, EmissionLineItem, EmissionFactor
-from .summary import summary
+from ..models import CalculationRun
+from .summary import summary, run_factor_sources
 
 _ASSURANCE_LEVELS = ("none", "limited", "reasonable")
 
@@ -55,16 +55,14 @@ def sb253_report(db: Session, organisation_id: int, run_id: Optional[int] = None
                         "Scope 1 and 2 from the first filing cycle — engage an "
                         "assurance provider and set assurance_level")
 
-    ef_sources = db.query(EmissionFactor.source, EmissionFactor.version)\
-        .join(ActivityRecord, ActivityRecord.factor_id == EmissionFactor.id)\
-        .join(EmissionLineItem, EmissionLineItem.activity_id == ActivityRecord.id)\
-        .filter(EmissionLineItem.run_id == run.id).distinct().all()
+    # Frozen lineage — never via the live activity->factor mapping.
+    ef_sources = run_factor_sources(db, run)
 
     dq = s.get("data_quality") or {}
     methodology = (
         f"Prepared in conformance with the GHG Protocol Corporate Standard and Scope 2 "
         f"Guidance, as required by California Health & Safety Code 38532 (SB 253). "
-        f"Emission factors: {', '.join(sorted(f'{src} v{ver}' for src, ver in ef_sources)) or 'none'}. "
+        f"Emission factors: {', '.join(ef_sources) or 'none'}. "
         f"GWP set {run.gwp_set} (IPCC 100-year). Scope 2 dual-reported (location- and "
         f"market-based, volume-matched instruments). Immutable calculation run "
         f"#{run.id} of {run.created_at}; every figure traceable to source records and "
@@ -90,6 +88,8 @@ def sb253_report(db: Session, organisation_id: int, run_id: Optional[int] = None
                                     "first Scope 1/2 filing; no assurance required "
                                     "for Scope 3 before the 2030 review.",
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
+            "total_location_based": round(run.total_co2e / 1000.0, 6),
+            "total_market_based": round(run.total_co2e_market / 1000.0, 6),
         },
         "assurance": {
             "level": assurance_level,

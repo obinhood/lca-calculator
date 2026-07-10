@@ -2,7 +2,7 @@ import json
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from ..models import ActivityRecord, CalculationRun, EmissionLineItem
+from ..models import ActivityRecord, CalculationRun, EmissionLineItem, EmissionFactor
 from ..services.calc import activities_fingerprint
 
 
@@ -161,6 +161,40 @@ def _data_quality(db: Session, run: CalculationRun, li):
                             "the relative band does not narrow as the portfolio "
                             "grows (conservative vs independent-error Monte Carlo).",
     }
+
+
+def run_factor_sources(db: Session, run: CalculationRun) -> list:
+    """Factor sources/versions used by a run, from FROZEN line lineage.
+
+    Joining through the live ``ActivityRecord.factor_id`` would let a post-run
+    re-map (or un-map) silently rewrite an immutable run's methodology
+    statement — the factor ids must come from the line details captured at
+    compute time.
+    """
+    ids = set()
+    for (details,) in db.query(EmissionLineItem.details)\
+            .filter(EmissionLineItem.run_id == run.id,
+                    EmissionLineItem.method == "location").all():
+        fid = json.loads(details or "{}").get("factor_id")
+        if fid:
+            ids.add(fid)
+    if not ids:
+        return []
+    rows = db.query(EmissionFactor.source, EmissionFactor.version)\
+        .filter(EmissionFactor.id.in_(ids)).distinct().all()
+    return sorted(f"{src} v{ver}" for src, ver in rows)
+
+
+def scope3_by_category(db: Session, run: CalculationRun) -> dict:
+    """Scope 3 kg CO2e by activity category, filtered by the line items' FROZEN
+    scope — never by category-name heuristics (a preset scope or a new
+    non-carrier Scope-1 category would silently misattribute otherwise)."""
+    li = EmissionLineItem
+    rows = db.query(ActivityRecord.category, func.sum(li.co2e))\
+        .join(li, li.activity_id == ActivityRecord.id)\
+        .filter(li.run_id == run.id, li.method == "location", li.scope == "3")\
+        .group_by(ActivityRecord.category).all()
+    return {(c or "?"): (v or 0.0) for c, v in rows}
 
 
 def coverage(db: Session, run: CalculationRun):
