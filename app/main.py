@@ -20,6 +20,7 @@ from .services.calc import compute_co2e, ReportingPeriodError, _parse_iso_date
 from .reports.summary import summary
 from .reports.secr import secr_report
 from .reports.sb253 import sb253_report
+from .reports.esrs_e1 import esrs_e1_report
 
 app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 
@@ -347,6 +348,22 @@ def add_price_index(currency: str = Query(...), year: int = Query(...),
     db.add(row); db.commit(); db.refresh(row)
     return {"id": row.id, "currency": row.currency, "year": row.year,
             "index_value": row.index_value}
+
+
+@app.get("/reports/esrs_e1")
+def get_esrs_e1_report(run_id: Optional[int] = None,
+                       net_revenue_millions: Optional[float] = None,
+                       revenue_currency: str = "EUR",
+                       org: Organisation = Depends(current_org),
+                       db: Session = Depends(get_db)):
+    """CSRD ESRS E1 quantitative disclosure payload with pre-submission gates."""
+    if net_revenue_millions is not None and (
+            not math.isfinite(net_revenue_millions) or net_revenue_millions <= 0):
+        raise HTTPException(status_code=400,
+                            detail="net_revenue_millions must be a finite number > 0")
+    return JSONResponse(esrs_e1_report(db, org.id, run_id=run_id,
+                                       net_revenue_millions=net_revenue_millions,
+                                       revenue_currency=revenue_currency))
 
 
 @app.get("/reports/sb253")
