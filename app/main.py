@@ -304,37 +304,49 @@ def get_plain_report(run_id: Optional[int] = None,
     return PlainTextResponse("\n".join(lines))
 
 
+def require_admin(x_admin_key: str = Header(...)) -> None:
+    """Reference data (FX/CPI) is GLOBAL — every tenant's spend calculations
+    depend on it, so writes need the platform admin credential, not any org's
+    API key. Disabled entirely when no admin key is configured."""
+    import hmac
+    import os
+    admin_key = os.environ.get("ADMIN_API_KEY")
+    if not admin_key:
+        raise HTTPException(status_code=503,
+                            detail="reference-data administration disabled "
+                                   "(ADMIN_API_KEY not configured)")
+    if not hmac.compare_digest(x_admin_key, admin_key):
+        raise HTTPException(status_code=401, detail="invalid admin key")
+
+
 @app.post("/reference/fx_rates")
-def upsert_fx_rate(base_currency: str = Query(...), quote_currency: str = Query(...),
-                   year: int = Query(...), rate: float = Query(...),
-                   org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+def add_fx_rate(base_currency: str = Query(...), quote_currency: str = Query(...),
+                year: int = Query(...), rate: float = Query(...),
+                _: None = Depends(require_admin), db: Session = Depends(get_db)):
+    """Append-only: corrections insert a NEW row (latest wins); history preserved."""
+    from .services.calc import _utcnow_iso
     if not math.isfinite(rate) or rate <= 0:
         raise HTTPException(status_code=400, detail="rate must be a finite number > 0")
-    base, quote = base_currency.upper(), quote_currency.upper()
-    row = db.query(FxRate).filter(FxRate.base_currency == base,
-                                  FxRate.quote_currency == quote, FxRate.year == year).first()
-    if row:
-        row.rate = rate
-    else:
-        db.add(FxRate(base_currency=base, quote_currency=quote, year=year, rate=rate))
-    db.commit()
-    return {"base_currency": base, "quote_currency": quote, "year": year, "rate": rate}
+    row = FxRate(base_currency=base_currency.upper(), quote_currency=quote_currency.upper(),
+                 year=year, rate=rate, recorded_at=_utcnow_iso())
+    db.add(row); db.commit(); db.refresh(row)
+    return {"id": row.id, "base_currency": row.base_currency,
+            "quote_currency": row.quote_currency, "year": row.year, "rate": row.rate}
 
 
 @app.post("/reference/price_indices")
-def upsert_price_index(currency: str = Query(...), year: int = Query(...),
-                       index_value: float = Query(...),
-                       org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+def add_price_index(currency: str = Query(...), year: int = Query(...),
+                    index_value: float = Query(...),
+                    _: None = Depends(require_admin), db: Session = Depends(get_db)):
+    """Append-only: corrections insert a NEW row (latest wins); history preserved."""
+    from .services.calc import _utcnow_iso
     if not math.isfinite(index_value) or index_value <= 0:
         raise HTTPException(status_code=400, detail="index_value must be a finite number > 0")
-    cur = currency.upper()
-    row = db.query(PriceIndex).filter(PriceIndex.currency == cur, PriceIndex.year == year).first()
-    if row:
-        row.index_value = index_value
-    else:
-        db.add(PriceIndex(currency=cur, year=year, index_value=index_value))
-    db.commit()
-    return {"currency": cur, "year": year, "index_value": index_value}
+    row = PriceIndex(currency=currency.upper(), year=year, index_value=index_value,
+                     recorded_at=_utcnow_iso())
+    db.add(row); db.commit(); db.refresh(row)
+    return {"id": row.id, "currency": row.currency, "year": row.year,
+            "index_value": row.index_value}
 
 
 @app.get("/reports/sb253")

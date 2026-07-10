@@ -68,15 +68,40 @@ def seed_factors(session):
                 raise ValueError(
                     f"per-gas breakdown inconsistent with aggregate for "
                     f"{ef.category}/{ef.subcategory}: {recomposed} != {ef.value}")
+        # A spend-based factor without a base_year cannot be aligned to at
+        # calc time (fail-closed) — reject the catalog row up front.
+        if ef.method_type == "spend_based" and ef.base_year is None:
+            raise ValueError(
+                f"spend-based factor {ef.category}/{ef.subcategory} has no base_year")
         factors.append(ef)
     session.add_all(factors)
+    session.commit()
+
+
+def seed_reference_data(session):
+    """DEMO FX/CPI reference series so the demo spend factors (GBP, base 2021)
+    are computable for activity years 2021-2026. Placeholder values like the
+    rest of the demo catalog — replace with ONS/Eurostat/ECB series for real use.
+    """
+    from app.models import FxRate, PriceIndex
+    from app.services.calc import _utcnow_iso
+    now = _utcnow_iso()
+    cpi = {
+        "GBP": {2021: 100.0, 2022: 109.0, 2023: 116.0, 2024: 119.0, 2025: 122.0, 2026: 125.0},
+        "EUR": {2021: 100.0, 2022: 108.0, 2023: 114.0, 2024: 117.0, 2025: 119.0, 2026: 121.0},
+    }
+    for cur, series in cpi.items():
+        for year, idx in series.items():
+            session.add(PriceIndex(currency=cur, year=year, index_value=idx, recorded_at=now))
+    session.add(FxRate(base_currency="EUR", quote_currency="GBP", year=2021,
+                       rate=0.86, recorded_at=now))
     session.commit()
 
 
 def main():
     upgrade_schema()
     from app.database import SessionLocal
-    from app.models import EmissionFactor
+    from app.models import EmissionFactor, PriceIndex
     session = SessionLocal()
     try:
         if session.query(EmissionFactor).count() == 0:
@@ -84,6 +109,9 @@ def main():
             print("Seeded emission factors (demo).")
         else:
             print("Emission factors already present.")
+        if session.query(PriceIndex).count() == 0:
+            seed_reference_data(session)
+            print("Seeded demo FX/CPI reference data.")
     finally:
         session.close()
 

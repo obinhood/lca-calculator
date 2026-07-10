@@ -698,11 +698,16 @@ def test_date_policy_is_per_row_and_dayfirst():
 
 # --- LCA methods: spend-based EEIO, method hierarchy, biogenic pool ---
 
-def _spend_factor(db, subcategory="professional_services", value=0.045, unit="GBP"):
+def _spend_factor(db, subcategory="professional_services", value=0.045, unit="GBP",
+                  base_year=2025):
+    # base_year matches the fixture activities' 2025 dates -> same-year
+    # passthrough (no CPI/FX reference data needed). A NULL base_year would
+    # fail closed by design.
     f = EmissionFactor(source="EEIO_DEMO", version="1", geography="GB", year=2024,
                        category="spend", subcategory=subcategory, unit=unit,
                        gwp_set="AR6", value=value, method_type="spend_based",
-                       lca_boundary="cradle_to_gate")
+                       lca_boundary="cradle_to_gate", base_year=base_year,
+                       price_basis="basic")
     db.add(f); db.commit(); db.refresh(f)
     return f
 

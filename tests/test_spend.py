@@ -88,3 +88,51 @@ def test_calc_missing_reference_data_is_data_error(db):
     run = compute_co2e(db, org.id)                          # no FX/CPI loaded
     assert run.data_errors == 1
     assert run.mapped == 0
+
+
+# --- Phase 7 verification-panel hardening ---
+
+def test_null_base_year_fails_closed(db):
+    """A spend factor without base_year must reject, not degrade to spot FX."""
+    with pytest.raises(SpendNormalizationError):
+        normalize_spend(db, 1000.0, "EUR", 2015, "GBP", None)
+
+
+def test_missing_spend_year_fails_closed(db):
+    """Undated spend cannot be silently treated as already-base-year."""
+    with pytest.raises(SpendNormalizationError):
+        normalize_spend(db, 1000.0, "EUR", None, "GBP", 2021)
+
+
+def test_lineage_records_cpi_values_and_row_ids(db):
+    """An assurer must be able to verify against the reference series, not just
+    re-multiply a pre-derived ratio."""
+    db.add_all([PriceIndex(currency="EUR", year=2024, index_value=112.0),
+                PriceIndex(currency="EUR", year=2021, index_value=100.0),
+                FxRate(base_currency="EUR", quote_currency="GBP", year=2021, rate=0.90)])
+    db.commit()
+    s = normalize_spend(db, 11200.0, "EUR", 2024, "GBP", 2021)
+    assert s["cpi_from"] == 112.0 and s["cpi_to"] == 100.0
+    assert len(s["price_index_ids"]) == 2
+    assert s["fx_rate"] == 0.90 and s["fx_rate_id"] is not None
+    assert s["fx_rate_inverted"] is False
+    assert s["amount_in_factor_currency"] == pytest.approx(9000.0)
+
+
+def test_inverse_rate_lineage_flagged(db):
+    db.add(FxRate(base_currency="GBP", quote_currency="EUR", year=2021, rate=1.25))
+    db.commit()
+    s = normalize_spend(db, 1000.0, "EUR", 2021, "GBP", 2021)
+    assert s["fx_rate_inverted"] is True
+    assert s["amount_in_factor_currency"] == pytest.approx(800.0)
+
+
+def test_append_only_latest_entry_wins(db):
+    """Corrections are new rows; lookups take the latest; history persists."""
+    db.add(FxRate(base_currency="EUR", quote_currency="GBP", year=2021, rate=0.80))
+    db.commit()
+    db.add(FxRate(base_currency="EUR", quote_currency="GBP", year=2021, rate=0.90))
+    db.commit()
+    s = normalize_spend(db, 1000.0, "EUR", 2021, "GBP", 2021)
+    assert s["fx_rate"] == 0.90                          # latest entry wins
+    assert db.query(FxRate).count() == 2                 # history preserved

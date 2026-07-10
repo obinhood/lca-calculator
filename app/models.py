@@ -101,7 +101,9 @@ class FxRate(Base):
     """
     __tablename__ = "fx_rates"
     __table_args__ = (
-        UniqueConstraint("base_currency", "quote_currency", "year", name="uq_fx"),
+        # Append-only: no unique constraint — corrections INSERT a new row and
+        # lookups take the latest (highest id), so the value history an assurer
+        # needs is never overwritten in place.
         CheckConstraint("rate > 0", name="ck_fx_rate_pos"),
     )
     id = Column(Integer, primary_key=True)
@@ -109,6 +111,7 @@ class FxRate(Base):
     quote_currency = Column(String, nullable=False)  # e.g. EUR
     year = Column(Integer, nullable=False)
     rate = Column(Float, nullable=False)             # quote per 1 base
+    recorded_at = Column(String, nullable=True)      # ISO timestamp of entry
 
 
 class PriceIndex(Base):
@@ -119,13 +122,14 @@ class PriceIndex(Base):
     """
     __tablename__ = "price_indices"
     __table_args__ = (
-        UniqueConstraint("currency", "year", name="uq_price_index"),
+        # Append-only, same rationale as FxRate.
         CheckConstraint("index_value > 0", name="ck_price_index_pos"),
     )
     id = Column(Integer, primary_key=True)
     currency = Column(String, nullable=False)  # economy proxy, e.g. GBP
     year = Column(Integer, nullable=False)
     index_value = Column(Float, nullable=False)
+    recorded_at = Column(String, nullable=True)  # ISO timestamp of entry
 
 
 class MarketInstrument(Base):

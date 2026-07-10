@@ -202,3 +202,34 @@ def test_override_endpoint_over_http(env):
     assert r.status_code == 200
     assert r.json()["mapping_status"] == "overridden"
     assert client.get("/mappings/review", headers=hdr_a).json() == []
+
+
+def test_reference_writes_need_admin_key(env, monkeypatch):
+    client, hdr_a, _, _ = env
+    # Org API keys are NOT enough (503 with admin disabled, regardless of org auth).
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+    r = client.post("/reference/fx_rates",
+                    params={"base_currency": "EUR", "quote_currency": "GBP",
+                            "year": 2021, "rate": 0.9},
+                    headers={**hdr_a, "X-Admin-Key": "anything"})
+    assert r.status_code == 503
+    # With the admin key configured: wrong key 401, right key 200 + row id.
+    monkeypatch.setenv("ADMIN_API_KEY", "s3cret")
+    r2 = client.post("/reference/fx_rates",
+                     params={"base_currency": "EUR", "quote_currency": "GBP",
+                             "year": 2021, "rate": 0.9},
+                     headers={"X-Admin-Key": "wrong"})
+    assert r2.status_code == 401
+    r3 = client.post("/reference/fx_rates",
+                     params={"base_currency": "EUR", "quote_currency": "GBP",
+                             "year": 2021, "rate": 0.9},
+                     headers={"X-Admin-Key": "s3cret"})
+    assert r3.status_code == 200
+    assert r3.json()["id"] is not None
+    # Non-finite / non-positive rejected.
+    for bad in ("inf", "nan", "0", "-1"):
+        rb = client.post("/reference/fx_rates",
+                         params={"base_currency": "EUR", "quote_currency": "GBP",
+                                 "year": 2021, "rate": bad},
+                         headers={"X-Admin-Key": "s3cret"})
+        assert rb.status_code in (400, 422), bad
