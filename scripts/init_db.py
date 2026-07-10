@@ -98,6 +98,26 @@ def seed_reference_data(session):
     session.commit()
 
 
+def seed_cbam_defaults(session):
+    """DEMO CBAM default embedded-emissions values (tCO2e per tonne of good) —
+    plausible magnitudes only; replace with the official Commission tables."""
+    from app.models import CbamDefaultValue
+    from app.services.calc import _utcnow_iso
+    now = _utcnow_iso()
+    rows = [
+        ("7208", "iron_steel",  1.90, 0.30),   # flat-rolled steel
+        ("7601", "aluminium",   1.50, 5.50),   # unwrought aluminium (electricity-heavy)
+        ("2523", "cement",      0.55, 0.05),
+        ("3102", "fertilisers", 1.50, 0.30),   # nitrogenous fertilisers
+        ("280410", "hydrogen",  9.00, 1.00),
+    ]
+    for prefix, cat, d, i in rows:
+        session.add(CbamDefaultValue(cn_code_prefix=prefix, good_category=cat,
+                                     direct_t_co2e_per_t=d, indirect_t_co2e_per_t=i,
+                                     valid_year=2026, recorded_at=now))
+    session.commit()
+
+
 def main():
     upgrade_schema()
     from app.database import SessionLocal
@@ -112,6 +132,10 @@ def main():
         if session.query(PriceIndex).count() == 0:
             seed_reference_data(session)
             print("Seeded demo FX/CPI reference data.")
+        from app.models import CbamDefaultValue
+        if session.query(CbamDefaultValue).count() == 0:
+            seed_cbam_defaults(session)
+            print("Seeded demo CBAM default values.")
     finally:
         session.close()
 

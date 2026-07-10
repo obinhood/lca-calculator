@@ -161,6 +161,52 @@ class MarketInstrument(Base):
     description = Column(Text)
 
 
+class CbamDefaultValue(Base):
+    """Default embedded-emissions values for CBAM goods (tCO2e per tonne).
+
+    Stands in for the Commission-published default values; DEMO data until the
+    official tables are loaded. Matched by longest CN-code prefix. Global
+    reference data (admin-gated writes), append-only like FX/CPI.
+    """
+    __tablename__ = "cbam_default_values"
+    __table_args__ = (
+        CheckConstraint("direct_t_co2e_per_t >= 0", name="ck_cbam_direct_nonneg"),
+        CheckConstraint("indirect_t_co2e_per_t >= 0", name="ck_cbam_indirect_nonneg"),
+    )
+    id = Column(Integer, primary_key=True)
+    cn_code_prefix = Column(String, nullable=False)   # e.g. "7208" (flat-rolled iron/steel)
+    good_category = Column(String, nullable=False)    # iron_steel | aluminium | cement | fertilisers | hydrogen | electricity
+    direct_t_co2e_per_t = Column(Float, nullable=False)
+    indirect_t_co2e_per_t = Column(Float, nullable=False)
+    valid_year = Column(Integer, nullable=False)
+    recorded_at = Column(String, nullable=True)
+
+
+class CbamGood(Base):
+    """One imported goods line feeding a CBAM declaration.
+
+    Embedded emissions use VERIFIED actual installation values when present;
+    unverified actuals are never used (CBAM requires accredited verification)
+    — the line falls back to default values with the substitution flagged.
+    """
+    __tablename__ = "cbam_goods"
+    __table_args__ = (
+        CheckConstraint("quantity_tonnes > 0", name="ck_cbam_qty_pos"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    cn_code = Column(String, nullable=False)
+    description = Column(Text)
+    quantity_tonnes = Column(Float, nullable=False)
+    origin_country = Column(String, nullable=False)
+    import_date = Column(String, nullable=False)      # ISO date
+    installation = Column(Text, nullable=True)        # producing installation, if known
+    actual_direct_t_per_t = Column(Float, nullable=True)
+    actual_indirect_t_per_t = Column(Float, nullable=True)
+    actual_verified = Column(Boolean, default=False)  # accredited verification done?
+    carbon_price_paid_eur_per_t = Column(Float, nullable=True)  # price paid in origin country
+
+
 class ReportingPeriod(Base):
     """A named reporting window for an organisation (e.g. FY2025).
 

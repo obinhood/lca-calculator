@@ -21,6 +21,7 @@ from .reports.summary import summary
 from .reports.secr import secr_report
 from .reports.sb253 import sb253_report
 from .reports.esrs_e1 import esrs_e1_report
+from .reports.cbam import cbam_declaration
 
 app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 
@@ -396,6 +397,70 @@ def add_price_index(currency: str = Query(...), year: int = Query(...),
     db.add(row); db.commit(); db.refresh(row)
     return {"id": row.id, "currency": row.currency, "year": row.year,
             "index_value": row.index_value}
+
+
+@app.post("/cbam/goods")
+def add_cbam_good(cn_code: str = Query(...), quantity_tonnes: float = Query(...),
+                  origin_country: str = Query(...), import_date: str = Query(...),
+                  description: Optional[str] = None, installation: Optional[str] = None,
+                  actual_direct_t_per_t: Optional[float] = None,
+                  actual_indirect_t_per_t: Optional[float] = None,
+                  actual_verified: bool = False,
+                  carbon_price_paid_eur_per_t: Optional[float] = None,
+                  org: Organisation = Depends(current_org),
+                  db: Session = Depends(get_db)):
+    from .models import CbamGood
+    if not math.isfinite(quantity_tonnes) or quantity_tonnes <= 0:
+        raise HTTPException(status_code=400, detail="quantity_tonnes must be a finite number > 0")
+    for name, v in (("actual_direct_t_per_t", actual_direct_t_per_t),
+                    ("actual_indirect_t_per_t", actual_indirect_t_per_t),
+                    ("carbon_price_paid_eur_per_t", carbon_price_paid_eur_per_t)):
+        if v is not None and (not math.isfinite(v) or v < 0):
+            raise HTTPException(status_code=400, detail=f"{name} must be a finite number >= 0")
+    if _parse_iso_date(import_date) is None:
+        raise HTTPException(status_code=400, detail="import_date must be ISO format YYYY-MM-DD")
+    good = CbamGood(organisation_id=org.id, cn_code=cn_code.strip(),
+                    description=description, quantity_tonnes=quantity_tonnes,
+                    origin_country=origin_country.upper(), import_date=import_date,
+                    installation=installation,
+                    actual_direct_t_per_t=actual_direct_t_per_t,
+                    actual_indirect_t_per_t=actual_indirect_t_per_t,
+                    actual_verified=actual_verified,
+                    carbon_price_paid_eur_per_t=carbon_price_paid_eur_per_t)
+    db.add(good); db.commit(); db.refresh(good)
+    return {"id": good.id, "cn_code": good.cn_code, "quantity_tonnes": good.quantity_tonnes}
+
+
+@app.get("/reports/cbam")
+def get_cbam_declaration(year: int = Query(...),
+                         ets_price_eur_per_t: Optional[float] = None,
+                         org: Organisation = Depends(current_org),
+                         db: Session = Depends(get_db)):
+    """CBAM annual declaration payload with fail-closed gates."""
+    return JSONResponse(cbam_declaration(db, org.id, year,
+                                         ets_price_eur_per_t=ets_price_eur_per_t))
+
+
+@app.post("/reference/cbam_defaults")
+def add_cbam_default(cn_code_prefix: str = Query(...), good_category: str = Query(...),
+                     direct_t_co2e_per_t: float = Query(...),
+                     indirect_t_co2e_per_t: float = Query(...),
+                     valid_year: int = Query(...),
+                     _: None = Depends(require_admin), db: Session = Depends(get_db)):
+    """Append-only, admin-gated (global reference data, same doctrine as FX/CPI)."""
+    from .models import CbamDefaultValue
+    from .services.calc import _utcnow_iso
+    for name, v in (("direct_t_co2e_per_t", direct_t_co2e_per_t),
+                    ("indirect_t_co2e_per_t", indirect_t_co2e_per_t)):
+        if not math.isfinite(v) or v < 0:
+            raise HTTPException(status_code=400, detail=f"{name} must be a finite number >= 0")
+    row = CbamDefaultValue(cn_code_prefix=cn_code_prefix.strip(),
+                           good_category=good_category, valid_year=valid_year,
+                           direct_t_co2e_per_t=direct_t_co2e_per_t,
+                           indirect_t_co2e_per_t=indirect_t_co2e_per_t,
+                           recorded_at=_utcnow_iso())
+    db.add(row); db.commit(); db.refresh(row)
+    return {"id": row.id, "cn_code_prefix": row.cn_code_prefix}
 
 
 @app.get("/reports/esrs_e1")
