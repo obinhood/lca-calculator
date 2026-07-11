@@ -481,8 +481,13 @@ def create_target(name: str = Query(...), target_type: str = Query(...),
                   org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import EmissionsTarget, CalculationRun
     from .services.calc import _utcnow_iso
+    from .services.sbti import VALID_SCOPES
     if target_type not in ("near_term", "long_term", "net_zero"):
         raise HTTPException(status_code=400, detail="target_type must be near_term|long_term|net_zero")
+    coverage_tokens = {s.strip() for s in (scope_coverage or "").split("+") if s.strip()}
+    if not coverage_tokens or (coverage_tokens - VALID_SCOPES):
+        raise HTTPException(status_code=400,
+                            detail="scope_coverage must combine scopes 1/2/3 (e.g. '1+2', '1+2+3')")
     if not (0.0 <= target_reduction_pct <= 1.0):
         raise HTTPException(status_code=400, detail="target_reduction_pct must be in [0, 1]")
     if target_year <= base_year:
@@ -520,12 +525,21 @@ def add_credit(registry: str = Query(...), quantity_tco2e: float = Query(...),
         raise HTTPException(status_code=400, detail="credit_type must be removal|reduction|avoidance")
     if not math.isfinite(quantity_tco2e) or quantity_tco2e <= 0:
         raise HTTPException(status_code=400, detail="quantity_tco2e must be a finite number > 0")
+    from sqlalchemy.exc import IntegrityError
     c = CarbonCredit(organisation_id=org.id, registry=registry, project_id=project_id,
                      serial_number=serial_number, vintage_year=vintage_year,
                      quantity_tco2e=quantity_tco2e, credit_type=credit_type,
                      ccp_approved=ccp_approved, vcmi_claim=vcmi_claim,
                      created_at=_utcnow_iso())
-    db.add(c); db.commit(); db.refresh(c)
+    db.add(c)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409,
+                            detail=f"a credit with registry {registry!r} serial "
+                                   f"{serial_number!r} is already registered")
+    db.refresh(c)
     return {"id": c.id, "registry": c.registry, "quantity_tco2e": c.quantity_tco2e}
 
 
@@ -619,16 +633,21 @@ def get_cdp_export(run_id: Optional[int] = None,
 def get_esrs_e1_report(run_id: Optional[int] = None,
                        net_revenue_millions: Optional[float] = None,
                        revenue_currency: str = "EUR",
+                       credits_as_of: Optional[str] = None,
                        org: Organisation = Depends(current_org),
                        db: Session = Depends(get_db)):
-    """CSRD ESRS E1 quantitative disclosure payload with pre-submission gates."""
+    """CSRD ESRS E1 quantitative disclosure payload with pre-submission gates.
+
+    credits_as_of (ISO timestamp) freezes the E1-7 credits section for a filing.
+    """
     if net_revenue_millions is not None and (
             not math.isfinite(net_revenue_millions) or net_revenue_millions <= 0):
         raise HTTPException(status_code=400,
                             detail="net_revenue_millions must be a finite number > 0")
     return JSONResponse(esrs_e1_report(db, org.id, run_id=run_id,
                                        net_revenue_millions=net_revenue_millions,
-                                       revenue_currency=revenue_currency))
+                                       revenue_currency=revenue_currency,
+                                       credits_as_of=credits_as_of))
 
 
 @app.get("/reports/sb253")

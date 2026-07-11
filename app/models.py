@@ -198,6 +198,10 @@ class CarbonCredit(Base):
     __tablename__ = "carbon_credits"
     __table_args__ = (
         CheckConstraint("quantity_tco2e > 0", name="ck_credit_qty_pos"),
+        # A real registry serial is globally unique — the standard defence
+        # against a credit being double-held/double-retired (NULL serials, i.e.
+        # unserialised demo entries, are allowed to repeat under SQLite).
+        UniqueConstraint("registry", "serial_number", name="uq_credit_registry_serial"),
     )
     id = Column(Integer, primary_key=True)
     organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)

@@ -30,7 +30,8 @@ def sbti_report(db: Session, organisation_id: int, target_id: int,
     base_t = base_kg / 1000.0
     target_t = base_t * (1.0 - target.target_reduction_pct)
     ambition = assess_ambition(target.target_reduction_pct, target.base_year,
-                               target.target_year, target.ambition)
+                               target.target_year, target.ambition,
+                               target_type=target.target_type)
 
     trajectory = None
     if current_run_id is not None:
@@ -41,6 +42,11 @@ def sbti_report(db: Session, organisation_id: int, target_id: int,
             blockers.append("current run not found for this organisation")
         elif current_year is None:
             blockers.append("current_year required to place the run on the pathway")
+        elif current_year < target.base_year:
+            # Silently clamping would manufacture "on track" from an out-of-range
+            # (or typo'd) year — block instead.
+            blockers.append(f"current_year {current_year} is before the base year "
+                            f"{target.base_year} — cannot place on the pathway")
         elif current.gwp_set != base_run.gwp_set:
             blockers.append(f"current run GWP set {current.gwp_set} != base {base_run.gwp_set}"
                             f" — trajectory across GWP vintages is not comparable")

@@ -14,11 +14,18 @@ from sqlalchemy import func
 from ..models import EmissionLineItem
 
 SBTI_MIN_ANNUAL_RATE = {"1.5C": 0.042, "WB2C": 0.025}
+# SBTi net-zero / long-term: minimum ~90% absolute reduction (residual offset).
+NET_ZERO_MIN_REDUCTION = 0.90
+VALID_SCOPES = {"1", "2", "3"}
 
 
 def scopes_from_coverage(coverage: str) -> set:
-    """'1+2' -> {'1','2'}; '1+2+3' -> {'1','2','3'}."""
-    return {s.strip() for s in (coverage or "").split("+") if s.strip()}
+    """'1+2' -> {'1','2'}; '1+2+3' -> {'1','2','3'}. Raises on unknown tokens."""
+    tokens = {s.strip() for s in (coverage or "").split("+") if s.strip()}
+    bad = tokens - VALID_SCOPES
+    if bad:
+        raise ValueError(f"invalid scope(s) in coverage {coverage!r}: {sorted(bad)}")
+    return tokens
 
 
 def run_scoped_emissions_kg(db: Session, run_id: int, coverage: str) -> float:
@@ -53,15 +60,29 @@ def implied_annual_rate(target_reduction_pct: float, base_year: int,
 
 
 def assess_ambition(target_reduction_pct: float, base_year: int, target_year: int,
-                    ambition: Optional[str]) -> dict:
+                    ambition: Optional[str], target_type: str = "near_term") -> dict:
+    """Assess a target against the SBTi criterion for its TYPE.
+
+    Near-term targets use the linear annual-reduction floor (4.2% for 1.5C,
+    2.5% for WB2C). Long-term/net-zero targets are judged against the ~90%
+    absolute-reduction requirement, NOT the annual floor (a long horizon
+    legitimately dilutes the yearly rate below 4.2%).
+    """
     rate = implied_annual_rate(target_reduction_pct, base_year, target_year)
-    minimum = SBTI_MIN_ANNUAL_RATE.get(ambition or "")
-    meets = None
-    if rate is not None and minimum is not None:
-        meets = rate + 1e-9 >= minimum
-    return {
+    out = {
+        "target_type": target_type,
         "ambition": ambition,
         "implied_annual_linear_rate": round(rate, 4) if rate is not None else None,
-        "minimum_annual_rate": minimum,
-        "meets_minimum": meets,
     }
+    if target_type in ("long_term", "net_zero"):
+        out["criterion"] = f">= {int(NET_ZERO_MIN_REDUCTION * 100)}% absolute reduction (net-zero)"
+        out["minimum_reduction_pct"] = NET_ZERO_MIN_REDUCTION
+        out["meets_minimum"] = target_reduction_pct + 1e-9 >= NET_ZERO_MIN_REDUCTION
+    else:
+        minimum = SBTI_MIN_ANNUAL_RATE.get(ambition or "")
+        out["criterion"] = (f">= {minimum:.1%}/yr linear (near-term {ambition})"
+                            if minimum else "near-term ambition not recognised")
+        out["minimum_annual_rate"] = minimum
+        out["meets_minimum"] = (rate + 1e-9 >= minimum) if (rate is not None
+                                                            and minimum is not None) else None
+    return out

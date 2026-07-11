@@ -39,22 +39,32 @@ NOT_COVERED = [
 ]
 
 
-def _e1_7(db: Session, run: CalculationRun) -> dict:
+def _e1_7(db: Session, run: CalculationRun, as_of: Optional[str] = None) -> dict:
     """E1-7 removals & carbon credits, from the retired-credit register applied
-    to this run (was hardcoded 'none' before the credits module existed)."""
+    to this run (was hardcoded 'none' before the credits module existed).
+
+    The credits ledger is live, so an ``as_of`` cutoff (retirement_date <= as_of)
+    makes a filed disclosure reproducible — re-pulling the same run + as_of
+    returns the same figures even after later retirements. Stamped in output.
+    """
     from ..models import CarbonCredit
-    applied = db.query(CarbonCredit).filter(
+    q = db.query(CarbonCredit).filter(
         CarbonCredit.organisation_id == run.organisation_id,
         CarbonCredit.retired.is_(True),
-        CarbonCredit.applied_to_run_id == run.id).all()
+        CarbonCredit.applied_to_run_id == run.id)
+    if as_of is not None:
+        q = q.filter(CarbonCredit.retirement_date <= as_of)
+    applied = q.all()
     removals = sum(c.quantity_tco2e for c in applied if c.credit_type == "removal")
     credits = sum(c.quantity_tco2e for c in applied)
     return {
         "removals_retired_tco2e": round(removals, 6),
         "credits_retired_total_tco2e": round(credits, 6),
         "credit_count": len(applied),
+        "as_of": as_of,
         "note": ("Retired credits applied to this run (ISO 14068 accounting). "
-                 "Not netted into gross emissions; disclosed separately per ESRS E1-7."
+                 "Not netted into gross emissions; disclosed separately per ESRS E1-7. "
+                 "Credits ledger is live — pass as_of to freeze this section for a filing."
                  if applied else
                  "No GHG removals or carbon credits recorded for this run."),
     }
@@ -76,7 +86,8 @@ def _renewable_contractual_mwh(db: Session, run: CalculationRun) -> float:
 
 def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
                    net_revenue_millions: Optional[float] = None,
-                   revenue_currency: str = "EUR") -> dict:
+                   revenue_currency: str = "EUR",
+                   credits_as_of: Optional[str] = None) -> dict:
     """ESRS E1 quantitative disclosure payload for one run."""
     s = summary(db, organisation_id=organisation_id, run_id=run_id)
     run_info = s.get("run")
@@ -178,7 +189,7 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             "ghg_intensity": intensity,
         },
         "e1_5_energy_consumption": energy,
-        "e1_7_removals_and_credits": _e1_7(db, run),
+        "e1_7_removals_and_credits": _e1_7(db, run, as_of=credits_as_of),
         "not_covered": NOT_COVERED,
         "method_split": s["method_split"],
         "data_quality": dq,

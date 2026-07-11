@@ -165,3 +165,72 @@ def test_esrs_e1_7_reflects_retired_credits(db):
     e7 = r["e1_7_removals_and_credits"]
     assert e7["removals_retired_tco2e"] == pytest.approx(2.0)
     assert e7["credit_count"] == 1
+
+
+# --- Phase 11 verification-panel hardening ---
+
+def test_ambition_respects_target_type():
+    # net-zero 90% by 2050 must PASS on the net-zero criterion, not the 4.2%/yr floor
+    nz = assess_ambition(0.90, 2020, 2050, "1.5C", target_type="net_zero")
+    assert nz["meets_minimum"] is True
+    assert nz["minimum_reduction_pct"] == 0.90
+    # a weak net-zero (70%) fails
+    weak = assess_ambition(0.70, 2020, 2050, "1.5C", target_type="net_zero")
+    assert weak["meets_minimum"] is False
+    # near-term still uses the annual floor
+    nt = assess_ambition(0.42, 2020, 2030, "1.5C", target_type="near_term")
+    assert nt["meets_minimum"] is True
+
+
+def test_scopes_from_coverage_rejects_bad_tokens():
+    from app.services.sbti import scopes_from_coverage
+    assert scopes_from_coverage("1+2+3") == {"1", "2", "3"}
+    assert scopes_from_coverage(" 1 + 2 ") == {"1", "2"}
+    with pytest.raises(ValueError):
+        scopes_from_coverage("1+4")
+    with pytest.raises(ValueError):
+        scopes_from_coverage("1+foo")
+
+
+def test_current_year_before_base_is_blocked(db):
+    org = _org(db)
+    _activity(db, org.id, _factor(db, "gas", "kWh", 0.184).id, "gas", 10000, "kWh")
+    base = compute_co2e(db, org.id)
+    t = EmissionsTarget(organisation_id=org.id, name="x", target_type="near_term",
+                        scope_coverage="1+2", base_run_id=base.id, base_year=2025,
+                        target_year=2035, target_reduction_pct=0.42, ambition="1.5C")
+    db.add(t); db.commit(); db.refresh(t)
+    r = sbti_report(db, org.id, t.id, current_run_id=base.id, current_year=1999)
+    assert r["ok"] is False
+    assert any("before the base year" in b for b in r["blockers"])
+    assert r["trajectory"] is None                             # never silently "on track"
+
+
+def test_duplicate_credit_serial_rejected(db):
+    org = _org(db)
+    _credit_kw = dict(organisation_id=org.id, registry="verra",
+                      serial_number="VCS-1-A", quantity_tco2e=1.0, credit_type="removal")
+    db.add(CarbonCredit(**_credit_kw)); db.commit()
+    from sqlalchemy.exc import IntegrityError
+    db.add(CarbonCredit(**_credit_kw))
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+
+
+def test_e1_7_as_of_freezes_credits_section(db):
+    from app.reports.esrs_e1 import esrs_e1_report
+    org, run = _mixed_run(db)
+    c1 = _credit(db, org.id, 1.0, retired=True, run_id=run.id)
+    c1.retirement_date = "2026-01-01T00:00:00+00:00"; db.commit()
+    # A later retirement after the filing cutoff must not change the frozen section.
+    c2 = _credit(db, org.id, 5.0, retired=True, run_id=run.id)
+    c2.retirement_date = "2026-06-01T00:00:00+00:00"; db.commit()
+    frozen = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=1.0,
+                            credits_as_of="2026-03-01T00:00:00+00:00")
+    e7 = frozen["e1_7_removals_and_credits"]
+    assert e7["credit_count"] == 1                             # only the pre-cutoff credit
+    assert e7["credits_retired_total_tco2e"] == pytest.approx(1.0)
+    # without a cutoff, both count (live ledger)
+    live = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=1.0)
+    assert live["e1_7_removals_and_credits"]["credit_count"] == 2
