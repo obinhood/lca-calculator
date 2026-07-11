@@ -27,6 +27,9 @@ from .reports.gri import gri_report
 from .reports.cdp import cdp_export
 from .reports.sbti import sbti_report
 from .services.neutrality import neutrality_assessment
+from .reports.framework_guidance import (
+    FRAMEWORKS, list_frameworks, with_guidance,
+)
 
 app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 
@@ -442,8 +445,8 @@ def get_cbam_declaration(year: int = Query(...),
                          org: Organisation = Depends(current_org),
                          db: Session = Depends(get_db)):
     """CBAM annual declaration payload with fail-closed gates."""
-    return JSONResponse(cbam_declaration(db, org.id, year,
-                                         ets_price_eur_per_t=ets_price_eur_per_t))
+    return JSONResponse(with_guidance(cbam_declaration(db, org.id, year,
+                                         ets_price_eur_per_t=ets_price_eur_per_t)))
 
 
 @app.post("/reference/cbam_defaults")
@@ -698,8 +701,8 @@ def create_target(name: str = Query(...), target_type: str = Query(...),
 def get_sbti_report(target_id: int = Query(...), current_run_id: Optional[int] = None,
                     current_year: Optional[int] = None,
                     org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
-    return JSONResponse(sbti_report(db, org.id, target_id, current_run_id=current_run_id,
-                                    current_year=current_year))
+    return JSONResponse(with_guidance(sbti_report(db, org.id, target_id, current_run_id=current_run_id,
+                                    current_year=current_year)))
 
 
 @app.post("/credits")
@@ -770,7 +773,7 @@ def get_neutrality_report(run_id: Optional[int] = None, basis: str = "location",
             .order_by(CalculationRun.id.desc()).first()
     if run is None:
         raise HTTPException(status_code=404, detail="run not found for this organisation")
-    return JSONResponse(neutrality_assessment(db, org.id, run, basis=basis))
+    return JSONResponse(with_guidance(neutrality_assessment(db, org.id, run, basis=basis)))
 
 
 @app.get("/reports/issb_s2")
@@ -779,8 +782,8 @@ def get_issb_s2_report(run_id: Optional[int] = None,
                        org: Organisation = Depends(current_org),
                        db: Session = Depends(get_db)):
     """IFRS S2 payload; jurisdiction: ISSB | UK_SRS | JP_SSBJ | SG_SGX | HK_HKEX."""
-    return JSONResponse(issb_s2_report(db, org.id, run_id=run_id,
-                                       jurisdiction=jurisdiction))
+    return JSONResponse(with_guidance(issb_s2_report(db, org.id, run_id=run_id,
+                                       jurisdiction=jurisdiction)))
 
 
 @app.get("/reports/gri")
@@ -795,9 +798,9 @@ def get_gri_report(run_id: Optional[int] = None,
             not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
         raise HTTPException(status_code=400,
                             detail="intensity_denominator must be a finite number > 0")
-    return JSONResponse(gri_report(db, org.id, run_id=run_id, base_run_id=base_run_id,
+    return JSONResponse(with_guidance(gri_report(db, org.id, run_id=run_id, base_run_id=base_run_id,
                                    intensity_denominator=intensity_denominator,
-                                   intensity_denominator_unit=intensity_denominator_unit))
+                                   intensity_denominator_unit=intensity_denominator_unit)))
 
 
 @app.get("/reports/cdp")
@@ -812,10 +815,10 @@ def get_cdp_export(run_id: Optional[int] = None,
             not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
         raise HTTPException(status_code=400,
                             detail="intensity_denominator must be a finite number > 0")
-    return JSONResponse(cdp_export(db, org.id, run_id=run_id,
+    return JSONResponse(with_guidance(cdp_export(db, org.id, run_id=run_id,
                                    intensity_denominator=intensity_denominator,
                                    intensity_denominator_unit=intensity_denominator_unit,
-                                   verification_status=verification_status))
+                                   verification_status=verification_status)))
 
 
 @app.get("/reports/esrs_e1")
@@ -833,10 +836,10 @@ def get_esrs_e1_report(run_id: Optional[int] = None,
             not math.isfinite(net_revenue_millions) or net_revenue_millions <= 0):
         raise HTTPException(status_code=400,
                             detail="net_revenue_millions must be a finite number > 0")
-    return JSONResponse(esrs_e1_report(db, org.id, run_id=run_id,
+    return JSONResponse(with_guidance(esrs_e1_report(db, org.id, run_id=run_id,
                                        net_revenue_millions=net_revenue_millions,
                                        revenue_currency=revenue_currency,
-                                       credits_as_of=credits_as_of))
+                                       credits_as_of=credits_as_of)))
 
 
 @app.get("/reports/sb253")
@@ -846,9 +849,9 @@ def get_sb253_report(run_id: Optional[int] = None,
                      org: Organisation = Depends(current_org),
                      db: Session = Depends(get_db)):
     """California SB 253 (CCDAA) filing payload with pre-submission gates."""
-    return JSONResponse(sb253_report(db, org.id, run_id=run_id,
+    return JSONResponse(with_guidance(sb253_report(db, org.id, run_id=run_id,
                                      assurance_level=assurance_level,
-                                     assurance_provider=assurance_provider))
+                                     assurance_provider=assurance_provider)))
 
 
 @app.get("/reports/secr")
@@ -861,9 +864,28 @@ def get_secr_report(run_id: Optional[int] = None,
     if intensity_denominator is not None and (
             not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
         raise HTTPException(status_code=400, detail="intensity_denominator must be a finite number > 0")
-    return JSONResponse(secr_report(db, org.id, run_id=run_id,
+    return JSONResponse(with_guidance(secr_report(db, org.id, run_id=run_id,
                                     intensity_denominator=intensity_denominator,
-                                    intensity_denominator_unit=intensity_denominator_unit))
+                                    intensity_denominator_unit=intensity_denominator_unit)))
+
+
+@app.get("/frameworks")
+def get_frameworks(category: Optional[str] = None):
+    """List every framework/standard the platform touches, with support status.
+    Public reference data — no authentication."""
+    items = list_frameworks()
+    if category:
+        items = [f for f in items if f["category"].lower() == category.lower()]
+    return items
+
+
+@app.get("/frameworks/{key}")
+def get_framework_guidance(key: str):
+    """Full guidance for one framework/standard."""
+    g = FRAMEWORKS.get(key)
+    if g is None:
+        raise HTTPException(status_code=404, detail=f"unknown framework {key!r}")
+    return {"key": key, **g}
 
 
 @app.get("/factors")
