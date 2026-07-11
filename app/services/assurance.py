@@ -71,6 +71,14 @@ def engagement_view(db: Session, eng: AssuranceEngagement,
     materiality_t = (eng.materiality_pct / 100.0) * (run.total_co2e or 0.0) / 1000.0
     open_material = [f for f in findings if f.status == "open" and f.severity == "material"]
 
+    live_readiness = readiness_assessment(db, run)
+    # For a concluded engagement show the readiness FROZEN at conclusion, and flag
+    # if the run has since drifted (so a reader isn't misled by a live recompute).
+    snapshot = json.loads(eng.readiness_snapshot) if eng.readiness_snapshot else None
+    readiness_shown = snapshot if snapshot is not None else live_readiness
+    ready_now = live_readiness["ready"]
+    ready_permitted = ready_now and not open_material
+
     view = {
         "engagement": {
             "id": eng.id, "standard": eng.standard, "level": eng.level,
@@ -83,7 +91,10 @@ def engagement_view(db: Session, eng: AssuranceEngagement,
                 "total_co2e_tco2e": round((run.total_co2e or 0.0) / 1000.0, 6),
                 "created_at": run.created_at},
         "materiality_tco2e": round(materiality_t, 6),
-        "readiness": readiness_assessment(db, run),
+        "readiness": readiness_shown,
+        "readiness_is_snapshot_at_conclusion": snapshot is not None,
+        "run_changed_since_conclusion": bool(
+            snapshot is not None and snapshot.get("ready") != ready_now),
         "findings": [{
             "id": f.id, "severity": f.severity, "status": f.status,
             "description": f.description, "line_item_id": f.line_item_id,
@@ -91,10 +102,8 @@ def engagement_view(db: Session, eng: AssuranceEngagement,
         } for f in findings],
         "open_material_findings": len(open_material),
         "conclusion_gate": {
-            "unqualified_permitted": bool(readiness_assessment(db, run)["ready"])
-                                     and not open_material,
-            "reason": ("ready and no open material findings"
-                       if (readiness_assessment(db, run)["ready"] and not open_material)
+            "unqualified_permitted": ready_permitted,
+            "reason": ("ready and no open material findings" if ready_permitted
                        else "readiness checklist failing and/or open material findings"),
         },
     }

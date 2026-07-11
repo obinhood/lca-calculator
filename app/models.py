@@ -244,6 +244,9 @@ class AssuranceEngagement(Base):
     opinion = Column(String, nullable=True)     # unqualified|qualified|adverse|disclaimer
     opinion_note = Column(Text, nullable=True)
     access_token_hash = Column(String, nullable=True)  # read-only assuror access
+    # Readiness checklist frozen at conclusion time, so a concluded opinion is
+    # judged against the run as it stood then — not a live-recomputed checklist.
+    readiness_snapshot = Column(Text, nullable=True)
     created_at = Column(String)
     concluded_at = Column(String, nullable=True)
 

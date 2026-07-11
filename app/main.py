@@ -538,12 +538,17 @@ def add_finding(engagement_id: int, severity: str = Query(...),
 def resolve_finding(finding_id: int, resolution_note: str = Query(...),
                     org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import AssuranceFinding, AssuranceEngagement
-    f = db.query(AssuranceFinding).join(
+    row = db.query(AssuranceFinding, AssuranceEngagement).join(
         AssuranceEngagement, AssuranceEngagement.id == AssuranceFinding.engagement_id)\
         .filter(AssuranceFinding.id == finding_id,
                 AssuranceEngagement.organisation_id == org.id).first()
-    if f is None:
+    if row is None:
         raise HTTPException(status_code=404, detail="finding not found for this organisation")
+    f, eng = row
+    # A concluded engagement's findings ledger is frozen — mutating it after the
+    # opinion is issued would silently doctor the audit trail behind it.
+    if eng.status == "concluded":
+        raise HTTPException(status_code=409, detail="engagement is concluded; findings are frozen")
     f.status = "resolved"; f.resolution_note = resolution_note
     db.commit()
     return {"id": f.id, "status": f.status}
@@ -561,21 +566,23 @@ def conclude_engagement(engagement_id: int, opinion: str = Query(...),
         raise HTTPException(status_code=400, detail="opinion must be unqualified|qualified|adverse|disclaimer")
     if eng.status == "concluded":
         raise HTTPException(status_code=409, detail="engagement already concluded")
+    import json as _json
+    run = db.get(CalculationRun, eng.run_id)
+    readiness = readiness_assessment(db, run)
     # An unqualified conclusion cannot overstate the assurance obtained.
     if opinion == "unqualified":
-        run = db.get(CalculationRun, eng.run_id)
-        ready = readiness_assessment(db, run)["ready"]
         open_material = db.query(AssuranceFinding).filter(
             AssuranceFinding.engagement_id == eng.id,
             AssuranceFinding.status == "open",
             AssuranceFinding.severity == "material").count()
-        if not ready or open_material:
+        if not readiness["ready"] or open_material:
             raise HTTPException(status_code=409,
                                 detail="cannot issue unqualified: readiness checklist "
                                        "failing and/or open material findings — use "
                                        "qualified/adverse/disclaimer")
     eng.status = "concluded"; eng.opinion = opinion; eng.opinion_note = opinion_note
     eng.concluded_at = _utcnow_iso()
+    eng.readiness_snapshot = _json.dumps(readiness)   # freeze the checklist as-issued
     db.commit()
     return {"id": eng.id, "opinion": opinion, "status": eng.status}
 
@@ -603,15 +610,18 @@ def _engagement_for_reader(db: Session, engagement_id: int,
     import hmac
     from .models import AssuranceEngagement
     eng = db.get(AssuranceEngagement, engagement_id)
-    if eng is None:
-        raise HTTPException(status_code=404, detail="engagement not found")
-    if x_assurance_token and eng.access_token_hash and \
-            hmac.compare_digest(_hash_key(x_assurance_token), eng.access_token_hash):
-        return eng, "assuror"
-    if x_api_key:
-        o = db.query(Organisation).filter(Organisation.api_key_hash == _hash_key(x_api_key)).first()
-        if o and eng.organisation_id == o.id:
-            return eng, "owner"
+    # Check credentials against the engagement only if it exists — a nonexistent
+    # id and an unauthorized one return the SAME 401, so a credential-less caller
+    # cannot enumerate valid engagement ids (no existence oracle).
+    if eng is not None:
+        if x_assurance_token and eng.access_token_hash and \
+                hmac.compare_digest(_hash_key(x_assurance_token), eng.access_token_hash):
+            return eng, "assuror"
+        if x_api_key:
+            o = db.query(Organisation).filter(
+                Organisation.api_key_hash == _hash_key(x_api_key)).first()
+            if o and eng.organisation_id == o.id:
+                return eng, "owner"
     raise HTTPException(status_code=401, detail="valid X-API-Key (owner) or X-Assurance-Token required")
 
 

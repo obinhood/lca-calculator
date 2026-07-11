@@ -158,3 +158,52 @@ def test_engagement_tenant_isolation(env):
     # B cannot create an engagement over A's run.
     assert c.post("/assurance/engagements", headers=hdr_b,
                   params={"run_id": clean, "standard": "ISAE_3410", "level": "limited"}).status_code == 404
+
+
+# --- Phase 12 verification-panel hardening ---
+
+def test_no_existence_oracle_on_reader_endpoints(env):
+    """Nonexistent and unauthorized engagements return the SAME 401 (no id enumeration)."""
+    c, hdr_a, _ = env
+    clean = _clean_run(c, hdr_a)
+    eng = c.post("/assurance/engagements", headers=hdr_a,
+                 params={"run_id": clean, "standard": "ISAE_3410", "level": "limited"}).json()["id"]
+    # No credentials at all: existing and nonexistent both 401 (not 404).
+    assert c.get(f"/assurance/engagements/{eng}").status_code == 401
+    assert c.get("/assurance/engagements/999999").status_code == 401
+    assert c.get(f"/assurance/engagements/{eng}/lineage").status_code == 401
+    assert c.get("/assurance/engagements/999999/lineage").status_code == 401
+
+
+def test_findings_frozen_after_conclusion(env):
+    c, hdr_a, _ = env
+    clean = _clean_run(c, hdr_a)
+    eng = c.post("/assurance/engagements", headers=hdr_a,
+                 params={"run_id": clean, "standard": "ISAE_3410", "level": "reasonable"}).json()["id"]
+    fid = c.post(f"/assurance/engagements/{eng}/findings", headers=hdr_a,
+                 params={"severity": "material", "description": "open issue"}).json()["id"]
+    # Conclude qualified (blocked from unqualified by the open material finding).
+    c.post(f"/assurance/engagements/{eng}/conclude", headers=hdr_a, params={"opinion": "qualified"})
+    # Resolving the finding AFTER conclusion is refused — the ledger is frozen.
+    r = c.post(f"/assurance/findings/{fid}/resolve", headers=hdr_a,
+               params={"resolution_note": "sneaky post-hoc edit"})
+    assert r.status_code == 409
+
+
+def test_readiness_snapshot_frozen_at_conclusion(env):
+    c, hdr_a, _ = env
+    clean = _clean_run(c, hdr_a)
+    eng = c.post("/assurance/engagements", headers=hdr_a,
+                 params={"run_id": clean, "standard": "ISO_14064_3", "level": "reasonable"}).json()["id"]
+    c.post(f"/assurance/engagements/{eng}/conclude", headers=hdr_a, params={"opinion": "unqualified"})
+    # Make the run stale (add an activity without recomputing this run).
+    csv = ("date,category,subcategory,description,quantity,unit,geo\n"
+           "2025-03-01,electricity,,extra,50,kWh,GB\n")
+    c.post("/activities/upload_csv", headers=hdr_a,
+           files={"file": ("extra.csv", io.BytesIO(csv.encode()), "text/csv")})
+    v = c.get(f"/assurance/engagements/{eng}", headers=hdr_a).json()
+    # Snapshot readiness (as concluded) still shows ready; drift is flagged.
+    assert v["readiness_is_snapshot_at_conclusion"] is True
+    assert v["readiness"]["ready"] is True
+    assert v["run_changed_since_conclusion"] is True
+    assert v["engagement"]["opinion"] == "unqualified"        # frozen opinion intact
