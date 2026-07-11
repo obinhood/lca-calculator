@@ -219,6 +219,44 @@ class CarbonCredit(Base):
     created_at = Column(String)
 
 
+class LcaAssessment(Base):
+    """A life-cycle / sector assessment computed from a bill of items against a
+    functional unit (ISO 14067 product PCF, ISO 14083 transport chain, EN 15804
+    /EN 15978 construction). Reuses the fail-closed calc engine per item and
+    reports by stage/module, total, and per functional unit."""
+    __tablename__ = "lca_assessments"
+    __table_args__ = (
+        CheckConstraint("functional_unit_quantity > 0", name="ck_lca_fu_pos"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    name = Column(String, nullable=False)
+    standard = Column(String, nullable=False)   # iso_14067 | iso_14040_44 | iso_14083 | en_15804 | en_15978
+    functional_unit = Column(String, nullable=False)   # e.g. "1 kg product", "1 t.km", "1 m2 GFA"
+    functional_unit_quantity = Column(Float, nullable=False, default=1.0)
+    gwp_set = Column(String, nullable=False, default="AR6")
+    created_at = Column(String)
+
+
+class LcaItem(Base):
+    """One input/leg/lifecycle-module line of an assessment."""
+    __tablename__ = "lca_items"
+    __table_args__ = (
+        CheckConstraint("allocation_factor >= 0 AND allocation_factor <= 1",
+                        name="ck_lca_alloc"),
+    )
+    id = Column(Integer, primary_key=True)
+    assessment_id = Column(Integer, ForeignKey("lca_assessments.id"), nullable=False)
+    stage = Column(String, nullable=False)      # lifecycle stage / EN module (A1-A3, C3, ...) / transport leg
+    description = Column(Text, nullable=True)
+    quantity = Column(Float, nullable=True)
+    unit = Column(String, nullable=True)
+    factor_id = Column(Integer, ForeignKey("emission_factors.id"), nullable=True)
+    allocation_factor = Column(Float, nullable=False, default=1.0)  # co-product allocation
+
+    factor = relationship("EmissionFactor", foreign_keys=[factor_id])
+
+
 class FinancedPosition(Base):
     """A financed position for PCAF financed-emissions accounting.
 

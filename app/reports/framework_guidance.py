@@ -110,7 +110,7 @@ FRAMEWORKS = {
     "iso_14067": {
         "name": "ISO 14067 (carbon footprint of products)",
         "category": "Product footprints", "jurisdiction": "global (ISO)",
-        "authority": "ISO", "platform_support": "partial", "endpoint": None,
+        "authority": "ISO", "platform_support": "built", "endpoint": "/lca/assessments",
         "applies_to": "Product-level carbon footprints.",
         "key_points": [
             "Report biogenic carbon separately from fossil; do not net into the fossil total.",
@@ -120,7 +120,7 @@ FRAMEWORKS = {
     "iso_14040_44": {
         "name": "ISO 14040 / 14044 (LCA principles & requirements)",
         "category": "Product footprints", "jurisdiction": "global (ISO)",
-        "authority": "ISO", "platform_support": "reference", "endpoint": None,
+        "authority": "ISO", "platform_support": "built", "endpoint": "/lca/assessments",
         "applies_to": "Life-cycle assessment methodology.",
         "key_points": [
             "Four phases: goal & scope, inventory (LCI), impact assessment (LCIA), interpretation.",
@@ -319,7 +319,7 @@ FRAMEWORKS = {
     "iso_14083": {
         "name": "ISO 14083 (transport chain GHG) / GLEC Framework",
         "category": "Logistics", "jurisdiction": "global",
-        "authority": "ISO / Smart Freight Centre", "platform_support": "reference", "endpoint": None,
+        "authority": "ISO / Smart Freight Centre", "platform_support": "built", "endpoint": "/lca/assessments",
         "applies_to": "Transport and logistics chain emissions.",
         "key_points": ["Account emissions per transport leg (well-to-wheel); use tkm/pkm activity data."],
     },
@@ -327,7 +327,7 @@ FRAMEWORKS = {
     "en_15978_15804": {
         "name": "EN 15978 / EN 15804 (building & construction-product LCA), RICS Whole Life Carbon",
         "category": "Construction", "jurisdiction": "EU/UK",
-        "authority": "CEN / RICS", "platform_support": "reference", "endpoint": None,
+        "authority": "CEN / RICS", "platform_support": "built", "endpoint": "/lca/assessments",
         "applies_to": "Whole-life carbon of buildings and construction products.",
         "key_points": ["Report by life-cycle module (A1-A5, B, C, D); EN 15804 EPDs feed EN 15978 building assessments."],
     },
@@ -383,6 +383,11 @@ _NAME_TO_KEY = [
     ("ISO 14068", "iso_14068"),
     ("PCAF financed emissions", "pcaf"),
     ("SFDR Principal Adverse Impacts", "sfdr"),
+    ("ISO 14067", "iso_14067"),
+    ("ISO 14040", "iso_14040_44"),
+    ("ISO 14083", "iso_14083"),
+    ("EN 15804", "en_15978_15804"),
+    ("EN 15978", "en_15978_15804"),
 ]
 
 

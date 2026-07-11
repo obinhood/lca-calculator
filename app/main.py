@@ -475,6 +475,69 @@ def add_cbam_default(cn_code_prefix: str = Query(...), good_category: str = Quer
     return {"id": row.id, "cn_code_prefix": row.cn_code_prefix}
 
 
+@app.post("/lca/assessments")
+def create_lca_assessment(name: str = Query(...), standard: str = Query(...),
+                          functional_unit: str = Query(...),
+                          functional_unit_quantity: float = 1.0, gwp_set: str = "AR6",
+                          org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import LcaAssessment
+    from .services.lca import STANDARDS
+    from .services.calc import _utcnow_iso
+    if standard not in STANDARDS:
+        raise HTTPException(status_code=400, detail=f"standard must be one of {sorted(STANDARDS)}")
+    if not math.isfinite(functional_unit_quantity) or functional_unit_quantity <= 0:
+        raise HTTPException(status_code=400, detail="functional_unit_quantity must be finite > 0")
+    a = LcaAssessment(organisation_id=org.id, name=name, standard=standard,
+                      functional_unit=functional_unit,
+                      functional_unit_quantity=functional_unit_quantity,
+                      gwp_set=gwp_set, created_at=_utcnow_iso())
+    db.add(a); db.commit(); db.refresh(a)
+    return {"id": a.id, "name": a.name, "standard": a.standard}
+
+
+def _own_assessment(db: Session, org: Organisation, assessment_id: int):
+    from .models import LcaAssessment
+    a = db.query(LcaAssessment).filter(LcaAssessment.id == assessment_id,
+                                       LcaAssessment.organisation_id == org.id).first()
+    if a is None:
+        raise HTTPException(status_code=404, detail="assessment not found for this organisation")
+    return a
+
+
+@app.post("/lca/assessments/{assessment_id}/items")
+def add_lca_item(assessment_id: int, stage: str = Query(...),
+                 quantity: float = Query(...), unit: str = Query(...),
+                 factor_id: int = Query(...), description: Optional[str] = None,
+                 allocation_factor: float = 1.0,
+                 org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import LcaItem
+    from .services.lca import valid_stage
+    a = _own_assessment(db, org, assessment_id)
+    if not valid_stage(a.standard, stage):
+        raise HTTPException(status_code=400,
+                            detail=f"invalid stage {stage!r} for {a.standard} "
+                                   f"(EN standards require a module code like A1-A3, C3, B6)")
+    if not (0.0 <= allocation_factor <= 1.0):
+        raise HTTPException(status_code=400, detail="allocation_factor must be in [0, 1]")
+    factor = db.get(EmissionFactor, factor_id)
+    if factor is None:
+        raise HTTPException(status_code=404, detail="emission factor not found")
+    it = LcaItem(assessment_id=a.id, stage=stage, description=description, quantity=quantity,
+                 unit=unit, factor_id=factor_id, allocation_factor=allocation_factor)
+    db.add(it); db.commit(); db.refresh(it)
+    return {"id": it.id, "stage": it.stage, "factor_id": factor_id}
+
+
+@app.get("/reports/lca/{assessment_id}")
+def get_lca_report(assessment_id: int, org: Organisation = Depends(current_org),
+                   db: Session = Depends(get_db)):
+    from .services.lca import compute_assessment
+    a = _own_assessment(db, org, assessment_id)
+    payload = compute_assessment(db, a)
+    payload["framework"] = payload["framework"]  # keep as-is; guidance maps on prefix
+    return JSONResponse(with_guidance(payload))
+
+
 @app.post("/finance/positions")
 def add_financed_position(investee_name: str = Query(...), asset_class: str = Query(...),
                           currency: str = Query(...), outstanding_amount: float = Query(...),
