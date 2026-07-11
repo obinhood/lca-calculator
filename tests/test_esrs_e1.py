@@ -57,7 +57,8 @@ def test_esrs_e1_golden_values(db, seeded):
     # E1-5 energy in MWh: 1.2 + 0.8 + 1.5 (diesel @ demo 10 kWh/L) = 3.5 MWh
     assert r["e1_5_energy_consumption"]["total_mwh"] == pytest.approx(3.5)
     assert r["disclosure_ready"] is True
-    assert r["e1_7_removals_and_credits"]["removals_tco2e"] == 0.0
+    assert r["e1_7_removals_and_credits"]["removals_retired_tco2e"] == 0.0
+    assert r["e1_7_removals_and_credits"]["credit_count"] == 0
     assert "E1-4 targets" in " ".join(r["not_covered"])
 
 

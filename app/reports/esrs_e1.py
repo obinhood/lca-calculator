@@ -39,6 +39,27 @@ NOT_COVERED = [
 ]
 
 
+def _e1_7(db: Session, run: CalculationRun) -> dict:
+    """E1-7 removals & carbon credits, from the retired-credit register applied
+    to this run (was hardcoded 'none' before the credits module existed)."""
+    from ..models import CarbonCredit
+    applied = db.query(CarbonCredit).filter(
+        CarbonCredit.organisation_id == run.organisation_id,
+        CarbonCredit.retired.is_(True),
+        CarbonCredit.applied_to_run_id == run.id).all()
+    removals = sum(c.quantity_tco2e for c in applied if c.credit_type == "removal")
+    credits = sum(c.quantity_tco2e for c in applied)
+    return {
+        "removals_retired_tco2e": round(removals, 6),
+        "credits_retired_total_tco2e": round(credits, 6),
+        "credit_count": len(applied),
+        "note": ("Retired credits applied to this run (ISO 14068 accounting). "
+                 "Not netted into gross emissions; disclosed separately per ESRS E1-7."
+                 if applied else
+                 "No GHG removals or carbon credits recorded for this run."),
+    }
+
+
 def _renewable_contractual_mwh(db: Session, run: CalculationRun) -> float:
     """MWh covered by renewable contractual instruments (REC/PPA) in this run,
     read from the FROZEN market-line allocations."""
@@ -157,12 +178,7 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             "ghg_intensity": intensity,
         },
         "e1_5_energy_consumption": energy,
-        "e1_7_removals_and_credits": {
-            "removals_tco2e": 0.0,
-            "credits_tco2e": 0.0,
-            "note": "No GHG removals or carbon credits are recorded on this platform "
-                    "for this run — stated explicitly, not omitted.",
-        },
+        "e1_7_removals_and_credits": _e1_7(db, run),
         "not_covered": NOT_COVERED,
         "method_split": s["method_split"],
         "data_quality": dq,

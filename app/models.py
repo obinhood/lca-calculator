@@ -161,6 +161,60 @@ class MarketInstrument(Base):
     description = Column(Text)
 
 
+class EmissionsTarget(Base):
+    """A science-based / net-zero emissions target anchored to an immutable base run.
+
+    Trajectory is assessed against the base run's frozen total, so a target's
+    baseline can never drift. ``target_reduction_pct`` is the TOTAL reduction by
+    ``target_year`` vs the base year (0-1); the pathway is linear between them.
+    """
+    __tablename__ = "emissions_targets"
+    __table_args__ = (
+        CheckConstraint("target_reduction_pct >= 0 AND target_reduction_pct <= 1",
+                        name="ck_target_reduction_frac"),
+        CheckConstraint("target_year > base_year", name="ck_target_year_after_base"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    name = Column(String, nullable=False)
+    target_type = Column(String, nullable=False)   # near_term | long_term | net_zero
+    scope_coverage = Column(String, nullable=False, default="1+2")  # e.g. "1+2", "1+2+3"
+    base_run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
+    base_year = Column(Integer, nullable=False)
+    target_year = Column(Integer, nullable=False)
+    target_reduction_pct = Column(Float, nullable=False)  # total reduction by target year
+    ambition = Column(String, nullable=True)       # 1.5C | WB2C | custom
+    sbti_validated = Column(Boolean, default=False)
+    created_at = Column(String)
+
+
+class CarbonCredit(Base):
+    """A carbon credit holding for neutrality/offset accounting (ISO 14068).
+
+    Only RETIRED credits applied to a specific run count toward a neutrality
+    claim. Integrity metadata (ICVCM Core Carbon Principles approval, VCMI claim
+    tier, removal vs avoidance) drives the claim-quality guardrails.
+    """
+    __tablename__ = "carbon_credits"
+    __table_args__ = (
+        CheckConstraint("quantity_tco2e > 0", name="ck_credit_qty_pos"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    registry = Column(String, nullable=False)      # verra | gold_standard | acr | car | puro
+    project_id = Column(String, nullable=True)
+    serial_number = Column(String, nullable=True)
+    vintage_year = Column(Integer, nullable=True)
+    quantity_tco2e = Column(Float, nullable=False)
+    credit_type = Column(String, nullable=False)   # removal | reduction | avoidance
+    ccp_approved = Column(Boolean, default=False)  # ICVCM Core Carbon Principles
+    vcmi_claim = Column(String, nullable=True)     # none | silver | gold | platinum
+    retired = Column(Boolean, default=False)
+    retirement_date = Column(String, nullable=True)
+    applied_to_run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=True)
+    created_at = Column(String)
+
+
 class CbamDefaultValue(Base):
     """Default embedded-emissions values for CBAM goods (tCO2e per tonne).
 

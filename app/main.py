@@ -25,6 +25,8 @@ from .reports.cbam import cbam_declaration
 from .reports.issb_s2 import issb_s2_report
 from .reports.gri import gri_report
 from .reports.cdp import cdp_export
+from .reports.sbti import sbti_report
+from .services.neutrality import neutrality_assessment
 
 app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 
@@ -468,6 +470,104 @@ def add_cbam_default(cn_code_prefix: str = Query(...), good_category: str = Quer
                            recorded_at=_utcnow_iso())
     db.add(row); db.commit(); db.refresh(row)
     return {"id": row.id, "cn_code_prefix": row.cn_code_prefix}
+
+
+@app.post("/targets")
+def create_target(name: str = Query(...), target_type: str = Query(...),
+                  base_run_id: int = Query(...), base_year: int = Query(...),
+                  target_year: int = Query(...), target_reduction_pct: float = Query(...),
+                  scope_coverage: str = "1+2", ambition: Optional[str] = None,
+                  sbti_validated: bool = False,
+                  org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import EmissionsTarget, CalculationRun
+    from .services.calc import _utcnow_iso
+    if target_type not in ("near_term", "long_term", "net_zero"):
+        raise HTTPException(status_code=400, detail="target_type must be near_term|long_term|net_zero")
+    if not (0.0 <= target_reduction_pct <= 1.0):
+        raise HTTPException(status_code=400, detail="target_reduction_pct must be in [0, 1]")
+    if target_year <= base_year:
+        raise HTTPException(status_code=400, detail="target_year must be after base_year")
+    base = db.query(CalculationRun).filter(CalculationRun.id == base_run_id,
+                                           CalculationRun.organisation_id == org.id).first()
+    if base is None:
+        raise HTTPException(status_code=404, detail="base_run_id not found for this organisation")
+    t = EmissionsTarget(organisation_id=org.id, name=name, target_type=target_type,
+                        scope_coverage=scope_coverage, base_run_id=base_run_id,
+                        base_year=base_year, target_year=target_year,
+                        target_reduction_pct=target_reduction_pct, ambition=ambition,
+                        sbti_validated=sbti_validated, created_at=_utcnow_iso())
+    db.add(t); db.commit(); db.refresh(t)
+    return {"id": t.id, "name": t.name}
+
+
+@app.get("/reports/sbti")
+def get_sbti_report(target_id: int = Query(...), current_run_id: Optional[int] = None,
+                    current_year: Optional[int] = None,
+                    org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    return JSONResponse(sbti_report(db, org.id, target_id, current_run_id=current_run_id,
+                                    current_year=current_year))
+
+
+@app.post("/credits")
+def add_credit(registry: str = Query(...), quantity_tco2e: float = Query(...),
+               credit_type: str = Query(...), project_id: Optional[str] = None,
+               serial_number: Optional[str] = None, vintage_year: Optional[int] = None,
+               ccp_approved: bool = False, vcmi_claim: Optional[str] = None,
+               org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import CarbonCredit
+    from .services.calc import _utcnow_iso
+    if credit_type not in ("removal", "reduction", "avoidance"):
+        raise HTTPException(status_code=400, detail="credit_type must be removal|reduction|avoidance")
+    if not math.isfinite(quantity_tco2e) or quantity_tco2e <= 0:
+        raise HTTPException(status_code=400, detail="quantity_tco2e must be a finite number > 0")
+    c = CarbonCredit(organisation_id=org.id, registry=registry, project_id=project_id,
+                     serial_number=serial_number, vintage_year=vintage_year,
+                     quantity_tco2e=quantity_tco2e, credit_type=credit_type,
+                     ccp_approved=ccp_approved, vcmi_claim=vcmi_claim,
+                     created_at=_utcnow_iso())
+    db.add(c); db.commit(); db.refresh(c)
+    return {"id": c.id, "registry": c.registry, "quantity_tco2e": c.quantity_tco2e}
+
+
+@app.post("/credits/{credit_id}/retire")
+def retire_credit(credit_id: int, run_id: int = Query(...),
+                  org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import CarbonCredit, CalculationRun
+    from .services.calc import _utcnow_iso
+    c = db.query(CarbonCredit).filter(CarbonCredit.id == credit_id,
+                                      CarbonCredit.organisation_id == org.id).first()
+    if c is None:
+        raise HTTPException(status_code=404, detail="credit not found for this organisation")
+    run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                          CalculationRun.organisation_id == org.id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run_id not found for this organisation")
+    if c.retired:
+        raise HTTPException(status_code=409, detail="credit already retired")
+    c.retired = True
+    c.retirement_date = _utcnow_iso()
+    c.applied_to_run_id = run_id
+    db.commit()
+    return {"id": c.id, "retired": True, "applied_to_run_id": run_id}
+
+
+@app.get("/reports/neutrality")
+def get_neutrality_report(run_id: Optional[int] = None, basis: str = "location",
+                          org: Organisation = Depends(current_org),
+                          db: Session = Depends(get_db)):
+    from .models import CalculationRun
+    if basis not in ("location", "market"):
+        raise HTTPException(status_code=400, detail="basis must be location|market")
+    run = None
+    if run_id is not None:
+        run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                              CalculationRun.organisation_id == org.id).first()
+    else:
+        run = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
+            .order_by(CalculationRun.id.desc()).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found for this organisation")
+    return JSONResponse(neutrality_assessment(db, org.id, run, basis=basis))
 
 
 @app.get("/reports/issb_s2")
