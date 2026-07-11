@@ -219,6 +219,49 @@ class CarbonCredit(Base):
     created_at = Column(String)
 
 
+class AssuranceEngagement(Base):
+    """A third-party assurance engagement over one immutable calculation run
+    (ISAE 3410 / ISO 14064-3 / ISSA 5000).
+
+    The run's frozen lineage is the evidence base. An unqualified conclusion is
+    gated on the readiness checklist passing and no open material findings — the
+    conclusion cannot overstate the assurance obtained.
+    """
+    __tablename__ = "assurance_engagements"
+    __table_args__ = (
+        CheckConstraint("materiality_pct > 0 AND materiality_pct <= 100",
+                        name="ck_assurance_materiality"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
+    standard = Column(String, nullable=False)   # ISAE_3410 | ISO_14064_3 | ISSA_5000
+    level = Column(String, nullable=False)      # limited | reasonable
+    assuror_name = Column(String, nullable=True)
+    period_label = Column(String, nullable=True)
+    materiality_pct = Column(Float, nullable=False, default=5.0)
+    status = Column(String, nullable=False, default="planned")  # planned|in_progress|concluded
+    opinion = Column(String, nullable=True)     # unqualified|qualified|adverse|disclaimer
+    opinion_note = Column(Text, nullable=True)
+    access_token_hash = Column(String, nullable=True)  # read-only assuror access
+    created_at = Column(String)
+    concluded_at = Column(String, nullable=True)
+
+
+class AssuranceFinding(Base):
+    """One assurance observation/finding against an engagement, optionally tied
+    to a specific emission line item."""
+    __tablename__ = "assurance_findings"
+    id = Column(Integer, primary_key=True)
+    engagement_id = Column(Integer, ForeignKey("assurance_engagements.id"), nullable=False)
+    line_item_id = Column(Integer, ForeignKey("emission_line_items.id"), nullable=True)
+    severity = Column(String, nullable=False)   # observation | minor | material
+    description = Column(Text, nullable=False)
+    status = Column(String, nullable=False, default="open")  # open | resolved
+    resolution_note = Column(Text, nullable=True)
+    created_at = Column(String)
+
+
 class CbamDefaultValue(Base):
     """Default embedded-emissions values for CBAM goods (tCO2e per tonne).
 

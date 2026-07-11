@@ -472,6 +472,195 @@ def add_cbam_default(cn_code_prefix: str = Query(...), good_category: str = Quer
     return {"id": row.id, "cn_code_prefix": row.cn_code_prefix}
 
 
+@app.post("/assurance/engagements")
+def create_engagement(run_id: int = Query(...), standard: str = Query(...),
+                      level: str = Query(...), assuror_name: Optional[str] = None,
+                      period_label: Optional[str] = None, materiality_pct: float = 5.0,
+                      org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import AssuranceEngagement, CalculationRun
+    from .services.calc import _utcnow_iso
+    if standard not in ("ISAE_3410", "ISO_14064_3", "ISSA_5000"):
+        raise HTTPException(status_code=400, detail="standard must be ISAE_3410|ISO_14064_3|ISSA_5000")
+    if level not in ("limited", "reasonable"):
+        raise HTTPException(status_code=400, detail="level must be limited|reasonable")
+    if not (0 < materiality_pct <= 100):
+        raise HTTPException(status_code=400, detail="materiality_pct must be in (0, 100]")
+    run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                          CalculationRun.organisation_id == org.id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run_id not found for this organisation")
+    eng = AssuranceEngagement(organisation_id=org.id, run_id=run_id, standard=standard,
+                              level=level, assuror_name=assuror_name,
+                              period_label=period_label, materiality_pct=materiality_pct,
+                              status="planned", created_at=_utcnow_iso())
+    db.add(eng); db.commit(); db.refresh(eng)
+    return {"id": eng.id, "run_id": run_id, "standard": standard, "level": level}
+
+
+def _own_engagement(db: Session, org: Organisation, engagement_id: int):
+    from .models import AssuranceEngagement
+    eng = db.query(AssuranceEngagement).filter(
+        AssuranceEngagement.id == engagement_id,
+        AssuranceEngagement.organisation_id == org.id).first()
+    if eng is None:
+        raise HTTPException(status_code=404, detail="engagement not found for this organisation")
+    return eng
+
+
+@app.post("/assurance/engagements/{engagement_id}/findings")
+def add_finding(engagement_id: int, severity: str = Query(...),
+                description: str = Query(...), line_item_id: Optional[int] = None,
+                org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import AssuranceFinding, EmissionLineItem
+    from .services.calc import _utcnow_iso
+    eng = _own_engagement(db, org, engagement_id)
+    if eng.status == "concluded":
+        raise HTTPException(status_code=409, detail="engagement is concluded; reopen not supported")
+    if severity not in ("observation", "minor", "material"):
+        raise HTTPException(status_code=400, detail="severity must be observation|minor|material")
+    if line_item_id is not None:
+        li = db.query(EmissionLineItem).filter(EmissionLineItem.id == line_item_id,
+                                               EmissionLineItem.run_id == eng.run_id).first()
+        if li is None:
+            raise HTTPException(status_code=404, detail="line_item_id not in this engagement's run")
+    if eng.status == "planned":
+        eng.status = "in_progress"
+    f = AssuranceFinding(engagement_id=eng.id, line_item_id=line_item_id, severity=severity,
+                         description=description, status="open", created_at=_utcnow_iso())
+    db.add(f); db.commit(); db.refresh(f)
+    return {"id": f.id, "severity": f.severity, "status": f.status}
+
+
+@app.post("/assurance/findings/{finding_id}/resolve")
+def resolve_finding(finding_id: int, resolution_note: str = Query(...),
+                    org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import AssuranceFinding, AssuranceEngagement
+    f = db.query(AssuranceFinding).join(
+        AssuranceEngagement, AssuranceEngagement.id == AssuranceFinding.engagement_id)\
+        .filter(AssuranceFinding.id == finding_id,
+                AssuranceEngagement.organisation_id == org.id).first()
+    if f is None:
+        raise HTTPException(status_code=404, detail="finding not found for this organisation")
+    f.status = "resolved"; f.resolution_note = resolution_note
+    db.commit()
+    return {"id": f.id, "status": f.status}
+
+
+@app.post("/assurance/engagements/{engagement_id}/conclude")
+def conclude_engagement(engagement_id: int, opinion: str = Query(...),
+                        opinion_note: Optional[str] = None,
+                        org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import CalculationRun, AssuranceFinding
+    from .services.assurance import readiness_assessment
+    from .services.calc import _utcnow_iso
+    eng = _own_engagement(db, org, engagement_id)
+    if opinion not in ("unqualified", "qualified", "adverse", "disclaimer"):
+        raise HTTPException(status_code=400, detail="opinion must be unqualified|qualified|adverse|disclaimer")
+    if eng.status == "concluded":
+        raise HTTPException(status_code=409, detail="engagement already concluded")
+    # An unqualified conclusion cannot overstate the assurance obtained.
+    if opinion == "unqualified":
+        run = db.get(CalculationRun, eng.run_id)
+        ready = readiness_assessment(db, run)["ready"]
+        open_material = db.query(AssuranceFinding).filter(
+            AssuranceFinding.engagement_id == eng.id,
+            AssuranceFinding.status == "open",
+            AssuranceFinding.severity == "material").count()
+        if not ready or open_material:
+            raise HTTPException(status_code=409,
+                                detail="cannot issue unqualified: readiness checklist "
+                                       "failing and/or open material findings — use "
+                                       "qualified/adverse/disclaimer")
+    eng.status = "concluded"; eng.opinion = opinion; eng.opinion_note = opinion_note
+    eng.concluded_at = _utcnow_iso()
+    db.commit()
+    return {"id": eng.id, "opinion": opinion, "status": eng.status}
+
+
+@app.post("/assurance/engagements/{engagement_id}/grant_access")
+def grant_assurance_access(engagement_id: int,
+                           org: Organisation = Depends(current_org),
+                           db: Session = Depends(get_db)):
+    """Mint a read-only token so an external assuror can view the engagement +
+    the run's lineage WITHOUT an org key."""
+    import secrets
+    from .services.calc import _utcnow_iso  # noqa: F401
+    eng = _own_engagement(db, org, engagement_id)
+    token = secrets.token_urlsafe(32)
+    eng.access_token_hash = _hash_key(token)
+    db.commit()
+    return {"engagement_id": eng.id, "assurance_token": token,
+            "note": "Read-only. Provide as X-Assurance-Token. Shown once."}
+
+
+def _engagement_for_reader(db: Session, engagement_id: int,
+                           x_api_key: Optional[str], x_assurance_token: Optional[str]):
+    """Resolve an engagement for either the owning org (X-API-Key) or an
+    assuror holding the engagement's read-only token (X-Assurance-Token)."""
+    import hmac
+    from .models import AssuranceEngagement
+    eng = db.get(AssuranceEngagement, engagement_id)
+    if eng is None:
+        raise HTTPException(status_code=404, detail="engagement not found")
+    if x_assurance_token and eng.access_token_hash and \
+            hmac.compare_digest(_hash_key(x_assurance_token), eng.access_token_hash):
+        return eng, "assuror"
+    if x_api_key:
+        o = db.query(Organisation).filter(Organisation.api_key_hash == _hash_key(x_api_key)).first()
+        if o and eng.organisation_id == o.id:
+            return eng, "owner"
+    raise HTTPException(status_code=401, detail="valid X-API-Key (owner) or X-Assurance-Token required")
+
+
+@app.get("/assurance/engagements/{engagement_id}")
+def get_engagement(engagement_id: int, x_api_key: Optional[str] = Header(None),
+                   x_assurance_token: Optional[str] = Header(None),
+                   db: Session = Depends(get_db)):
+    from .services.assurance import engagement_view
+    eng, role = _engagement_for_reader(db, engagement_id, x_api_key, x_assurance_token)
+    return JSONResponse(engagement_view(db, eng, include_owner_fields=(role == "owner")))
+
+
+@app.get("/assurance/engagements/{engagement_id}/lineage")
+def get_engagement_lineage(engagement_id: int, x_api_key: Optional[str] = Header(None),
+                           x_assurance_token: Optional[str] = Header(None),
+                           db: Session = Depends(get_db)):
+    """The run's frozen lineage, readable by the assuror via the engagement token."""
+    import json as _json
+    from .models import EmissionLineItem, CalculationRun
+    eng, _role = _engagement_for_reader(db, engagement_id, x_api_key, x_assurance_token)
+    run = db.get(CalculationRun, eng.run_id)
+    rows = db.query(EmissionLineItem, ActivityRecord)\
+        .join(ActivityRecord, ActivityRecord.id == EmissionLineItem.activity_id)\
+        .filter(EmissionLineItem.run_id == run.id).order_by(EmissionLineItem.id).all()
+    return {
+        "engagement_id": eng.id, "run_id": run.id,
+        "line_items": [{
+            "id": li.id, "scope": li.scope, "method": li.method, "co2e": li.co2e,
+            "detail": _json.loads(li.details or "{}"),
+            "activity": {"id": a.id, "date": a.date, "category": a.category,
+                         "quantity": a.quantity, "unit": a.unit, "source_file": a.source_file},
+        } for li, a in rows],
+    }
+
+
+@app.get("/reports/assurance_readiness")
+def get_assurance_readiness(run_id: Optional[int] = None,
+                            org: Organisation = Depends(current_org),
+                            db: Session = Depends(get_db)):
+    from .models import CalculationRun
+    from .services.assurance import readiness_assessment
+    if run_id is not None:
+        run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                              CalculationRun.organisation_id == org.id).first()
+    else:
+        run = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
+            .order_by(CalculationRun.id.desc()).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found for this organisation")
+    return JSONResponse(readiness_assessment(db, run))
+
+
 @app.post("/targets")
 def create_target(name: str = Query(...), target_type: str = Query(...),
                   base_run_id: int = Query(...), base_year: int = Query(...),
