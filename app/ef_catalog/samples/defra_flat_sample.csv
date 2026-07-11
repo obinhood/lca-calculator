@@ -1,0 +1,7 @@
+Scope,Level 1,Level 2,Level 3,Level 4,Column Text,UOM,GHG/Unit,GHG Conversion Factor 2024
+Scope 1,Fuels,Gaseous fuels,Natural gas,,,kWh,kg CO2e,0.18293
+Scope 1,Fuels,Gaseous fuels,Natural gas,,,kWh,kg CO2e of CO2 per unit,0.18256
+Scope 1,Fuels,Gaseous fuels,Natural gas,,,kWh,kg CO2e of CH4 per unit,0.00030
+Scope 1,Fuels,Liquid fuels,Diesel (average biofuel blend),,,litres,kg CO2e,2.51233
+Scope 2,UK electricity,Electricity generated,,,,kWh,kg CO2e,0.20705
+Scope 3,Business travel- land,Cars (by size),Medium car,Diesel,,km,kg CO2e,0.16992
