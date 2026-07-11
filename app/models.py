@@ -219,6 +219,37 @@ class CarbonCredit(Base):
     created_at = Column(String)
 
 
+class FinancedPosition(Base):
+    """A financed position for PCAF financed-emissions accounting.
+
+    Financed emissions = attribution factor x investee emissions, where the
+    attribution factor = outstanding_amount / attribution_denominator (EVIC for
+    listed equity/bonds; total equity+debt for loans; property value for real
+    estate — both in the SAME currency, so the ratio is dimensionless).
+    ``data_quality_score`` is the PCAF 1 (best/verified) .. 5 (proxy) score.
+    """
+    __tablename__ = "financed_positions"
+    __table_args__ = (
+        CheckConstraint("outstanding_amount >= 0", name="ck_fp_outstanding_nonneg"),
+        CheckConstraint("attribution_denominator > 0", name="ck_fp_denom_pos"),
+        CheckConstraint("data_quality_score >= 1 AND data_quality_score <= 5", name="ck_fp_dq"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    investee_name = Column(String, nullable=False)
+    asset_class = Column(String, nullable=False)   # listed_equity | corporate_bonds | business_loans | project_finance | commercial_real_estate | mortgages | motor_vehicle_loans
+    currency = Column(String, nullable=False)
+    outstanding_amount = Column(Float, nullable=False)
+    attribution_denominator = Column(Float, nullable=False)
+    investee_scope1_tco2e = Column(Float, nullable=False, default=0.0)
+    investee_scope2_tco2e = Column(Float, nullable=False, default=0.0)
+    investee_scope3_tco2e = Column(Float, nullable=True)
+    investee_revenue_millions = Column(Float, nullable=True)  # for SFDR PAI 3 intensity
+    data_quality_score = Column(Integer, nullable=False, default=5)
+    as_of_date = Column(String, nullable=True)
+    created_at = Column(String)
+
+
 class AssuranceEngagement(Base):
     """A third-party assurance engagement over one immutable calculation run
     (ISAE 3410 / ISO 14064-3 / ISSA 5000).

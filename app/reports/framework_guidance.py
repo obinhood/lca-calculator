@@ -253,7 +253,7 @@ FRAMEWORKS = {
     "pcaf": {
         "name": "PCAF (financed/facilitated/insurance-associated emissions)",
         "category": "Finance", "jurisdiction": "global",
-        "authority": "PCAF", "platform_support": "reference", "endpoint": None,
+        "authority": "PCAF", "platform_support": "built", "endpoint": "/reports/pcaf",
         "applies_to": "Financial institutions attributing portfolio emissions.",
         "key_points": [
             "Attribute investee emissions by an attribution factor per asset class.",
@@ -263,7 +263,7 @@ FRAMEWORKS = {
     "sfdr": {
         "name": "EU SFDR (Sustainable Finance Disclosure Regulation)",
         "category": "Finance", "jurisdiction": "EU",
-        "authority": "European Commission / ESAs", "platform_support": "reference", "endpoint": None,
+        "authority": "European Commission / ESAs", "platform_support": "built", "endpoint": "/reports/sfdr_pai",
         "applies_to": "Financial market participants and products.",
         "key_points": ["Report Principal Adverse Impact indicators incl. financed GHG emissions, carbon footprint and intensity."],
     },
@@ -381,6 +381,8 @@ _NAME_TO_KEY = [
     ("CDP", "cdp"),
     ("SBTi", "sbti"),
     ("ISO 14068", "iso_14068"),
+    ("PCAF financed emissions", "pcaf"),
+    ("SFDR Principal Adverse Impacts", "sfdr"),
 ]
 
 

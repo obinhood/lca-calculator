@@ -475,6 +475,65 @@ def add_cbam_default(cn_code_prefix: str = Query(...), good_category: str = Quer
     return {"id": row.id, "cn_code_prefix": row.cn_code_prefix}
 
 
+@app.post("/finance/positions")
+def add_financed_position(investee_name: str = Query(...), asset_class: str = Query(...),
+                          currency: str = Query(...), outstanding_amount: float = Query(...),
+                          attribution_denominator: float = Query(...),
+                          investee_scope1_tco2e: float = 0.0, investee_scope2_tco2e: float = 0.0,
+                          investee_scope3_tco2e: Optional[float] = None,
+                          investee_revenue_millions: Optional[float] = None,
+                          data_quality_score: int = 5, as_of_date: Optional[str] = None,
+                          org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import FinancedPosition
+    from .services.pcaf import ASSET_CLASSES
+    from .services.calc import _utcnow_iso
+    if asset_class not in ASSET_CLASSES:
+        raise HTTPException(status_code=400, detail=f"asset_class must be one of {sorted(ASSET_CLASSES)}")
+    if not (1 <= data_quality_score <= 5):
+        raise HTTPException(status_code=400, detail="data_quality_score must be 1..5 (PCAF)")
+    for name, v in (("outstanding_amount", outstanding_amount),
+                    ("attribution_denominator", attribution_denominator),
+                    ("investee_scope1_tco2e", investee_scope1_tco2e),
+                    ("investee_scope2_tco2e", investee_scope2_tco2e)):
+        if not math.isfinite(v) or v < 0:
+            raise HTTPException(status_code=400, detail=f"{name} must be a finite number >= 0")
+    if attribution_denominator <= 0:
+        raise HTTPException(status_code=400, detail="attribution_denominator must be > 0")
+    p = FinancedPosition(organisation_id=org.id, investee_name=investee_name,
+                         asset_class=asset_class, currency=currency.upper(),
+                         outstanding_amount=outstanding_amount,
+                         attribution_denominator=attribution_denominator,
+                         investee_scope1_tco2e=investee_scope1_tco2e,
+                         investee_scope2_tco2e=investee_scope2_tco2e,
+                         investee_scope3_tco2e=investee_scope3_tco2e,
+                         investee_revenue_millions=investee_revenue_millions,
+                         data_quality_score=data_quality_score, as_of_date=as_of_date,
+                         created_at=_utcnow_iso())
+    db.add(p); db.commit(); db.refresh(p)
+    return {"id": p.id, "investee_name": p.investee_name, "asset_class": p.asset_class}
+
+
+@app.get("/reports/pcaf")
+def get_pcaf_report(include_scope3: bool = True, as_of: Optional[str] = None,
+                    org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .services.pcaf import portfolio_financed
+    return JSONResponse(with_guidance(portfolio_financed(db, org.id, include_scope3=include_scope3,
+                                                         as_of=as_of)))
+
+
+@app.get("/reports/sfdr_pai")
+def get_sfdr_pai_report(portfolio_value_millions: Optional[float] = None,
+                        include_scope3: bool = True,
+                        org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .reports.sfdr_pai import sfdr_pai_report
+    if portfolio_value_millions is not None and (
+            not math.isfinite(portfolio_value_millions) or portfolio_value_millions <= 0):
+        raise HTTPException(status_code=400, detail="portfolio_value_millions must be finite > 0")
+    return JSONResponse(with_guidance(sfdr_pai_report(db, org.id,
+                                                      portfolio_value_millions=portfolio_value_millions,
+                                                      include_scope3=include_scope3)))
+
+
 @app.post("/assurance/engagements")
 def create_engagement(run_id: int = Query(...), standard: str = Query(...),
                       level: str = Query(...), assuror_name: Optional[str] = None,
