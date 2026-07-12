@@ -12,19 +12,34 @@ st.title("🌿 Carbon Footprint MVP — Streamlit Dashboard")
 # --- Config ---
 default_api = "http://127.0.0.1:8000"
 api_url = st.sidebar.text_input("FastAPI base URL", value=default_api, help="Where your FastAPI server is running")
-org_name = st.sidebar.text_input("Organisation name", value="DemoOrg")
+api_key = st.sidebar.text_input("API key", type="password",
+                                help="From POST /organisations (shown once at registration)")
+
+with st.sidebar.expander("Register a new organisation"):
+    new_org = st.text_input("Organisation name", value="DemoOrg", key="reg_name")
+    if st.button("Register"):
+        try:
+            r = requests.post(f"{api_url}/organisations", params={"name": new_org})
+            r.raise_for_status()
+            st.code(r.json()["api_key"])
+            st.caption("Copy this key into the API key box — it is shown only once.")
+        except Exception as e:
+            st.error(str(e))
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Tips:\n- Start your API first: `uvicorn app.main:app --reload`\n- Seed DB (once): `python -m scripts.init_db`")
+st.sidebar.caption("Tips:\n- Start your API first: `uvicorn app.main:app --reload`\n- Init DB (once): `python -m scripts.init_db`")
+
+def _headers():
+    return {"X-API-Key": api_key} if api_key else {}
 
 # Helper
-def api_get(path):
-    r = requests.get(f"{api_url}{path}")
+def api_get(path, params=None):
+    r = requests.get(f"{api_url}{path}", params=params, headers=_headers())
     r.raise_for_status()
     return r.json()
 
 def api_post(path, **kwargs):
-    r = requests.post(f"{api_url}{path}", **kwargs)
+    r = requests.post(f"{api_url}{path}", headers=_headers(), **kwargs)
     r.raise_for_status()
     try:
         return r.json()
@@ -40,10 +55,13 @@ with col1:
             st.error("Please choose a CSV file first.")
         else:
             files = {"file": (uploaded.name, uploaded.getvalue(), "text/csv")}
-            params = {"org_name": org_name}
             try:
-                res = api_post("/activities/upload_csv", files=files, params=params)
-                st.success(f"Ingested {res.get('records_ingested')} records")
+                res = api_post("/activities/upload_csv", files=files)
+                mapping = res.get("mapping", {})
+                st.success(f"Ingested {res.get('records_ingested')} records — "
+                           f"{mapping.get('auto', 0)} auto-mapped, "
+                           f"{mapping.get('needs_review', 0)} need review, "
+                           f"{mapping.get('unmapped', 0)} unmapped")
                 issues = res.get("issues", [])
                 if issues:
                     st.warning("Issues:\n- " + "\n- ".join(issues))
@@ -54,9 +72,35 @@ with col2:
     if st.button("Run calculation"):
         try:
             res = api_post("/calculate/run")
-            st.success("Calculation completed")
+            cov = (res or {}).get("coverage") or {}
+            st.success(f"Calculation completed — {cov.get('coverage_pct', '?')}% coverage")
+            if res.get("partial"):
+                st.warning(f"PARTIAL RUN — excluded: {res.get('partial_reasons')}")
+            if cov.get("warning"):
+                st.warning(cov["warning"])
         except Exception as e:
             st.exception(e)
+
+st.header("1b) Mapping review queue")
+try:
+    queue = api_get("/mappings/review")
+    if queue:
+        st.warning(f"{len(queue)} activities need a mapping decision before they enter totals.")
+        for item in queue:
+            sf = item.get("suggested_factor") or {}
+            cols = st.columns([4, 1])
+            cols[0].write(f"**#{item['activity_id']}** {item['date']} — {item['category']}"
+                          f"/{item['subcategory'] or '—'} {item['quantity']} {item['unit']} ({item['geo']}) → "
+                          f"suggests {sf.get('category')}/{sf.get('subcategory') or '—'} "
+                          f"[{sf.get('geography')}] {sf.get('value')} kgCO₂e/{sf.get('unit')} "
+                          f"(basis: {item['mapping_basis']}, confidence {item['mapping_confidence']})")
+            if cols[1].button("Approve", key=f"appr_{item['activity_id']}"):
+                api_post(f"/mappings/{item['activity_id']}/approve")
+                st.rerun()
+    else:
+        st.caption("Review queue is empty.")
+except Exception:
+    st.caption("Review queue unavailable (check API key).")
 
 st.header("2) Summary results")
 try:

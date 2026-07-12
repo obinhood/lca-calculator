@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.*
+
+# Databases — never commit demo or production data
+*.db
+carbon_mvp.db
+
+# OS cruft
+.DS_Store
+
+# Stray artifact
+/0
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
