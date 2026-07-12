@@ -270,7 +270,7 @@ FRAMEWORKS = {
     "eu_taxonomy": {
         "name": "EU Taxonomy",
         "category": "Finance", "jurisdiction": "EU",
-        "authority": "European Commission", "platform_support": "reference", "endpoint": None,
+        "authority": "European Commission", "platform_support": "built", "endpoint": "/reports/eu_taxonomy",
         "applies_to": "CSRD-scope entities reporting taxonomy alignment.",
         "key_points": ["Report turnover/CapEx/OpEx alignment with climate mitigation/adaptation and Do No Significant Harm."],
     },
@@ -297,21 +297,21 @@ FRAMEWORKS = {
     "eu_ets": {
         "name": "EU ETS (Emissions Trading System) — MRV",
         "category": "Compliance", "jurisdiction": "EU",
-        "authority": "European Commission", "platform_support": "reference", "endpoint": None,
+        "authority": "European Commission", "platform_support": "built", "endpoint": "/reports/ets_mrv",
         "applies_to": "Installations/operators under the EU ETS.",
         "key_points": ["Monitor, report and verify annual emissions under the MRR/AVR; surrender allowances."],
     },
     "uk_ets": {
         "name": "UK ETS — MRV",
         "category": "Compliance", "jurisdiction": "UK",
-        "authority": "UK Government", "platform_support": "reference", "endpoint": None,
+        "authority": "UK Government", "platform_support": "built", "endpoint": "/reports/ets_mrv",
         "applies_to": "UK ETS installations/operators.",
         "key_points": ["Monitor, report and verify annual emissions; surrender allowances."],
     },
     "esos": {
         "name": "UK ESOS (Energy Savings Opportunity Scheme)",
         "category": "Compliance", "jurisdiction": "UK",
-        "authority": "UK Environment Agency", "platform_support": "reference", "endpoint": None,
+        "authority": "UK Environment Agency", "platform_support": "built", "endpoint": "/reports/esos",
         "applies_to": "Large UK undertakings (four-yearly energy audits).",
         "key_points": ["Audit total energy consumption; identify cost-effective energy-saving measures."],
     },
@@ -388,6 +388,10 @@ _NAME_TO_KEY = [
     ("ISO 14083", "iso_14083"),
     ("EN 15804", "en_15978_15804"),
     ("EN 15978", "en_15978_15804"),
+    ("EU Taxonomy", "eu_taxonomy"),
+    ("EU ETS MRV", "eu_ets"),
+    ("UK ETS MRV", "uk_ets"),
+    ("UK ESOS", "esos"),
 ]
 
 

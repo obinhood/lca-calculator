@@ -8,8 +8,11 @@ class Organisation(Base):
     name = Column(String, unique=True, nullable=False)
     sector = Column(String, nullable=True)
     # SHA-256 hash of the org's API key (the plaintext key is returned exactly
-    # once at registration and never stored).
+    # once at registration and never stored). Supports rotation (new hash) and
+    # revocation (revoked=True disables the key without deleting the org's data).
     api_key_hash = Column(String, unique=True, nullable=True, index=True)
+    api_key_revoked = Column(Boolean, nullable=False, default=False)
+    key_rotated_at = Column(String, nullable=True)
     # GHG Protocol consolidation approach: operational_control | financial_control | equity_share.
     # NOTE: stored for provenance but NOT yet wired into the calc engine — every run currently
     # includes 100% of the org's own activities. Multi-entity roll-up / equity-share weighting
@@ -216,6 +219,33 @@ class CarbonCredit(Base):
     retired = Column(Boolean, default=False)
     retirement_date = Column(String, nullable=True)
     applied_to_run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=True)
+    created_at = Column(String)
+
+
+class TaxonomyActivity(Base):
+    """An economic activity for EU Taxonomy alignment reporting.
+
+    Alignment requires: eligible AND substantial-contribution AND DNSH (do no
+    significant harm) AND minimum safeguards. Turnover/CapEx/OpEx are the three
+    KPIs reported as % aligned.
+    """
+    __tablename__ = "taxonomy_activities"
+    __table_args__ = (
+        CheckConstraint("turnover >= 0 AND capex >= 0 AND opex >= 0",
+                        name="ck_taxo_nonneg"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    name = Column(String, nullable=False)
+    reporting_year = Column(Integer, nullable=False)
+    turnover = Column(Float, nullable=False, default=0.0)
+    capex = Column(Float, nullable=False, default=0.0)
+    opex = Column(Float, nullable=False, default=0.0)
+    eligible = Column(Boolean, nullable=False, default=False)
+    substantial_contribution = Column(Boolean, nullable=False, default=False)
+    dnsh_pass = Column(Boolean, nullable=False, default=False)
+    minimum_safeguards_pass = Column(Boolean, nullable=False, default=False)
+    objective = Column(String, nullable=True)  # climate_mitigation | climate_adaptation | ...
     created_at = Column(String)
 
 
