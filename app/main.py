@@ -636,6 +636,105 @@ def get_sfdr_pai_report(portfolio_value_millions: Optional[float] = None,
                                                       include_scope3=include_scope3)))
 
 
+# --- Nature (TNFD LEAP + SBTN) -----------------------------------------------
+
+@app.post("/nature/sites")
+def create_nature_site(name: str = Query(...), country: Optional[str] = None,
+                       biome: Optional[str] = None, latitude: Optional[float] = None,
+                       longitude: Optional[float] = None, area_hectares: float = 0.0,
+                       in_protected_area: bool = False, in_kba: bool = False,
+                       water_stress: str = "unknown",
+                       org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import NatureSite
+    from .services.nature import WATER_STRESS_LEVELS
+    from .services.calc import _utcnow_iso
+    if water_stress not in WATER_STRESS_LEVELS:
+        raise HTTPException(status_code=400,
+                            detail=f"water_stress must be one of {list(WATER_STRESS_LEVELS)}")
+    if not math.isfinite(area_hectares) or area_hectares < 0:
+        raise HTTPException(status_code=400, detail="area_hectares must be finite >= 0")
+    if latitude is not None and (not math.isfinite(latitude) or not -90 <= latitude <= 90):
+        raise HTTPException(status_code=400, detail="latitude must be finite in [-90, 90]")
+    if longitude is not None and (not math.isfinite(longitude) or not -180 <= longitude <= 180):
+        raise HTTPException(status_code=400, detail="longitude must be finite in [-180, 180]")
+    s = NatureSite(organisation_id=org.id, name=name, country=country, biome=biome,
+                   latitude=latitude, longitude=longitude, area_hectares=area_hectares,
+                   in_protected_area=in_protected_area, in_kba=in_kba,
+                   water_stress=water_stress, created_at=_utcnow_iso())
+    db.add(s); db.commit(); db.refresh(s)
+    return {"id": s.id, "name": s.name, "water_stress": s.water_stress}
+
+
+def _own_site(db: Session, org: Organisation, site_id: int):
+    from .models import NatureSite
+    s = db.query(NatureSite).filter(NatureSite.id == site_id,
+                                    NatureSite.organisation_id == org.id).first()
+    if s is None:
+        raise HTTPException(status_code=404, detail="nature site not found for this organisation")
+    return s
+
+
+@app.post("/nature/sites/{site_id}/impacts")
+def add_nature_impact(site_id: int, kind: str = Query(...), driver: str = Query(...),
+                      materiality: str = "low", description: Optional[str] = None,
+                      metric_value: Optional[float] = None, metric_unit: Optional[str] = None,
+                      org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import NatureImpactDependency
+    from .services.nature import valid_driver, MATERIALITY, IMPACT_DRIVERS, DEPENDENCY_SERVICES
+    s = _own_site(db, org, site_id)
+    if kind not in ("impact", "dependency"):
+        raise HTTPException(status_code=400, detail="kind must be 'impact' or 'dependency'")
+    if not valid_driver(kind, driver):
+        allowed = IMPACT_DRIVERS if kind == "impact" else DEPENDENCY_SERVICES
+        raise HTTPException(status_code=400,
+                            detail=f"driver for a {kind} must be one of {list(allowed)}")
+    if materiality not in MATERIALITY:
+        raise HTTPException(status_code=400, detail=f"materiality must be one of {list(MATERIALITY)}")
+    if metric_value is not None and not math.isfinite(metric_value):
+        raise HTTPException(status_code=400, detail="metric_value must be a finite number")
+    it = NatureImpactDependency(site_id=s.id, kind=kind, driver=driver, materiality=materiality,
+                                description=description, metric_value=metric_value,
+                                metric_unit=metric_unit)
+    db.add(it); db.commit(); db.refresh(it)
+    return {"id": it.id, "site_id": s.id, "kind": it.kind, "driver": it.driver}
+
+
+@app.post("/nature/targets")
+def create_nature_target(realm: str = Query(...), name: str = Query(...),
+                         baseline_value: float = Query(...), baseline_unit: str = Query(...),
+                         target_value: float = Query(...), target_year: int = Query(...),
+                         baseline_year: Optional[int] = None, validated: bool = False,
+                         org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import NatureTarget
+    from .services.nature import REALMS
+    from .services.calc import _utcnow_iso
+    if realm not in REALMS:
+        raise HTTPException(status_code=400, detail=f"realm must be one of {list(REALMS)}")
+    for nm, v in (("baseline_value", baseline_value), ("target_value", target_value)):
+        if not math.isfinite(v):
+            raise HTTPException(status_code=400, detail=f"{nm} must be a finite number")
+    if not 2000 <= target_year <= 2100:
+        raise HTTPException(status_code=400, detail="target_year must be in [2000, 2100]")
+    t = NatureTarget(organisation_id=org.id, realm=realm, name=name,
+                     baseline_value=baseline_value, baseline_unit=baseline_unit,
+                     baseline_year=baseline_year, target_value=target_value,
+                     target_year=target_year, validated=validated, created_at=_utcnow_iso())
+    db.add(t); db.commit(); db.refresh(t)
+    return {"id": t.id, "realm": t.realm, "name": t.name}
+
+
+@app.get("/reports/tnfd")
+def get_tnfd_report(org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .services.nature import leap_assessment
+    return JSONResponse(with_guidance(leap_assessment(db, org.id)))
+
+
+@app.get("/reports/sbtn")
+def get_sbtn_report(org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .services.nature import sbtn_report
+    return JSONResponse(with_guidance(sbtn_report(db, org.id)))
+
+
 @app.post("/assurance/engagements")
 def create_engagement(run_id: int = Query(...), standard: str = Query(...),
                       level: str = Query(...), assuror_name: Optional[str] = None,

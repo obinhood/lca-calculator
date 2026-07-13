@@ -479,3 +479,80 @@ class EmissionLineItem(Base):
     method = Column(String, default="location")  # location | market (Scope 2 dual reporting)
     co2e = Column(Float)
     details = Column(Text)  # JSON string of calculation context
+
+
+# --- Nature (TNFD / SBTN): a separate data model from carbon -----------------
+# Nature disclosure is spatial and qualitative, not a single CO2e figure. Sites
+# have a location and sensitivity flags (Locate); each carries impacts on and
+# dependencies upon nature (Evaluate); the report screens priority interfaces
+# (Assess) and reports TNFD core metrics (Prepare). SBTN targets are tracked by
+# realm. Deliberately NOT folded into the carbon inventory or its runs.
+
+class NatureSite(Base):
+    """A physical location assessed for nature-related issues (TNFD 'Locate').
+
+    Sensitivity is the union of three flags: inside a protected area, inside a
+    Key Biodiversity Area (KBA), or in a water-stressed basin (high/extreme).
+    """
+    __tablename__ = "nature_sites"
+    __table_args__ = (
+        CheckConstraint("area_hectares >= 0", name="ck_nature_area_nonneg"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    name = Column(String, nullable=False)
+    country = Column(String, nullable=True)
+    biome = Column(String, nullable=True)         # descriptive: tropical_forest, freshwater, marine, ...
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    area_hectares = Column(Float, nullable=False, default=0.0)
+    in_protected_area = Column(Boolean, nullable=False, default=False)
+    in_kba = Column(Boolean, nullable=False, default=False)
+    # unknown | none | low | medium | high | extreme (WRI Aqueduct-style bands)
+    water_stress = Column(String, nullable=False, default="unknown")
+    created_at = Column(String)
+
+
+class NatureImpactDependency(Base):
+    """One impact on, or dependency upon, nature at a site (TNFD 'Evaluate').
+
+    kind='impact'    -> driver is an IPBES direct driver of nature change.
+    kind='dependency'-> driver is an ecosystem service the site relies on.
+    materiality is the qualitative screen; metric_value/unit are optional
+    quantitative evidence (e.g. m3 of water withdrawn).
+    """
+    __tablename__ = "nature_impacts_dependencies"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("nature_sites.id"), nullable=False)
+    kind = Column(String, nullable=False)          # impact | dependency
+    driver = Column(String, nullable=False)        # driver (impact) or ecosystem service (dependency)
+    description = Column(Text, nullable=True)
+    materiality = Column(String, nullable=False, default="low")   # low | medium | high
+    metric_value = Column(Float, nullable=True)
+    metric_unit = Column(String, nullable=True)
+
+    site = relationship("NatureSite")
+
+
+class NatureTarget(Base):
+    """A science-based target for nature (SBTN), tracked by realm.
+
+    Direction is not assumed: a freshwater/land target is usually a reduction,
+    a restoration target an increase, so the delta is reported signed.
+    """
+    __tablename__ = "nature_targets"
+    __table_args__ = (
+        CheckConstraint("target_year >= 2000 AND target_year <= 2100",
+                        name="ck_nature_target_year"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    realm = Column(String, nullable=False)         # freshwater | land | ocean | biodiversity
+    name = Column(String, nullable=False)
+    baseline_value = Column(Float, nullable=False, default=0.0)
+    baseline_unit = Column(String, nullable=False)
+    baseline_year = Column(Integer, nullable=True)
+    target_value = Column(Float, nullable=False, default=0.0)
+    target_year = Column(Integer, nullable=False)
+    validated = Column(Boolean, nullable=False, default=False)   # SBTN-validated target
+    created_at = Column(String)

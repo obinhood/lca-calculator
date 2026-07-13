@@ -353,20 +353,31 @@ FRAMEWORKS = {
         "applies_to": "Registries issuing verified carbon credits.",
         "key_points": ["Record registry, project id, serial, vintage; retire before claiming; avoid double counting."],
     },
-    # --- Nature (out of carbon scope) ---
+    # --- Nature (separate spatial/qualitative data model from carbon) ---
     "tnfd": {
         "name": "TNFD (Taskforce on Nature-related Financial Disclosures)",
         "category": "Nature", "jurisdiction": "global",
-        "authority": "TNFD", "platform_support": "reference", "endpoint": None,
-        "applies_to": "Nature-related disclosure (separate data model from carbon).",
-        "key_points": ["LEAP approach: Locate, Evaluate, Assess, Prepare; not covered by this carbon platform."],
+        "authority": "TNFD", "platform_support": "partial", "endpoint": "/reports/tnfd",
+        "applies_to": "Nature-related dependencies, impacts, risks and opportunities.",
+        "key_points": [
+            "Follow the LEAP approach: Locate the interface with nature, Evaluate dependencies & impacts, Assess risks & opportunities, Prepare to respond and report.",
+            "Report against the four pillars (governance, strategy, risk & impact management, metrics & targets) aligned to the ISSB structure.",
+            "Prioritise assets/operations in sensitive locations: protected areas, Key Biodiversity Areas, and high/extreme water-stress basins.",
+            "Disclose the TNFD core global metrics (land/freshwater/ocean use, water use in stressed areas, pollutants, waste).",
+            "Platform covers Locate/Evaluate/Assess and the computable core metrics; governance & strategy narrative and scenario analysis are NOT produced.",
+        ],
     },
     "sbtn": {
         "name": "SBTN (Science Based Targets for Nature)",
         "category": "Nature", "jurisdiction": "global",
-        "authority": "SBTN", "platform_support": "reference", "endpoint": None,
-        "applies_to": "Science-based targets for freshwater, land, biodiversity.",
-        "key_points": ["Assess, interpret & prioritise, measure/set/disclose, act, track; separate from carbon targets."],
+        "authority": "SBTN", "platform_support": "partial", "endpoint": "/reports/sbtn",
+        "applies_to": "Science-based targets for freshwater, land, ocean, biodiversity.",
+        "key_points": [
+            "Five steps: (1) Assess, (2) Interpret & prioritise, (3) Measure/set/disclose, (4) Act, (5) Track.",
+            "Set targets by realm — freshwater (quantity & quality), land (footprint & ecosystem condition) first, then ocean and biodiversity.",
+            "Targets require an SBTN-validated baseline; 'validated' status must be disclosed.",
+            "Distinct from carbon (SBTi) targets; the platform tracks targets and validation status by realm.",
+        ],
     },
 }
 
@@ -392,6 +403,8 @@ _NAME_TO_KEY = [
     ("EU ETS MRV", "eu_ets"),
     ("UK ETS MRV", "uk_ets"),
     ("UK ESOS", "esos"),
+    ("TNFD", "tnfd"),
+    ("SBTN", "sbtn"),
 ]
 
 
