@@ -68,18 +68,29 @@ def _hash_key(key: str) -> str:
 
 def current_org(x_api_key: str = Header(...), db: Session = Depends(get_db)) -> Organisation:
     """Resolve the calling organisation from its API key — the ONLY way any
-    org-scoped endpoint identifies a tenant (org names are not credentials)."""
+    org-scoped endpoint identifies a tenant (org names are not credentials).
+    A revoked key is rejected even though its hash still matches."""
     org = db.query(Organisation).filter(
         Organisation.api_key_hash == _hash_key(x_api_key)).first()
-    if org is None:
-        raise HTTPException(status_code=401, detail="invalid API key")
+    if org is None or org.api_key_revoked:
+        raise HTTPException(status_code=401, detail="invalid or revoked API key")
     return org
 
 
 @app.post("/organisations")
 def register_organisation(name: str = Query(...), sector: Optional[str] = None,
+                          x_registration_token: Optional[str] = Header(None),
                           db: Session = Depends(get_db)):
-    """Register an organisation. The API key is returned ONCE — store it safely."""
+    """Register an organisation. The API key is returned ONCE — store it safely.
+
+    Gated: if REGISTRATION_TOKEN is configured, registration requires a matching
+    X-Registration-Token (prevents open squatting/abuse). Left open only when no
+    token is configured (dev)."""
+    import hmac
+    reg_token = _os.environ.get("REGISTRATION_TOKEN")
+    if reg_token:
+        if not x_registration_token or not hmac.compare_digest(x_registration_token, reg_token):
+            raise HTTPException(status_code=401, detail="registration requires a valid X-Registration-Token")
     if db.query(Organisation).filter(Organisation.name == name).first():
         raise HTTPException(status_code=409, detail=f"organisation {name!r} already exists")
     key = secrets.token_urlsafe(32)
@@ -87,6 +98,34 @@ def register_organisation(name: str = Query(...), sector: Optional[str] = None,
     db.add(org); db.commit(); db.refresh(org)
     return {"id": org.id, "name": org.name, "api_key": key,
             "note": "Store this key now; it is not retrievable later."}
+
+
+@app.post("/organisations/rotate_key")
+def rotate_api_key(org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Rotate the calling org's API key. The old key stops working immediately;
+    the new key is returned ONCE."""
+    from .services.calc import _utcnow_iso
+    new_key = secrets.token_urlsafe(32)
+    org.api_key_hash = _hash_key(new_key)
+    org.api_key_revoked = False
+    org.key_rotated_at = _utcnow_iso()
+    db.commit()
+    return {"id": org.id, "api_key": new_key,
+            "note": "New key — the previous key is now invalid. Store this now."}
+
+
+@app.post("/organisations/revoke_key")
+def revoke_api_key(confirm_org_name: str = Query(...),
+                   org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Revoke the calling org's API key (self-service kill switch). Requires the
+    org name as confirmation; the org's data is retained but its key is disabled
+    until an admin re-issues one via rotate on a restored key."""
+    if confirm_org_name != org.name:
+        raise HTTPException(status_code=400, detail="confirm_org_name does not match")
+    org.api_key_revoked = True
+    db.commit()
+    return {"id": org.id, "revoked": True,
+            "note": "Key disabled. Contact an administrator to re-enable access."}
 
 
 @app.post("/activities/upload_csv")
@@ -999,6 +1038,52 @@ def get_secr_report(run_id: Optional[int] = None,
     return JSONResponse(with_guidance(secr_report(db, org.id, run_id=run_id,
                                     intensity_denominator=intensity_denominator,
                                     intensity_denominator_unit=intensity_denominator_unit)))
+
+
+@app.post("/taxonomy/activities")
+def add_taxonomy_activity(name: str = Query(...), reporting_year: int = Query(...),
+                          turnover: float = 0.0, capex: float = 0.0, opex: float = 0.0,
+                          eligible: bool = False, substantial_contribution: bool = False,
+                          dnsh_pass: bool = False, minimum_safeguards_pass: bool = False,
+                          objective: Optional[str] = None,
+                          org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .models import TaxonomyActivity
+    from .services.calc import _utcnow_iso
+    for nm, v in (("turnover", turnover), ("capex", capex), ("opex", opex)):
+        if not math.isfinite(v) or v < 0:
+            raise HTTPException(status_code=400, detail=f"{nm} must be a finite number >= 0")
+    a = TaxonomyActivity(organisation_id=org.id, name=name, reporting_year=reporting_year,
+                         turnover=turnover, capex=capex, opex=opex, eligible=eligible,
+                         substantial_contribution=substantial_contribution,
+                         dnsh_pass=dnsh_pass, minimum_safeguards_pass=minimum_safeguards_pass,
+                         objective=objective, created_at=_utcnow_iso())
+    db.add(a); db.commit(); db.refresh(a)
+    return {"id": a.id, "name": a.name, "reporting_year": a.reporting_year}
+
+
+@app.get("/reports/eu_taxonomy")
+def get_taxonomy_report(reporting_year: int = Query(...),
+                        org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .reports.compliance_extra import taxonomy_report
+    return JSONResponse(with_guidance(taxonomy_report(db, org.id, reporting_year)))
+
+
+@app.get("/reports/ets_mrv")
+def get_ets_mrv_report(scheme: str = "EU ETS", run_id: Optional[int] = None,
+                       verified: bool = False,
+                       org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .reports.compliance_extra import ets_mrv_report
+    if scheme not in ("EU ETS", "UK ETS"):
+        raise HTTPException(status_code=400, detail="scheme must be 'EU ETS' or 'UK ETS'")
+    return JSONResponse(with_guidance(ets_mrv_report(db, org.id, scheme, run_id=run_id,
+                                                     verified=verified)))
+
+
+@app.get("/reports/esos")
+def get_esos_report(run_id: Optional[int] = None,
+                    org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    from .reports.compliance_extra import esos_report
+    return JSONResponse(with_guidance(esos_report(db, org.id, run_id=run_id)))
 
 
 @app.get("/frameworks")
