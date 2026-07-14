@@ -97,10 +97,21 @@ def esos_report(db: Session, organisation_id: int, run_id: Optional[int] = None)
     by_carrier = {c: energy[c] for c in ("electricity", "gas", "diesel")}
     significant = {c: round(100.0 * v / total_kwh, 1) for c, v in by_carrier.items()} if total_kwh else {}
 
+    # ESOS was the one renderer with no completeness gate at all — an incomplete or
+    # stale inventory would still emit a "ready" energy figure. Same doctrine as
+    # SECR/SB253/ETS: fail closed.
+    blockers = []
+    if s.get("partial"):
+        blockers.append(f"run is PARTIAL — {s['partial_reasons']}")
+    if s["coverage"]["stale"]:
+        blockers.append("run is STALE — recompute")
+    if total_kwh <= 0:
+        blockers.append("no energy-carrier activity in this run")
+
     return {
         "framework": "UK ESOS",
-        "report_ready": total_kwh > 0,
-        "blockers": [] if total_kwh > 0 else ["no energy-carrier activity in this run"],
+        "report_ready": not blockers,
+        "blockers": blockers,
         "run": run_info,
         "total_energy_kwh": round(total_kwh, 3),
         "by_carrier_kwh": {c: round(v, 3) for c, v in by_carrier.items()},

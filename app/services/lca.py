@@ -56,9 +56,11 @@ def compute_assessment(db: Session, assessment: LcaAssessment) -> dict:
         .order_by(LcaItem.id).all()
     gwp = assessment.gwp_set
 
+    is_en = assessment.standard in ("en_15804", "en_15978")
     by_stage: dict = {}
     boundary_split: dict = {}
-    total = 0.0
+    total = 0.0            # DECLARED total: A-C for EN standards (Module D excluded)
+    total_module_d = 0.0   # EN 15804 §6 / EN 15978: reported SEPARATELY, never netted in
     total_biogenic = 0.0
     lines = []
     excluded = []
@@ -73,10 +75,15 @@ def compute_assessment(db: Session, assessment: LcaAssessment) -> dict:
         except (UnitConversionError, ValueError) as exc:
             excluded.append({"item_id": it.id, "stage": it.stage, "error": str(exc)})
             continue
-        stage = it.stage.strip().upper() if assessment.standard in ("en_15804", "en_15978") \
-            else it.stage
+        stage = it.stage.strip().upper() if is_en else it.stage
         by_stage[stage] = by_stage.get(stage, 0.0) + co2e
-        total += co2e
+        # Module D is "benefits and loads BEYOND the system boundary" — a recycling
+        # credit netted into the headline would understate in-boundary whole-life
+        # carbon (a -300 kg D credit hid 25% of it). Keep it out of the declared total.
+        if is_en and en_module_group(stage) == "D":
+            total_module_d += co2e
+        else:
+            total += co2e
         total_biogenic += _biogenic(it)
         boundary = it.factor.lca_boundary or "unspecified"
         boundary_split[boundary] = boundary_split.get(boundary, 0.0) + co2e
@@ -110,13 +117,20 @@ def compute_assessment(db: Session, assessment: LcaAssessment) -> dict:
         "note": "Assessment recomputes from current items against pinned factor "
                 "versions; biogenic CO2 is separate, never in the total.",
     }
-    if assessment.standard in ("en_15804", "en_15978"):
+    if is_en:
         groups: dict = {}
         for stage, v in by_stage.items():
             g = en_module_group(stage)
             groups[g] = groups.get(g, 0.0) + v
         result["by_module_group_kg"] = {k: round(v, 6) for k, v in groups.items()}
         result["module_group_key"] = EN_GROUP_NOTE
+        result["module_d_kg_separate"] = round(total_module_d, 6)
+        result["declared_total_scope"] = "A-C (in-boundary); Module D excluded"
+        result["note"] = (
+            "Declared total covers in-boundary modules A-C only. Module D (benefits "
+            "and loads beyond the system boundary) is reported SEPARATELY per EN 15804 "
+            "/ EN 15978 and is never netted into the total or the per-functional-unit "
+            "figure. Biogenic CO2 is separate too.")
     if assessment.standard == "iso_14083":
         wtt = boundary_split.get("well_to_tank", 0.0)
         ttw = boundary_split.get("combustion", 0.0) + boundary_split.get("tank_to_wheel", 0.0)

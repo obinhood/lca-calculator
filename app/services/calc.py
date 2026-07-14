@@ -68,15 +68,55 @@ def _parse_iso_date(value: Optional[str]) -> Optional[date_cls]:
         return None
 
 
+# Bumped whenever the fingerprint's INPUTS change, so a run stamped under an older
+# scheme is reported as "staleness not assessable" rather than falsely STALE.
+FINGERPRINT_VERSION = "v2"
+
+
 def activities_fingerprint(acts: List[ActivityRecord]) -> str:
-    """Stable hash of the activity set (id/factor/quantity/unit).
+    """Stable hash of the activity set (id/factor/quantity/unit/date/category).
 
     Changes if any activity is added, removed, re-mapped, or edited — even when the
     activity count is unchanged — so a run computed against this set can be detected
-    as stale by content, not just by count.
+    as stale by content, not just by count. date and category are included because
+    both change the RESULT (period attribution and scope classification), so an
+    in-place edit to either must invalidate the run (v2).
     """
-    parts = sorted(f"{a.id}:{a.factor_id}:{a.quantity}:{a.unit}" for a in acts)
-    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+    parts = sorted(
+        f"{a.id}:{a.factor_id}:{a.quantity}:{a.unit}:{a.date}:{a.category}" for a in acts)
+    digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+    return f"{FINGERPRINT_VERSION}:{digest}"
+
+
+def activities_in_scope(db: Session, organisation_id: int,
+                        period: Optional[ReportingPeriod]) -> List[ActivityRecord]:
+    """The activity set a run covers: the org's activities, filtered to the reporting
+    period when one is set.
+
+    Rows with a missing/malformed date are KEPT (they become data_errors — they must
+    not silently vanish from the run). This is the SINGLE definition of a run's
+    activity set: compute_co2e and the staleness check both use it, so a
+    period-scoped run can no longer be perpetually 'stale' by comparing a filtered
+    fingerprint against the org's unfiltered activity list.
+    """
+    acts = db.query(ActivityRecord).filter(
+        ActivityRecord.organisation_id == organisation_id).all()
+    if period is None:
+        return acts
+    p_start = _parse_iso_date(period.start_date)
+    p_end = _parse_iso_date(period.end_date)
+    in_period = []
+    for a in acts:
+        adate = _parse_iso_date(a.date)
+        if adate is None:
+            in_period.append(a)      # undatable: kept, becomes a data_error
+            continue
+        if p_start and adate < p_start:
+            continue
+        if p_end and adate > p_end:
+            continue
+        in_period.append(a)
+    return in_period
 
 
 def factor_gases(factor: EmissionFactor) -> dict:
@@ -223,26 +263,12 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         if period.frozen:
             raise ReportingPeriodError("reporting period is frozen; cannot create a new run")
 
-    acts = db.query(ActivityRecord).filter(
-        ActivityRecord.organisation_id == organisation_id).all()
-
-    undatable = set()
-    if period is not None:
-        p_start = _parse_iso_date(period.start_date)
-        p_end = _parse_iso_date(period.end_date)
-        in_period = []
-        for a in acts:
-            adate = _parse_iso_date(a.date)
-            if adate is None:
-                undatable.add(a.id)   # keep in run; becomes a data_error below
-                in_period.append(a)
-                continue
-            if p_start and adate < p_start:
-                continue
-            if p_end and adate > p_end:
-                continue
-            in_period.append(a)
-        acts = in_period
+    # The run's activity set — the SAME definition the staleness check uses.
+    acts = activities_in_scope(db, organisation_id, period)
+    # In a period-scoped run an undatable row cannot be attributed to the period,
+    # so it is kept but bucketed as a data_error below (never silently dropped).
+    undatable = ({a.id for a in acts if _parse_iso_date(a.date) is None}
+                 if period is not None else set())
 
     # Hoisted once per run (was an N+1 query inside the loop).
     instruments = db.query(MarketInstrument).filter(

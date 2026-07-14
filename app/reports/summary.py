@@ -2,8 +2,12 @@ import json
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from ..models import ActivityRecord, CalculationRun, EmissionLineItem, EmissionFactor
-from ..services.calc import activities_fingerprint
+from ..models import (
+    ActivityRecord, CalculationRun, EmissionLineItem, EmissionFactor, ReportingPeriod,
+)
+from ..services.calc import (
+    activities_fingerprint, activities_in_scope, FINGERPRINT_VERSION,
+)
 
 
 def _resolve_run(db: Session, organisation_id: Optional[int], run_id: Optional[int]):
@@ -231,11 +235,41 @@ def coverage(db: Session, run: CalculationRun):
     n_unmapped_now = db.query(func.count(ActivityRecord.id))\
         .filter(ActivityRecord.organisation_id == run.organisation_id,
                 ActivityRecord.factor_id.is_(None)).scalar() or 0
-    acts_now = db.query(ActivityRecord)\
-        .filter(ActivityRecord.organisation_id == run.organisation_id).all()
+    # Compare like with like: a PERIOD-scoped run's fingerprint was taken over the
+    # in-period activities, so it must be re-checked against the same filtered set.
+    # (Comparing against the org's whole activity list made every period run — the
+    # normal annual-inventory case — perpetually STALE.)
+    period = (db.get(ReportingPeriod, run.reporting_period_id)
+              if run.reporting_period_id else None)
+    acts_now = activities_in_scope(db, run.organisation_id, period)
     n_activities_now = len(acts_now)
+
     # Content fingerprint (not just count): catches re-mapping / edits at equal count.
-    stale = activities_fingerprint(acts_now) != (run.activities_fingerprint or "")
+    # A run stamped under an older fingerprint scheme can't be compared, so report
+    # "not assessable" rather than falsely STALE.
+    stored_fp = run.activities_fingerprint or ""
+    staleness_assessable = stored_fp.startswith(f"{FINGERPRINT_VERSION}:")
+    stale = (activities_fingerprint(acts_now) != stored_fp) if staleness_assessable else False
+
+    # Factor drift: the run froze each line's factor value, so an IN-PLACE edit to a
+    # factor (which should never happen — supersede instead) means the run no longer
+    # reproduces from the current catalog. Detect it rather than silently diverge.
+    factor_drift = []
+    frozen = {}
+    for (details,) in db.query(EmissionLineItem.details)\
+            .filter(EmissionLineItem.run_id == run.id,
+                    EmissionLineItem.method == "location").all():
+        d = json.loads(details or "{}")
+        fid, fval = d.get("factor_id"), d.get("factor_value")
+        if fid is not None and fval is not None:
+            frozen[fid] = fval
+    if frozen:
+        for f in db.query(EmissionFactor).filter(EmissionFactor.id.in_(frozen.keys())).all():
+            if f.value is not None and f.value != frozen[f.id]:
+                factor_drift.append(
+                    f"factor {f.id} ({f.source} v{f.version}) value changed in place since "
+                    f"this run ({frozen[f.id]} -> {f.value}) — the run's figures no longer "
+                    f"reproduce from the current catalog; supersede factors, never edit them")
 
     unmapped_by_cat = db.query(ActivityRecord.category, func.count(ActivityRecord.id))\
         .filter(ActivityRecord.organisation_id == run.organisation_id,
@@ -255,11 +289,18 @@ def coverage(db: Session, run: CalculationRun):
         warnings.append(f"Run is STALE: the activity set changed since this run "
                         f"(now {n_activities_now} activities vs {n_total} at run time, "
                         f"or an activity was re-mapped/edited) — re-run /calculate/run.")
+    if not staleness_assessable:
+        warnings.append("Run predates the current fingerprint scheme — staleness cannot be "
+                        "assessed; recompute to enable reproducibility checking.")
+    warnings.extend(factor_drift)
 
     return {
         "activities_total": n_total,
         "activities_calculated": n_calc,
         "activities_uncovered": uncovered,
+        "staleness_assessable": staleness_assessable,
+        "factor_drift": factor_drift,
+        "period_scoped": run.reporting_period_id is not None,
         "unit_errors": run.unit_errors,
         "data_errors": run.data_errors,
         "gwp_mismatch": run.gwp_mismatch,
