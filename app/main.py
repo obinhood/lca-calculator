@@ -643,6 +643,34 @@ def get_pcaf_report(include_scope3: bool = True, as_of: Optional[str] = None,
                                                          as_of=as_of)))
 
 
+@app.get("/reports/ecovadis")
+def get_ecovadis_readiness(run_id: Optional[int] = None,
+                           baseline_run_id: Optional[int] = None,
+                           intensity_denominator: Optional[float] = None,
+                           denominator_unit: str = "revenue",
+                           has_environmental_policy: bool = False,
+                           iso_14001_certified: bool = False,
+                           published_sustainability_report: bool = False,
+                           org: Organisation = Depends(current_org),
+                           db: Session = Depends(get_db)):
+    """EcoVadis Environment-theme readiness: evidence pack + gap list.
+
+    NOT a score or medal (only EcoVadis issues those) and NOT the Labour/Ethics/
+    Procurement themes. Policy/ISO-14001/report flags are self-attested.
+    """
+    from .reports.ecovadis import ecovadis_readiness
+    if intensity_denominator is not None and (
+            not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
+        raise HTTPException(status_code=400,
+                            detail="intensity_denominator must be finite > 0")
+    return JSONResponse(with_guidance(ecovadis_readiness(
+        db, org.id, run_id=run_id, baseline_run_id=baseline_run_id,
+        intensity_denominator=intensity_denominator, denominator_unit=denominator_unit,
+        has_environmental_policy=has_environmental_policy,
+        iso_14001_certified=iso_14001_certified,
+        published_sustainability_report=published_sustainability_report)))
+
+
 @app.get("/reports/sfdr_pai")
 def get_sfdr_pai_report(portfolio_value_millions: Optional[float] = None,
                         include_scope3: bool = True,

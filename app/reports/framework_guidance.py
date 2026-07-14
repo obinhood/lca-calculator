@@ -353,6 +353,22 @@ FRAMEWORKS = {
         "applies_to": "Registries issuing verified carbon credits.",
         "key_points": ["Record registry, project id, serial, vintage; retire before claiming; avoid double counting."],
     },
+    # --- Ratings & assessments (scored by a third party, not a reporting standard) ---
+    "ecovadis": {
+        "name": "EcoVadis (sustainability ratings)",
+        "category": "Ratings & assessments", "jurisdiction": "global",
+        "authority": "EcoVadis", "platform_support": "partial",
+        "endpoint": "/reports/ecovadis",
+        "applies_to": "Suppliers/companies rated for procurement; four themes — Environment, "
+                      "Labour & Human Rights, Ethics, Sustainable Procurement.",
+        "key_points": [
+            "A RATINGS scheme, not a reporting standard: EcoVadis scores you (0-100) and awards a medal; you cannot self-certify.",
+            "Each theme is assessed on a management-system model: Policies (commitments) -> Actions (measures taken) -> Results (reported KPIs) -> Reporting & verification.",
+            "Environment evidence that moves the score: a quantified GHG inventory (Scopes 1/2/3), an energy KPI, a time-bound reduction target (SBTi validation strengthens it), demonstrated reduction vs a baseline, renewable-electricity procurement, ISO 14001, and third-party assurance.",
+            "Evidence must be documented and current — assessors weight verified, published data far above self-declaration.",
+            "Platform covers the CARBON/ENERGY portion of the Environment theme (evidence pack + gaps). It does NOT produce a score or medal, and does NOT cover Labour & Human Rights, Ethics, or Sustainable Procurement.",
+        ],
+    },
     # --- Nature (separate spatial/qualitative data model from carbon) ---
     "tnfd": {
         "name": "TNFD (Taskforce on Nature-related Financial Disclosures)",
@@ -405,6 +421,7 @@ _NAME_TO_KEY = [
     ("UK ESOS", "esos"),
     ("TNFD", "tnfd"),
     ("SBTN", "sbtn"),
+    ("EcoVadis", "ecovadis"),
 ]
 
 
