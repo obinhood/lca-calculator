@@ -13,19 +13,37 @@ from .gwp import co2e_from_gases, gwp
 from .dq import line_dq
 from .spend import normalize_spend, SpendNormalizationError
 
+# GHG Protocol scope by activity category. Purchased energy carriers (electricity,
+# heat, steam, cooling) are Scope 2; on-site fuel combustion and fugitive/process
+# emissions are Scope 1; value-chain items are Scope 3. An UNRECOGNISED category is
+# not silently assumed — it defaults to Scope 3 but is FLAGGED (scope_source), so
+# purchased steam (Scope 2) or a refrigerant leak (Scope 1) can't hide in Scope 3.
 SCOPE_RULES = {
-    "electricity":"2",
-    "gas":"1",
-    "diesel":"1",
-    "flight":"3",
-    "train":"3",
-    "car":"3",
-    "waste":"3",
-    "spend":"3"
+    # Scope 2 — purchased/network-supplied energy
+    "electricity": "2", "heat": "2", "steam": "2", "cooling": "2",
+    "district_heat": "2", "district_heating": "2", "purchased_heat": "2",
+    # Scope 1 — direct combustion + fugitive/process
+    "gas": "1", "natural_gas": "1", "diesel": "1", "petrol": "1", "gasoline": "1",
+    "lpg": "1", "fuel_oil": "1", "oil": "1", "coal": "1",
+    "refrigerant": "1", "fugitive": "1", "process": "1",
+    # Scope 3 — value chain
+    "flight": "3", "train": "3", "car": "3", "waste": "3", "spend": "3",
+    "business_travel": "3", "commuting": "3", "freight": "3", "water": "3",
 }
 
 class ReportingPeriodError(ValueError):
     """Invalid reporting period for a calculation (wrong org, frozen, or missing)."""
+
+
+class FactorValueError(ValueError):
+    """The emission factor's OWN value / per-gas mass is missing or non-finite.
+
+    The factor — not the activity quantity — is the bad input, so the row is
+    routed to ``data_errors`` (surfaced, excluded) rather than crashing the whole
+    run (a NULL value would raise) or letting inf/NaN silently poison the total
+    (audit Phase 0). The sanctioned loaders already reject such factors on
+    ingest; this guards factors inserted by other paths.
+    """
 
 
 # GHG Protocol Scope 2 Guidance instrument hierarchy (lower rank = higher precedence).
@@ -96,7 +114,15 @@ def compute_activity_co2e(quantity: Optional[float], unit: str, factor: Emission
         raise ValueError("no emission factor supplied")
     qty_in_factor_unit = convert(quantity, unit, factor.unit)
     if gwp_set and getattr(factor, "has_gas_breakdown", False):
-        return qty_in_factor_unit * co2e_from_gases(factor_gases(factor), gwp_set)
+        gases = factor_gases(factor)
+        for g, mass in gases.items():
+            if mass is None or not math.isfinite(mass):
+                raise FactorValueError(
+                    f"factor {factor.id} has a missing/non-finite {g} mass ({mass!r})")
+        return qty_in_factor_unit * co2e_from_gases(gases, gwp_set)
+    if factor.value is None or not math.isfinite(factor.value):
+        raise FactorValueError(
+            f"factor {factor.id} has a missing/non-finite value ({factor.value!r})")
     return qty_in_factor_unit * factor.value
 
 
@@ -257,7 +283,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             # Aggregate factors bake a GWP vintage into `value`, so a vintage
             # mismatch is unresolvable at calc time. Per-gas factors are vintage-
             # free: GWP is applied below from the requested set, so no check needed.
-            if not per_gas and a.factor.gwp_set and gwp_set and a.factor.gwp_set != gwp_set:
+            if (not per_gas and a.factor.gwp_set and gwp_set
+                    and a.factor.gwp_set.upper() != gwp_set.upper()):
                 run.gwp_mismatch += 1
                 errors.append({"activity_id": a.id,
                                "error": f"factor GWP set {a.factor.gwp_set} != requested {gwp_set}"})
@@ -289,11 +316,20 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                     run.data_errors += 1
                     errors.append({"activity_id": a.id, "error": str(exc)})
                     continue
+                if a.factor.value is None or not math.isfinite(a.factor.value):
+                    run.data_errors += 1
+                    errors.append({"activity_id": a.id,
+                                   "error": f"factor {a.factor_id} has a missing/non-finite value"})
+                    continue
                 co2e = spend_steps["amount_in_factor_currency"] * a.factor.value
             else:
                 try:
                     co2e = compute_activity_co2e(a.quantity, a.unit, a.factor, gwp_set=gwp_set)
-                except QuantityError as exc:          # None / non-finite / non-numeric
+                except QuantityError as exc:          # None / non-finite / non-numeric quantity
+                    run.data_errors += 1
+                    errors.append({"activity_id": a.id, "error": str(exc)})
+                    continue
+                except FactorValueError as exc:       # bad factor value / per-gas mass
                     run.data_errors += 1
                     errors.append({"activity_id": a.id, "error": str(exc)})
                     continue
@@ -331,14 +367,24 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             # Biogenic CO2 tracked as its own pool (ISO 14067), never in total_co2e.
             # convert() cannot fail here — the same args already succeeded in
             # compute_activity_co2e above — so no guard is needed.
-            if a.factor.kg_co2_biogenic is not None:
+            if a.factor.kg_co2_biogenic is not None and math.isfinite(a.factor.kg_co2_biogenic):
                 qty_fu = convert(a.quantity, a.unit, a.factor.unit)
                 biogenic = qty_fu * a.factor.kg_co2_biogenic
                 detail["biogenic_co2e"] = biogenic
                 total_biogenic += biogenic
 
-            scope = a.scope or SCOPE_RULES.get((a.category or "").lower(), "3")
+            # Scope classification: explicit preset > category rule > flagged default.
+            # An unrecognised category defaults to Scope 3 but records scope_source
+            # so the assumption is visible in the frozen lineage and the summary.
+            _cat = (a.category or "").lower()
+            if a.scope:
+                scope, scope_source = a.scope, "explicit"
+            elif _cat in SCOPE_RULES:
+                scope, scope_source = SCOPE_RULES[_cat], "category_rule"
+            else:
+                scope, scope_source = "3", "assumed_scope3"
             a.scope = scope
+            detail["scope_source"] = scope_source
             line_items.append(EmissionLineItem(
                 run_id=run.id, activity_id=a.id, scope=scope, method="location", co2e=co2e,
                 details=json.dumps(detail),

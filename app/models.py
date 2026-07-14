@@ -50,6 +50,11 @@ class ActivityRecord(Base):
 
 class EmissionFactor(Base):
     __tablename__ = "emission_factors"
+    __table_args__ = (
+        # A negative factor would turn a source into a sink and silently understate
+        # the total. NULL is allowed: per-gas factors carry no aggregate `value`.
+        CheckConstraint("value >= 0", name="ck_factor_value_nonneg"),
+    )
     id = Column(Integer, primary_key=True)
     source = Column(String)  # DEFRA2024 (demo), etc.
     version = Column(String) # 2024.1
