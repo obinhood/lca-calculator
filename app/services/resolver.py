@@ -22,6 +22,16 @@ METHOD_RANK = {"supplier_specific": 0, "hybrid": 1, "average_data": 2, "spend_ba
 # Only proposals at or above this confidence bind without human review.
 AUTO_BIND_THRESHOLD = 0.95
 
+# Categories whose emission factor is LOCATION-SPECIFIC: a "Global" factor is NOT
+# geography-agnostic for these (grid electricity/heat/steam vary enormously by
+# region), so a Global match for a specific geography is a SUGGESTION requiring
+# review, never a silent auto-bind. Combustion fuels (diesel, petrol, gas, flight)
+# are chemistry-driven and location-agnostic, so their Global factors still bind.
+GEO_SENSITIVE_CATEGORIES = {
+    "electricity", "heat", "steam", "cooling", "district_heat", "district_heating",
+    "purchased_heat", "grid", "electricity_generation",
+}
+
 CONFIDENCE = {
     "exact": 1.0,
     # Same category+subcategory, but the factor is published with Global
@@ -100,6 +110,12 @@ def _propose(db: Session, category: str, subcategory: Optional[str],
                       EmissionFactor.subcategory == (subcategory or ""),
                       EmissionFactor.geography == "Global").first()
         if ef:
+            # A Global factor is only geography-agnostic for location-insensitive
+            # categories (combustion fuels). For grid electricity/heat it must NOT
+            # auto-bind (a Global grid factor on a low-carbon grid overstates
+            # Scope 2 ~25x): route to review with category_geo-level confidence.
+            if category and category.lower() in GEO_SENSITIVE_CATEGORIES:
+                return ef, "global_geo_sensitive", CONFIDENCE["category_geo"]
             return ef, "exact_global", CONFIDENCE["exact_global"]
 
     # 2. Fuzzy subcategory (suggestion only). Uses the GIVEN subcategory text when

@@ -145,6 +145,7 @@ def leap_assessment(db: Session, organisation_id: int) -> dict:
     missing_value = 0            # stressed-basin freshwater impacts with no metric_value
     unclassifiable = 0           # freshwater impacts on unknown-stress sites
     withdrawal_units = set()     # metric_units summed — must be consistent to trust the total
+    missing_unit = 0             # summed values carrying NO metric_unit (unit unverifiable)
     for it in impacts:
         if it.driver != "freshwater_use":
             continue
@@ -155,6 +156,8 @@ def leap_assessment(db: Session, organisation_id: int) -> dict:
                 water_stressed_withdrawal += it.metric_value
                 if it.metric_unit:
                     withdrawal_units.add(it.metric_unit)
+                else:
+                    missing_unit += 1
         elif it.site_id in unknown_stress_ids:
             unclassifiable += 1
 
@@ -163,6 +166,9 @@ def leap_assessment(db: Session, organisation_id: int) -> dict:
         warnings.append("water withdrawal summed across INCONSISTENT metric_units "
                         f"{sorted(withdrawal_units)} — the total is not meaningful until "
                         "units are normalised")
+    if missing_unit:
+        warnings.append(f"{missing_unit} freshwater-use value(s) in the withdrawal total carry "
+                        "NO metric_unit — the total's unit is unverified")
     if missing_value:
         warnings.append(f"{missing_value} freshwater-use impact(s) in water-stressed basins have no "
                         "metric_value — water withdrawal figure is INCOMPLETE, not zero")

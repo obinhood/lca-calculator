@@ -76,6 +76,16 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         kwh_contractual += d.get("kwh_contractual", 0.0) or 0.0
         kwh_grid_fallback += d.get("kwh_grid_fallback", 0.0) or 0.0
 
+    # Surface activities whose scope was ASSUMED (unrecognised category -> Scope 3)
+    # from the frozen line lineage, so a silent mis-scoping of purchased energy
+    # (Scope 2) or a fugitive source (Scope 1) is visible to the report consumer.
+    scope_assumed = {}
+    for details, cat in db.query(li.details, ActivityRecord.category)\
+            .join(ActivityRecord, li.activity_id == ActivityRecord.id)\
+            .filter(li.run_id == run.id, li.method == "location").all():
+        if (json.loads(details or "{}")).get("scope_source") == "assumed_scope3":
+            scope_assumed[cat or "?"] = scope_assumed.get(cat or "?", 0) + 1
+
     return {
         "run": {
             "id": run.id,
@@ -85,6 +95,12 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             "reporting_period_id": run.reporting_period_id,
             "status": run.status,
         },
+        "scope_assumptions": ({
+            "assumed_scope3_by_category": scope_assumed,
+            "note": "These categories were unrecognised and defaulted to Scope 3 — "
+                    "verify none are purchased energy (Scope 2) or direct/fugitive "
+                    "(Scope 1) before relying on the scope split.",
+        } if scope_assumed else None),
         "total_co2e": run.total_co2e,                     # location-based (headline)
         "total_co2e_market": run.total_co2e_market,       # dual reporting counterpart
         # ISO 14067: biogenic CO2 reported separately, never netted into the above.

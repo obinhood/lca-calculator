@@ -17,6 +17,7 @@ from .services.ingestion import parse_csv
 from .services.qa import check_records
 from .services.resolver import auto_map_activity
 from .services.calc import compute_co2e, ReportingPeriodError, _parse_iso_date
+from .services.gwp import SUPPORTED_GWP_SETS
 from .reports.summary import summary
 from .reports.secr import secr_report
 from .reports.sb253 import sb253_report
@@ -255,6 +256,14 @@ def create_reporting_period(label: str = Query(...),
                             start_date: Optional[str] = None, end_date: Optional[str] = None,
                             org: Organisation = Depends(current_org),
                             db: Session = Depends(get_db)):
+    # Validate dates at the boundary: a malformed start/end silently mis-scopes or
+    # zeroes a period-scoped run's footprint (the run still reports "complete").
+    for nm, val in (("start_date", start_date), ("end_date", end_date)):
+        if val is not None and _parse_iso_date(val) is None:
+            raise HTTPException(status_code=400,
+                                detail=f"{nm} must be an ISO date (YYYY-MM-DD)")
+    if start_date and end_date and _parse_iso_date(start_date) > _parse_iso_date(end_date):
+        raise HTTPException(status_code=400, detail="start_date must be on or before end_date")
     period = ReportingPeriod(organisation_id=org.id, label=label,
                              start_date=start_date, end_date=end_date, frozen=False)
     db.add(period); db.commit(); db.refresh(period)
@@ -286,6 +295,10 @@ def create_market_instrument(instrument_type: str = Query(...),
     contractual = {"supplier_specific", "ppa", "rec"}
     if instrument_type not in allowed:
         raise HTTPException(status_code=400, detail=f"instrument_type must be one of {sorted(allowed)}")
+    gwp_set = (gwp_set or "").strip().upper()
+    if gwp_set not in SUPPORTED_GWP_SETS:
+        raise HTTPException(status_code=400,
+                            detail=f"gwp_set must be one of {list(SUPPORTED_GWP_SETS)}")
     # Finiteness BEFORE any write: inf/nan would poison every future market total.
     if not math.isfinite(kg_co2e_per_kwh) or kg_co2e_per_kwh < 0:
         raise HTTPException(status_code=400, detail="kg_co2e_per_kwh must be a finite number >= 0")
@@ -314,6 +327,13 @@ def run_calculation(gwp_set: str = Query("AR6"),
                     reporting_period_id: Optional[int] = None,
                     org: Organisation = Depends(current_org),
                     db: Session = Depends(get_db)):
+    # Normalise + validate the GWP set: an unknown value (e.g. "ar6" typo) would
+    # otherwise silently bucket every activity as gwp_mismatch (total = 0, status
+    # complete) or crash a per-gas run with an opaque 500.
+    gwp_set = (gwp_set or "").strip().upper()
+    if gwp_set not in SUPPORTED_GWP_SETS:
+        raise HTTPException(status_code=400,
+                            detail=f"gwp_set must be one of {list(SUPPORTED_GWP_SETS)}")
     try:
         run = compute_co2e(db, org.id, gwp_set=gwp_set, reporting_period_id=reporting_period_id)
     except ReportingPeriodError as exc:
