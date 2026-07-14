@@ -93,7 +93,26 @@ def test_en15804_module_grouping(db):
     g = r["by_module_group_kg"]
     assert g["A"] == pytest.approx(60.0) and g["C"] == pytest.approx(20.0)
     assert g["D"] == pytest.approx(5.0)
-    assert r["total_co2e_kg"] == pytest.approx(85.0)
+    # EN 15804 §6 / EN 15978: the DECLARED total is in-boundary A-C only. Module D
+    # (benefits beyond the boundary) is reported separately and never netted in —
+    # netting it would understate in-boundary whole-life carbon.
+    assert r["total_co2e_kg"] == pytest.approx(80.0)          # A(60) + C(20), NOT D
+    assert r["module_d_kg_separate"] == pytest.approx(5.0)
+    assert r["co2e_per_functional_unit_kg"] == pytest.approx(0.8)   # 80 / 100 m2
+
+
+def test_en15804_module_d_credit_does_not_shrink_the_total(db):
+    """A negative Module D recycling credit must not net against A-C."""
+    org = _org(db)
+    f = _factor(db, "material", "kg", 1.0, subcategory="concrete")
+    credit = _factor(db, "material", "kg", -0.0, subcategory="credit")
+    a = _assess(db, org.id, "en_15978", fu="1 m2 GFA", fu_qty=1.0)
+    _item(db, a.id, "A1-A3", 100, "kg", f.id)      # 100 kg in-boundary
+    # a Module D credit modelled as a negative-quantity recovery line
+    _item(db, a.id, "D", -30, "kg", f.id)          # -30 kg beyond-boundary credit
+    r = compute_assessment(db, a)
+    assert r["total_co2e_kg"] == pytest.approx(100.0)         # unchanged by D
+    assert r["module_d_kg_separate"] == pytest.approx(-30.0)  # surfaced separately
 
 
 def test_unit_mismatch_excluded_not_wrong(db):
