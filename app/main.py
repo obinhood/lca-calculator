@@ -286,6 +286,7 @@ def create_market_instrument(instrument_type: str = Query(...),
                              kg_co2e_per_kwh: float = Query(...),
                              coverage_kwh: Optional[float] = None,
                              gwp_set: str = Query("AR6"),
+                             market: Optional[str] = None,
                              start_date: Optional[str] = None,
                              end_date: Optional[str] = None,
                              description: Optional[str] = None,
@@ -314,7 +315,8 @@ def create_market_instrument(instrument_type: str = Query(...),
             raise HTTPException(status_code=400, detail="dates must be ISO format YYYY-MM-DD")
     inst = MarketInstrument(organisation_id=org.id, instrument_type=instrument_type,
                             kg_co2e_per_kwh=kg_co2e_per_kwh, coverage_kwh=coverage_kwh,
-                            gwp_set=gwp_set, start_date=start_date,
+                            gwp_set=gwp_set, market=(market.strip() if market else None),
+                            start_date=start_date,
                             end_date=end_date, description=description)
     db.add(inst); db.commit(); db.refresh(inst)
     return {"id": inst.id, "organisation_id": org.id, "instrument_type": inst.instrument_type,

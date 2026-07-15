@@ -74,11 +74,15 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
     bases = {}
     kwh_contractual = 0.0
     kwh_grid_fallback = 0.0
+    kwh_market_unverified = 0.0     # covered by an instrument whose market couldn't be checked
+    skipped_market = set()          # instruments excluded by a declared market mismatch
     for (details,) in market_lines:
         d = json.loads(details or "{}")
         bases[d.get("method_basis", "?")] = bases.get(d.get("method_basis", "?"), 0) + 1
         kwh_contractual += d.get("kwh_contractual", 0.0) or 0.0
         kwh_grid_fallback += d.get("kwh_grid_fallback", 0.0) or 0.0
+        kwh_market_unverified += d.get("kwh_market_unverified", 0.0) or 0.0
+        skipped_market.update(d.get("instruments_skipped_market", []) or [])
 
     # Surface activities whose scope was ASSUMED (unrecognised category -> Scope 3)
     # from the frozen line lineage, so a silent mis-scoping of purchased energy
@@ -124,6 +128,10 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             "market_bases": bases,
             "kwh_contractual": kwh_contractual,
             "kwh_grid_fallback": kwh_grid_fallback,
+            # Contractual kWh applied without a verified market match (instrument or
+            # consumption had no declared market) — a Scope 2 Guidance quality caveat.
+            "kwh_market_unverified": kwh_market_unverified,
+            "instruments_excluded_by_market": sorted(skipped_market),
         },
         "method_split": {
             "co2e_by_method": method_split,

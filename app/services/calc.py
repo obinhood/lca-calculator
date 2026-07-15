@@ -104,8 +104,12 @@ def activities_in_scope(db: Session, organisation_id: int,
     period-scoped run can no longer be perpetually 'stale' by comparing a filtered
     fingerprint against the org's unfiltered activity list.
     """
+    # Ordered by id so a run is fully DETERMINISTIC — market-instrument allocation
+    # consumes a shared instrument pool cumulatively, so an unspecified row order
+    # could otherwise change which consumption a REC covers and thus the market total.
     acts = db.query(ActivityRecord).filter(
-        ActivityRecord.organisation_id == organisation_id).all()
+        ActivityRecord.organisation_id == organisation_id)\
+        .order_by(ActivityRecord.id).all()
     if period is None:
         return acts
     p_start = _parse_iso_date(period.start_date)
@@ -192,8 +196,18 @@ class _InstrumentPool:
             i.id for i in self.instruments
             if i.gwp_set and run_gwp_set and i.gwp_set != run_gwp_set})
 
-    def _applies(self, inst: MarketInstrument, activity_date: Optional[str]) -> bool:
+    def _applies(self, inst: MarketInstrument, activity_date: Optional[str],
+                 activity_market: Optional[str]) -> bool:
         if inst.gwp_set and self.run_gwp_set and inst.gwp_set != self.run_gwp_set:
+            return False
+        # Geography / market matching (Scope 2 Guidance Ch. 7 quality criteria): a
+        # contractual instrument may only cover consumption on the SAME market. A
+        # DECLARED market that differs from the consumption's grid excludes the
+        # instrument — this is what stops a US REC covering German load. A NULL
+        # market on either side can't be verified, so the instrument still applies
+        # but the allocation is flagged market_unverified (see allocate()).
+        if (inst.market and activity_market
+                and inst.market.strip().upper() != activity_market.strip().upper()):
             return False
         start = _parse_iso_date(inst.start_date)
         end = _parse_iso_date(inst.end_date)
@@ -208,15 +222,24 @@ class _InstrumentPool:
         return True
 
     def allocate(self, kwh: float, activity_date: Optional[str],
-                 grid_rate_per_kwh: float) -> dict:
+                 activity_market: Optional[str], grid_rate_per_kwh: float) -> dict:
         """Cover ``kwh`` from the pool; residual is priced at the grid rate."""
         allocations = []
         needed = kwh
         co2e = 0.0
+        # Instruments excluded because their DECLARED market differs from this
+        # consumption's grid — computed pool-wide (like skipped_vintage) so the audit
+        # signal is complete and id-order-independent, not dependent on whether the
+        # loop happened to reach the instrument before coverage was exhausted.
+        skipped_market = sorted({
+            inst.id for inst in self.instruments
+            if inst.market and activity_market
+            and inst.market.strip().upper() != activity_market.strip().upper()})
+        market_unverified_kwh = 0.0  # kWh covered where the market could not be verified
         for inst in self.instruments:
             if needed <= 0:
                 break
-            if not self._applies(inst, activity_date):
+            if not self._applies(inst, activity_date, activity_market):
                 continue
             rem = self.remaining[inst.id]
             take = needed if rem is None else min(rem, needed)
@@ -226,9 +249,14 @@ class _InstrumentPool:
             if rem is not None:
                 self.remaining[inst.id] = rem - take
             needed -= take
+            unverified = not (inst.market and activity_market)
+            if unverified:
+                market_unverified_kwh += take
             allocations.append({
                 "instrument_id": inst.id,
                 "instrument_type": inst.instrument_type,
+                "instrument_market": inst.market,
+                "market_match": "unverified" if unverified else "matched",
                 "kg_co2e_per_kwh": inst.kg_co2e_per_kwh,
                 "kwh_covered": take,
                 "undated_instrument": not (inst.start_date or inst.end_date),
@@ -241,6 +269,9 @@ class _InstrumentPool:
                  else "grid_average_fallback")
         return {"co2e": co2e, "kwh": kwh, "kwh_contractual": covered,
                 "kwh_grid_fallback": needed, "method_basis": basis,
+                "activity_market": activity_market,
+                "kwh_market_unverified": market_unverified_kwh,
+                "instruments_skipped_market": skipped_market,
                 "allocations": allocations,
                 "instruments_skipped_gwp_vintage": self.skipped_vintage}
 
@@ -491,7 +522,9 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                     try:
                         kwh = convert(a.quantity, a.unit, "kWh")
                         grid_rate = (co2e / kwh) if kwh else 0.0
-                        alloc = pool.allocate(kwh, a.date, grid_rate)
+                        # a.geo is the consumption's grid/market — instruments only
+                        # cover matching-market load (a US REC can't zero DE consumption).
+                        alloc = pool.allocate(kwh, a.date, a.geo, grid_rate)
                         market_co2e = alloc.pop("co2e")
                         # MERGE, don't replace: a wholesale replace discarded factor_id,
                         # method_type, data_quality, scope_source and every ghgp_* key
