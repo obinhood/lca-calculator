@@ -13,7 +13,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import CalculationRun
-from .summary import summary, run_factor_sources, scope3_by_category
+from .summary import summary, run_factor_sources
+from .scope3 import category_tco2e
+from ..services.ghgp import scope3_completeness
 
 
 def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
@@ -40,6 +42,8 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
                 and math.isfinite(intensity_denominator) and intensity_denominator > 0)
     if not denom_ok:
         blockers.append("intensity_denominator required (finite, > 0) for C6.10")
+    # CDP C6.5 IS the 15-category Scope 3 grid — screen all 15.
+    blockers.extend(scope3_completeness(db, run).get("blockers", []))
 
     by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}
     ef_sources = run_factor_sources(db, run)
@@ -59,9 +63,7 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
             "C6.3_scope2_location_tco2e": round(s["scope2"]["location_based"] / 1000.0, 6),
             "C6.3_scope2_market_tco2e": round(s["scope2"]["market_based"] / 1000.0, 6),
             "C6.5_scope3_tco2e": round(by_scope.get("3", 0.0) / 1000.0, 6),
-            "C6.5_scope3_by_category_tco2e": {
-                c: round(v / 1000.0, 6)
-                for c, v in scope3_by_category(db, run).items()},
+            "C6.5_scope3_by_ghgp_category_tco2e": category_tco2e(s.get("scope3_ghgp") or {}),
             "C6.7_biogenic_co2_tco2": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
             "C6.10_intensity": ({
                 "tco2e_per_unit": round(run.total_co2e / 1000.0 / intensity_denominator, 6),

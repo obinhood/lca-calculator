@@ -100,20 +100,26 @@ def test_methodology_frozen_after_remap_and_unmap(db, mixed_run):
 
 def test_esrs_scope3_categories_respect_frozen_scope(db):
     """F2 regression: preset scopes must drive the category split, not names."""
+    from app.reports.summary import summary
     org = _org(db)
     # A non-carrier category explicitly in scope 1 (e.g. refrigerants)...
     f_ref = _factor(db, "refrigerants", "kg", 1430.0)
     _activity(db, org.id, f_ref.id, "refrigerants", 2, "kg", scope="1")
-    # ...and a gas activity explicitly preset to scope 3 (downstream use).
+    # ...and a gas activity explicitly preset to scope 3, categorised Cat 4.
     f_gas = _factor(db, "gas", "kWh", 0.184)
-    _activity(db, org.id, f_gas.id, "gas", 300, "kWh", scope="3")
+    g = _activity(db, org.id, f_gas.id, "gas", 300, "kWh", scope="3")
+    g.ghgp_category = 4
+    db.commit()
     run = compute_co2e(db, org.id)
-    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=1.0)
-    e = r["e1_6_gross_ghg_emissions_tco2e"]
-    assert "refrigerants" not in e["scope3_by_category"]          # scope 1, excluded
-    assert e["scope3_by_category"]["gas"] == pytest.approx(0.0552)  # scope 3, included
-    # The breakdown must sum to the scope-3 total exactly.
-    assert sum(e["scope3_by_category"].values()) == pytest.approx(e["scope3"])
+    inv = summary(db, organisation_id=org.id, run_id=run.id)["scope3_ghgp"]
+    cats = inv["categories"]
+    # refrigerants is Scope 1 -> absent from every Scope 3 category and the total.
+    assert all(cats[str(c)]["line_count"] == 0 for c in range(1, 16) if c != 4)
+    assert cats["4"]["tco2e"] == pytest.approx(0.0552)            # the scope-3 gas line
+    # The 15 categories + unassigned must sum to the scope-3 total exactly.
+    total_cat = sum(cats[str(c)]["co2e_kg"] for c in range(1, 16))
+    assert total_cat + inv["unassigned"]["co2e_kg"] == pytest.approx(
+        inv["totals"]["scope3_gross_kg"])
 
 
 def test_esrs_energy_is_scope_bounded(db):

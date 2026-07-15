@@ -6,7 +6,11 @@ from typing import Optional, List
 from sqlalchemy.orm import Session
 from ..models import (
     ActivityRecord, EmissionFactor, CalculationRun, EmissionLineItem, ReportingPeriod,
-    MarketInstrument,
+    MarketInstrument, Scope3CategoryDeclaration, RunScope3Declaration,
+)
+from .ghgp import (
+    GHGP_STANDARD_VERSION, CATEGORY_MAP_VERSION, CATEGORIES, taxonomy,
+    derive_ghgp_category, boundary_meets_minimum, declarations_fingerprint,
 )
 from .units import convert, UnitConversionError, QuantityError
 from .gwp import co2e_from_gases, gwp
@@ -70,20 +74,21 @@ def _parse_iso_date(value: Optional[str]) -> Optional[date_cls]:
 
 # Bumped whenever the fingerprint's INPUTS change, so a run stamped under an older
 # scheme is reported as "staleness not assessable" rather than falsely STALE.
-FINGERPRINT_VERSION = "v2"
+FINGERPRINT_VERSION = "v3"
 
 
 def activities_fingerprint(acts: List[ActivityRecord]) -> str:
-    """Stable hash of the activity set (id/factor/quantity/unit/date/category).
+    """Stable hash of the activity set (id/factor/quantity/unit/date/category/ghgp_category).
 
     Changes if any activity is added, removed, re-mapped, or edited — even when the
     activity count is unchanged — so a run computed against this set can be detected
     as stale by content, not just by count. date and category are included because
-    both change the RESULT (period attribution and scope classification), so an
-    in-place edit to either must invalidate the run (v2).
+    both change the RESULT (period attribution and scope classification); ghgp_category
+    because it changes the DISCLOSURE (v3).
     """
     parts = sorted(
-        f"{a.id}:{a.factor_id}:{a.quantity}:{a.unit}:{a.date}:{a.category}" for a in acts)
+        f"{a.id}:{a.factor_id}:{a.quantity}:{a.unit}:{a.date}:{a.category}:{a.ghgp_category}"
+        for a in acts)
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
     return f"{FINGERPRINT_VERSION}:{digest}"
 
@@ -411,6 +416,30 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 scope, scope_source = "3", "assumed_scope3"
             a.scope = scope
             detail["scope_source"] = scope_source
+
+            # --- GHGP Scope 3 category (frozen; never written back to the activity) ---
+            ghgp_cat, ghgp_src, cands = derive_ghgp_category(scope, a.category, a.ghgp_category)
+            # The activity's own category is frozen too, so the Scope 3 breakdown never
+            # has to join back to the live ActivityRecord (reproduction contract).
+            detail["activity_category"] = a.category
+            detail["ghgp_category"] = ghgp_cat
+            detail["ghgp_category_source"] = ghgp_src
+            detail["ghgp_category_candidates"] = cands
+            detail["ghgp_standard_version"] = GHGP_STANDARD_VERSION
+            detail["ghgp_map_version"] = CATEGORY_MAP_VERSION
+            if ghgp_cat is not None:
+                t = taxonomy()[ghgp_cat]
+                # Deliberate redundancy: the frozen evidence is human-readable without
+                # the software, and a later taxonomy edit can be DETECTED (never
+                # silently applied to a filed run).
+                detail["ghgp_category_name"] = t["name"]
+                detail["ghgp_min_boundary"] = t["min_boundary"]
+                # Freeze the VERDICT, not the input: factor.lca_boundary is a live
+                # catalog field, and correcting it later must not retroactively change
+                # what a filed run claimed.
+                detail["ghgp_min_boundary_met"] = boundary_meets_minimum(
+                    ghgp_cat, a.factor.lca_boundary)
+                detail["ghgp_sale_year_lifetime"] = t["sale_year_lifetime"]
             line_items.append(EmissionLineItem(
                 run_id=run.id, activity_id=a.id, scope=scope, method="location", co2e=co2e,
                 details=json.dumps(detail),
@@ -435,7 +464,11 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                         grid_rate = (co2e / kwh) if kwh else 0.0
                         alloc = pool.allocate(kwh, a.date, grid_rate)
                         market_co2e = alloc.pop("co2e")
-                        market_detail = alloc
+                        # MERGE, don't replace: a wholesale replace discarded factor_id,
+                        # method_type, data_quality, scope_source and every ghgp_* key
+                        # from the market line's frozen lineage.
+                        market_detail = {**detail, **alloc}
+                        market_detail.pop("biogenic_co2e", None)
                     except UnitConversionError as exc:
                         market_detail["method_basis"] = "grid_average_fallback"
                         market_detail["fallback_reason"] = str(exc)
@@ -459,6 +492,43 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         # Emissions-weighted data-quality score (1 best .. 5 worst); 0.0 = no data.
         run.data_quality_score = round(dq_weighted_sum / total, 3) if total else 0.0
         run.notes = json.dumps(errors)
+
+        # --- Freeze the Scope 3 completeness statement onto the run ---
+        # EXACTLY 15 rows, ALWAYS. A category the org never screened is frozen as
+        # 'undeclared' — a first-class status, not an absent row — so the run's
+        # exclusion statement is complete by construction: an assurer sees fifteen
+        # statements rather than an absence they have to notice.
+        live_decls = []
+        if reporting_period_id is not None:
+            live_decls = db.query(Scope3CategoryDeclaration).filter(
+                Scope3CategoryDeclaration.organisation_id == organisation_id,
+                Scope3CategoryDeclaration.reporting_period_id == reporting_period_id).all()
+        by_cat = {d.category: d for d in live_decls}
+        frozen_at = _utcnow_iso()
+        for c in CATEGORIES:
+            d = by_cat.get(c)
+            db.add(RunScope3Declaration(
+                run_id=run.id, category=c,
+                status=d.status if d else "undeclared",
+                declaration_id=d.id if d else None,
+                justification=d.justification if d else None,
+                screening_estimate_tco2e=d.screening_estimate_tco2e if d else None,
+                screening_method=d.screening_method if d else None,
+                materiality_threshold_pct=d.materiality_threshold_pct if d else None,
+                criteria=d.criteria if d else None,
+                minimum_boundary_met=d.minimum_boundary_met if d else None,
+                method_description=d.method_description if d else None,
+                calculation_tools=d.calculation_tools if d else None,
+                primary_data_pct=d.primary_data_pct if d else None,
+                screened_at=d.screened_at if d else None,
+                ghgp_standard_version=GHGP_STANDARD_VERSION,
+                frozen_at=frozen_at,
+            ))
+        run.ghgp_standard_version = GHGP_STANDARD_VERSION
+        run.ghgp_map_version = CATEGORY_MAP_VERSION
+        # Detects the screen being EDITED after the run that filed it.
+        run.scope3_declaration_fingerprint = declarations_fingerprint(live_decls)
+
         run.status = "complete"
         db.commit()
     except Exception:

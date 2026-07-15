@@ -29,15 +29,21 @@ def _activity(db, org_id, factor_id, category, quantity, unit):
 
 @pytest.fixture
 def seeded(db):
-    """electricity 1200 kWh, gas 800 kWh, diesel 150 L, waste 250 kg (scope 3)."""
+    """electricity 1200 kWh, gas 800 kWh, diesel 150 L, waste 250 kg (scope 3, Cat 5).
+
+    Returns a period-scoped, fully-screened, disclosure-ready run (all 15 GHGP
+    Scope 3 categories declared) so the golden tests exercise a real filing."""
+    from tests.scope3_util import ready_run
     org = _org(db)
     _activity(db, org.id, _factor(db, "electricity", "kWh", 0.170).id,
               "electricity", 1200, "kWh")
     _activity(db, org.id, _factor(db, "gas", "kWh", 0.184).id, "gas", 800, "kWh")
     _activity(db, org.id, _factor(db, "diesel", "L", 2.676).id, "diesel", 150, "L")
-    _activity(db, org.id, _factor(db, "waste", "kg", 0.480, subcategory="").id,
-              "waste", 250, "kg")
-    run = compute_co2e(db, org.id)
+    waste = _activity(db, org.id, _factor(db, "waste", "kg", 0.480, subcategory="").id,
+                      "waste", 250, "kg")
+    waste.ghgp_category = 5      # operational waste -> Cat 5 (resolve the ambiguity)
+    db.commit()
+    run, _period = ready_run(db, org.id)
     return org, run
 
 
@@ -49,7 +55,8 @@ def test_esrs_e1_golden_values(db, seeded):
     assert e["scope2_location_based"] == pytest.approx(0.204)
     assert e["scope2_market_based"] == pytest.approx(0.204)
     assert e["scope3"] == pytest.approx(0.120)                  # waste 250*0.48
-    assert e["scope3_by_category"]["waste"] == pytest.approx(0.120)
+    assert e["scope3_ghgp_categories"]["5"]["tco2e"] == pytest.approx(0.120)  # Cat 5
+    assert r["e1_6_scope3_screening"]["included"] == [5]
     assert e["total_location_based"] == pytest.approx(0.8726)
     # Intensity: 0.8726 t / 10 M€ revenue
     assert e["ghg_intensity"]["tco2e_total_location_per_million_revenue"] == \

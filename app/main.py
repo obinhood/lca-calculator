@@ -643,6 +643,126 @@ def get_pcaf_report(include_scope3: bool = True, as_of: Optional[str] = None,
                                                          as_of=as_of)))
 
 
+# --- GHG Protocol Scope 3: the 15-category screen ----------------------------
+
+@app.post("/scope3/declarations")
+def upsert_scope3_declaration(
+        reporting_period_id: int = Query(...), category: int = Query(..., ge=1, le=15),
+        status: str = Query(...), justification: Optional[str] = None,
+        screening_estimate_tco2e: Optional[float] = None,
+        materiality_threshold_pct: Optional[float] = None,
+        screening_method: Optional[str] = None,
+        criteria_json: Optional[str] = None,
+        method_description: Optional[str] = None,
+        calculation_tools: Optional[str] = None,
+        minimum_boundary_met: Optional[bool] = None,
+        screened_at: Optional[str] = None, declared_by: Optional[str] = None,
+        org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Declare one Scope 3 category for a reporting period.
+
+    The evidence a status requires is enforced HERE, at the boundary — an
+    unjustified exclusion is rejected rather than surfacing later as a blocker.
+    """
+    import json as _json
+    from .models import Scope3CategoryDeclaration
+    from .services.ghgp import (
+        STORABLE_STATUSES, SEVEN_CRITERIA, is_boilerplate, GHGP_STANDARD_VERSION,
+        MIN_JUSTIFICATION_CHARS,
+    )
+    from .services.calc import _utcnow_iso
+    if status not in STORABLE_STATUSES:
+        raise HTTPException(status_code=400,
+                            detail=f"status must be one of {list(STORABLE_STATUSES)}")
+    period = db.get(ReportingPeriod, reporting_period_id)
+    if period is None or period.organisation_id != org.id:
+        raise HTTPException(status_code=404, detail="reporting period not found for this organisation")
+
+    if status in ("not_applicable", "not_material", "not_measured") and is_boilerplate(justification):
+        raise HTTPException(
+            status_code=400,
+            detail=f"excluding a category requires a real justification (>= "
+                   f"{MIN_JUSTIFICATION_CHARS} chars, not boilerplate). 'We have not "
+                   f"measured it' is a disclosure of incompleteness, not a justification.")
+    if status == "included" and is_boilerplate(method_description):
+        raise HTTPException(status_code=400,
+                            detail="an INCLUDED category requires a method_description (ESRS AR 46(h))")
+    crit = None
+    if status == "not_material":
+        if screening_estimate_tco2e is None or materiality_threshold_pct is None:
+            raise HTTPException(status_code=400,
+                                detail="NOT MATERIAL requires screening_estimate_tco2e and "
+                                       "materiality_threshold_pct — it must be screened, not asserted")
+        try:
+            crit = _json.loads(criteria_json or "{}")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="criteria_json must be valid JSON")
+        absent = [k for k in SEVEN_CRITERIA if k not in crit or crit.get(k) is None]
+        if absent:
+            raise HTTPException(status_code=400,
+                                detail=f"NOT MATERIAL must be screened against all seven relevance "
+                                       f"criteria; missing/null: {absent}")
+    elif criteria_json:
+        try:
+            crit = _json.loads(criteria_json)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="criteria_json must be valid JSON")
+
+    now = _utcnow_iso()
+    d = db.query(Scope3CategoryDeclaration).filter(
+        Scope3CategoryDeclaration.organisation_id == org.id,
+        Scope3CategoryDeclaration.reporting_period_id == reporting_period_id,
+        Scope3CategoryDeclaration.category == category).first()
+    if d is None:
+        d = Scope3CategoryDeclaration(organisation_id=org.id,
+                                      reporting_period_id=reporting_period_id,
+                                      category=category, created_at=now)
+        db.add(d)
+    d.status = status
+    d.justification = justification
+    d.screening_estimate_tco2e = screening_estimate_tco2e
+    d.materiality_threshold_pct = materiality_threshold_pct
+    d.screening_method = screening_method
+    d.criteria = _json.dumps(crit) if crit is not None else None
+    d.method_description = method_description
+    d.calculation_tools = calculation_tools
+    d.minimum_boundary_met = minimum_boundary_met
+    d.screened_at = screened_at or now[:10]
+    d.declared_by = declared_by
+    d.standard_version = GHGP_STANDARD_VERSION
+    d.updated_at = now
+    db.commit(); db.refresh(d)
+    return {"id": d.id, "category": d.category, "status": d.status,
+            "note": "Recompute the run so this screen is frozen onto it."}
+
+
+@app.post("/activities/ghgp-categories")
+def bulk_assign_ghgp_category(category: str = Query(...), ghgp_category: int = Query(..., ge=1, le=15),
+                              subcategory: Optional[str] = None,
+                              org: Organisation = Depends(current_org),
+                              db: Session = Depends(get_db)):
+    """Bulk-assign a GHGP category to the org's activities matching a free-text
+    category (so `unassigned` Scope 3 lines can be resolved without re-uploading)."""
+    q = db.query(ActivityRecord).filter(ActivityRecord.organisation_id == org.id,
+                                        ActivityRecord.category == category)
+    if subcategory is not None:
+        q = q.filter(ActivityRecord.subcategory == subcategory)
+    rows = q.all()
+    for a in rows:
+        a.ghgp_category = ghgp_category
+    db.commit()
+    return {"updated": len(rows), "category": category, "ghgp_category": ghgp_category,
+            "note": "Recompute the run to apply."}
+
+
+@app.get("/reports/scope3_inventory")
+def get_scope3_inventory(run_id: Optional[int] = None,
+                         org: Organisation = Depends(current_org),
+                         db: Session = Depends(get_db)):
+    """The 15-category Scope 3 inventory + completeness statement (ESRS AR 46(i))."""
+    from .reports.scope3 import scope3_inventory_report
+    return JSONResponse(scope3_inventory_report(db, org.id, run_id=run_id))
+
+
 @app.get("/reports/ecovadis")
 def get_ecovadis_readiness(run_id: Optional[int] = None,
                            baseline_run_id: Optional[int] = None,
