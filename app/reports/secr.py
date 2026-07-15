@@ -138,6 +138,9 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
             "scope3_voluntary": round(scope3_kg / 1000.0, 6),
             "total_location_based": round(run.total_co2e / 1000.0, 6),
             "total_market_based": round(run.total_co2e_market / 1000.0, 6),
+            # SECR has no financed-emissions duty; if the org holds financed positions
+            # the omission is flagged (visible), never silent.
+            "financed_emissions_excluded": run.financed_co2e is not None,
             # Reported separately across ALL renderers (ISO 14067) — omission
             # here would be a silent cross-framework inconsistency.
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),

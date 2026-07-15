@@ -480,6 +480,16 @@ class CalculationRun(Base):
     # Hash of the declaration set frozen onto this run — detects an exclusion
     # statement being edited AFTER the run that filed it.
     scope3_declaration_fingerprint = Column(String, nullable=True)
+    # --- Scope 3 Category 15 = PCAF financed emissions, frozen onto the run ---
+    # KG. NULL = financed emissions were NOT evaluated for this run; 0.0 = evaluated
+    # and genuinely zero. NEVER added to total_co2e (which is activity-derived and is
+    # the invariant an assurer walks); the DISCLOSED total in the renderers adds it.
+    financed_co2e = Column(Float, nullable=True)
+    financed_as_of = Column(String, nullable=True)
+    financed_include_scope3 = Column(Boolean, nullable=True)
+    # Hash of the position set frozen onto this run — detects the live loan/investment
+    # ledger being edited after the run that filed it.
+    financed_fingerprint = Column(String, nullable=True)
 
 
 class Scope3CategoryDeclaration(Base):
@@ -558,6 +568,30 @@ class RunScope3Declaration(Base):
     screened_at = Column(String, nullable=True)
     ghgp_standard_version = Column(String, nullable=False)
     frozen_at = Column(String, nullable=False)
+
+
+class RunFinancedLine(Base):
+    """PCAF financed emissions frozen against an immutable run = GHGP Scope 3 Cat 15.
+
+    NOT an EmissionLineItem: that table requires a non-null activity_id and is keyed
+    (run_id, activity_id, method); financed positions are not activities, and
+    synthesising one per position would pollute total_activities / mapped /
+    coverage_pct / the fingerprint / the resolver / the pedigree DQ score. This is a
+    parallel frozen line so a filed run reproduces its Cat 15 even after the live
+    loan/investment ledger changes.
+    """
+    __tablename__ = "run_financed_lines"
+    __table_args__ = (
+        UniqueConstraint("run_id", "position_id", name="uq_run_financed_line"),
+        CheckConstraint("ghgp_category = 15", name="ck_rfl_cat15"),
+        CheckConstraint("co2e >= 0", name="ck_rfl_co2e_nonneg"),
+    )
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
+    position_id = Column(Integer, ForeignKey("financed_positions.id"), nullable=False)
+    ghgp_category = Column(Integer, nullable=False, default=15)
+    co2e = Column(Float, nullable=False)      # KG (PCAF tCO2e x 1000)
+    details = Column(Text, nullable=False)    # frozen position_financed() lineage
 
 
 class EmissionLineItem(Base):

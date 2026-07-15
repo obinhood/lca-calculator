@@ -245,8 +245,37 @@ class _InstrumentPool:
                 "instruments_skipped_gwp_vintage": self.skipped_vintage}
 
 
+def _financed_fingerprint(positions) -> str:
+    parts = sorted(
+        f"{p.id}:{p.outstanding_amount}:{p.attribution_denominator}:"
+        f"{p.investee_scope1_tco2e}:{p.investee_scope2_tco2e}:{p.investee_scope3_tco2e}:"
+        f"{p.as_of_date}" for p in positions)
+    return "fp-v1:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def financed_included_positions(positions, financed_as_of: Optional[str]):
+    """The positions that actually feed a run's Cat 15 figure — those at/before the
+    as_of cutoff (matching pcaf.portfolio_financed's `<= as_of`). This is the set the
+    staleness fingerprint must cover: a position dated AFTER the cutoff is not in the
+    filed figure, so adding/editing it must NOT mark the run stale."""
+    if not financed_as_of:
+        return list(positions)
+    cutoff = _parse_iso_date(financed_as_of)
+    if cutoff is None:
+        return list(positions)
+    out = []
+    for p in positions:
+        d = _parse_iso_date(p.as_of_date)
+        if d is not None and d <= cutoff:
+            out.append(p)
+    return out
+
+
 def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
-                 reporting_period_id: Optional[int] = None) -> CalculationRun:
+                 reporting_period_id: Optional[int] = None,
+                 include_financed: Optional[bool] = None,
+                 financed_as_of: Optional[str] = None,
+                 financed_include_scope3: bool = True) -> CalculationRun:
     """Create a NEW immutable calculation run for one organisation and return it.
 
     Prior runs are never mutated or deleted (Gap 5), and the calculation is scoped
@@ -528,6 +557,49 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         run.ghgp_map_version = CATEGORY_MAP_VERSION
         # Detects the screen being EDITED after the run that filed it.
         run.scope3_declaration_fingerprint = declarations_fingerprint(live_decls)
+
+        # --- Scope 3 Category 15 = PCAF financed emissions, frozen onto the run ---
+        # Cat 15 IS gross Scope 3, so it must be an attribute of the immutable run
+        # (the assurance unit), not of a render-time request. total_co2e and the
+        # pedigree data-quality score are NEVER touched — positions are a live
+        # ledger on a different (PCAF) data-quality scale; the DISCLOSED total in the
+        # renderers is what adds financed emissions.
+        from .pcaf import portfolio_financed
+        from ..models import FinancedPosition, RunFinancedLine
+        all_positions = db.query(FinancedPosition).filter(
+            FinancedPosition.organisation_id == organisation_id).all()
+        if include_financed is None:
+            include_financed = len(all_positions) > 0
+        if include_financed:
+            period_end = period.end_date if period is not None else None
+            as_of = financed_as_of or period_end
+            pf = portfolio_financed(db, organisation_id,
+                                    include_scope3=financed_include_scope3, as_of=as_of)
+            if pf.get("as_of_filtered_empty"):
+                # The as_of cutoff excluded EVERY position although the org holds some.
+                # Do NOT freeze a false zero: leave financed_co2e None (not evaluated)
+                # so the gate blocks the filing, and record the as_of so the message is
+                # accurate ("as_of excluded every position") rather than "never tried".
+                run.financed_co2e = None
+                run.financed_as_of = as_of
+                run.financed_include_scope3 = financed_include_scope3
+                run.financed_fingerprint = None
+            else:
+                for ln in pf["lines"]:
+                    db.add(RunFinancedLine(
+                        run_id=run.id, position_id=ln["position_id"], ghgp_category=15,
+                        co2e=ln["financed_total_tco2e"] * 1000.0,   # tCO2e -> kg (explicit)
+                        details=json.dumps({**ln, "unit_note": "kg (PCAF tCO2e x1000)",
+                                            "pcaf_standard": "PCAF Part A Financed Emissions (Dec 2022)"})))
+                run.financed_co2e = pf["financed_emissions_tco2e"]["total"] * 1000.0
+                run.financed_as_of = as_of
+                run.financed_include_scope3 = financed_include_scope3
+                # Fingerprint only the positions that FED the figure (the as_of-included
+                # set), so a position dated AFTER the cutoff — not in this figure — can be
+                # added/edited without false-flagging a correctly-filed run as stale.
+                included = [p for p in all_positions
+                            if p.id in {ln["position_id"] for ln in pf["lines"]}]
+                run.financed_fingerprint = _financed_fingerprint(included)
 
         run.status = "complete"
         db.commit()

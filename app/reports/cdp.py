@@ -44,6 +44,7 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
         blockers.append("intensity_denominator required (finite, > 0) for C6.10")
     # CDP C6.5 IS the 15-category Scope 3 grid — screen all 15.
     blockers.extend(scope3_completeness(db, run).get("blockers", []))
+    _financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
 
     by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}
     ef_sources = run_factor_sources(db, run)
@@ -62,11 +63,13 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
             "C6.1_scope1_gross_tco2e": round(by_scope.get("1", 0.0) / 1000.0, 6),
             "C6.3_scope2_location_tco2e": round(s["scope2"]["location_based"] / 1000.0, 6),
             "C6.3_scope2_market_tco2e": round(s["scope2"]["market_based"] / 1000.0, 6),
-            "C6.5_scope3_tco2e": round(by_scope.get("3", 0.0) / 1000.0, 6),
+            "C6.5_scope3_tco2e": round(by_scope.get("3", 0.0) / 1000.0 + _financed_tco2e, 6),
+            "C6.5_scope3_excl_financed_tco2e": round(by_scope.get("3", 0.0) / 1000.0, 6),
             "C6.5_scope3_by_ghgp_category_tco2e": category_tco2e(s.get("scope3_ghgp") or {}),
+            "C6.5_cat15_financed_tco2e": round(_financed_tco2e, 6) if run.financed_co2e is not None else None,
             "C6.7_biogenic_co2_tco2": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
             "C6.10_intensity": ({
-                "tco2e_per_unit": round(run.total_co2e / 1000.0 / intensity_denominator, 6),
+                "tco2e_per_unit": round((run.total_co2e / 1000.0 + _financed_tco2e) / intensity_denominator, 6),
                 "denominator": intensity_denominator,
                 "denominator_unit": intensity_denominator_unit or "unit",
             } if denom_ok else None),

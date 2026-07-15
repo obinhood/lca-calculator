@@ -106,6 +106,11 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         "gri_305_3_scope3": {
             "gross_tco2e": round(scope3_kg / 1000.0, 6),
             "by_ghgp_category_tco2e": category_tco2e(s.get("scope3_ghgp") or {}),
+            # GRI 305-3 here reports activity-derived Scope 3; financed emissions
+            # (Cat 15) are surfaced but not folded in — flagged so the omission is visible.
+            "financed_emissions_excluded": run.financed_co2e is not None,
+            "financed_emissions_tco2e": (round(run.financed_co2e / 1000.0, 6)
+                                         if run.financed_co2e is not None else None),
         },
         "gri_305_4_intensity": ({
             "tco2e_per_unit": round(run.total_co2e / 1000.0 / intensity_denominator, 6),

@@ -106,6 +106,17 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     s3gate = scope3_completeness(db, run)
     blockers.extend(s3gate.get("blockers", []))
 
+    # Cat 15 financed emissions (frozen) roll into the disclosed Scope 3 / totals.
+    _financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
+    _cat15 = (((s.get("scope3_ghgp") or {}).get("categories") or {}).get("15") or {})
+    _cat15_financed = _cat15.get("financed_emissions")
+    if _cat15_financed is not None:
+        # ¶B58-B63 also requires the % of gross exposure covered. Gross-exposure
+        # capture is a follow-up; flag its absence honestly rather than omit silently.
+        _cat15_financed = {**_cat15_financed,
+                           "gross_exposure_disclosure": "REQUIRED by IFRS S2 ¶B58-B63 — "
+                           "supply gross exposure to report % covered (not yet captured)"}
+
     ef_sources = run_factor_sources(db, run)
     dq = s.get("data_quality") or {}
     s3inv = s.get("scope3_ghgp") or {}
@@ -143,11 +154,15 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
                 "kwh_contractual": s["scope2"]["kwh_contractual"],
                 "kwh_grid_fallback": s["scope2"]["kwh_grid_fallback"],
             },
-            "scope3_gross": round(by_scope.get("3", 0.0) / 1000.0, 6),
+            "scope3_gross_excl_financed": round(by_scope.get("3", 0.0) / 1000.0, 6),
+            "scope3_gross": round(by_scope.get("3", 0.0) / 1000.0 + _financed_tco2e, 6),
             "scope3_by_ghgp_category_tco2e": scope3_cats,
             "scope3_categories_included": scope3_categories_included,
-            "total_location_based": round(run.total_co2e / 1000.0, 6),
-            "total_market_based": round(run.total_co2e_market / 1000.0, 6),
+            # IFRS S2 ¶29(a)(vi) + ¶B58-B63 + Dec-2025 ¶29A: financed emissions are a
+            # MANDATORY Cat 15 subtotal for financial institutions.
+            "scope3_cat15_financed": _cat15_financed,
+            "total_location_based": round(run.total_co2e / 1000.0 + _financed_tco2e, 6),
+            "total_market_based": round(run.total_co2e_market / 1000.0 + _financed_tco2e, 6),
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
             "gwp_source": f"IPCC {run.gwp_set} GWP-100",
         },
