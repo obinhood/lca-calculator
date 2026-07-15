@@ -43,6 +43,15 @@ class ActivityRecord(Base):
     mapping_status = Column(String, default="unmapped")  # unmapped | auto | needs_review | approved | overridden
     mapping_basis = Column(String, nullable=True)  # exact | category_geo | category_only | fuzzy_subcategory
     provenance = Column(String)  # process/eeio/hybrid
+    # GHG Protocol Scope 3 category (1-15). EXPLICIT USER INPUT ONLY — compute_co2e
+    # must never write a derived value back here: that would destroy the
+    # explicit-vs-derived distinction which is what makes a map-version change
+    # detectable. Meaningful only when the line's frozen scope is "3".
+    # Deliberately NO DB CheckConstraint: adding one to this FK-target table would
+    # need batch_alter_table under PRAGMA foreign_keys=ON, and a constraint declared
+    # on the model but not in the migration would exist in tests (create_all) and
+    # NOT in production (alembic). The 1..15 range is enforced in code instead.
+    ghgp_category = Column(Integer, nullable=True)
 
     factor = relationship("EmissionFactor", back_populates="activities",
                           foreign_keys=[factor_id])
@@ -463,6 +472,93 @@ class CalculationRun(Base):
     # Lets a reader detect that a run is stale even when the activity COUNT is unchanged
     # (e.g. an activity was re-mapped to a different factor).
     activities_fingerprint = Column(String)
+    # --- GHGP Scope 3 15-category dimension (frozen onto the run) ---
+    # NULL ghgp_standard_version is the LEGACY-RUN sentinel: such a run has no
+    # completeness statement and must never be rendered as a clean 15x0.0 table.
+    ghgp_standard_version = Column(String, nullable=True)
+    ghgp_map_version = Column(String, nullable=True)
+    # Hash of the declaration set frozen onto this run — detects an exclusion
+    # statement being edited AFTER the run that filed it.
+    scope3_declaration_fingerprint = Column(String, nullable=True)
+
+
+class Scope3CategoryDeclaration(Base):
+    """The LIVE, editable Scope 3 screen: one row per (org, period, category).
+
+    This is the org's assertion about a category. It is copied verbatim onto every
+    run (RunScope3Declaration) so a filed statement can never be edited after the
+    fact. reporting_period_id is NOT NULL: a completeness assertion is inherently
+    period-bound, so an org-wide run can never be disclosure_ready.
+    """
+    __tablename__ = "scope3_category_declarations"
+    __table_args__ = (
+        UniqueConstraint("organisation_id", "reporting_period_id", "category",
+                         name="uq_s3decl_org_period_cat"),
+        CheckConstraint("category >= 1 AND category <= 15", name="ck_s3decl_cat"),
+        CheckConstraint(
+            "status IN ('included','not_applicable','not_material','not_measured')",
+            name="ck_s3decl_status"),
+        CheckConstraint("screening_estimate_tco2e IS NULL OR screening_estimate_tco2e >= 0",
+                        name="ck_s3decl_est_nonneg"),
+        CheckConstraint("materiality_threshold_pct IS NULL OR "
+                        "(materiality_threshold_pct >= 0 AND materiality_threshold_pct <= 100)",
+                        name="ck_s3decl_thresh"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    reporting_period_id = Column(Integer, ForeignKey("reporting_periods.id"), nullable=False)
+    category = Column(Integer, nullable=False)          # 1..15
+    status = Column(String, nullable=False)             # the 4 storable states
+    justification = Column(Text, nullable=True)         # required to exclude
+    screening_estimate_tco2e = Column(Float, nullable=True)   # required: not_material
+    screening_method = Column(Text, nullable=True)
+    materiality_threshold_pct = Column(Float, nullable=True)  # required: not_material
+    criteria = Column(Text, nullable=True)              # JSON: all seven relevance criteria
+    minimum_boundary_met = Column(Boolean, nullable=True)     # org assertion; cross-checked
+    method_description = Column(Text, nullable=True)    # required: included
+    calculation_tools = Column(Text, nullable=True)
+    primary_data_pct = Column(Float, nullable=True)
+    screened_at = Column(String, nullable=False)        # ISO date — drives the 3-year clock
+    declared_by = Column(String, nullable=True)
+    standard_version = Column(String, nullable=False, default="ghgp-scope3-2011")
+    created_at = Column(String, nullable=True)
+    updated_at = Column(String, nullable=True)
+
+
+class RunScope3Declaration(Base):
+    """The IMMUTABLE per-run copy of the Scope 3 screen — the completeness artifact.
+
+    compute_co2e writes EXACTLY 15 rows on every run; a category the org never
+    screened is frozen as status='undeclared'. The run's statement is therefore
+    complete BY CONSTRUCTION: an assurer opening a run sees fifteen statements,
+    not an absence they have to notice.
+    """
+    __tablename__ = "run_scope3_declarations"
+    __table_args__ = (
+        UniqueConstraint("run_id", "category", name="uq_run_s3decl"),
+        CheckConstraint("category >= 1 AND category <= 15", name="ck_run_s3decl_cat"),
+        CheckConstraint(
+            "status IN ('included','not_applicable','not_material','not_measured','undeclared')",
+            name="ck_run_s3decl_status"),
+    )
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
+    category = Column(Integer, nullable=False)
+    status = Column(String, nullable=False)            # + the 5th state: 'undeclared'
+    declaration_id = Column(Integer, nullable=True)    # provenance only; never read back
+    justification = Column(Text, nullable=True)
+    screening_estimate_tco2e = Column(Float, nullable=True)
+    screening_method = Column(Text, nullable=True)
+    materiality_threshold_pct = Column(Float, nullable=True)
+    criteria = Column(Text, nullable=True)
+    minimum_boundary_met = Column(Boolean, nullable=True)
+    method_description = Column(Text, nullable=True)
+    calculation_tools = Column(Text, nullable=True)
+    primary_data_pct = Column(Float, nullable=True)
+    screened_at = Column(String, nullable=True)
+    ghgp_standard_version = Column(String, nullable=False)
+    frozen_at = Column(String, nullable=False)
+
 
 class EmissionLineItem(Base):
     """One computed emission line, tied to an immutable run (replaces Result).

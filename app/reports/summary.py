@@ -128,6 +128,8 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
                                            / total_methods, 2) if total_methods else 0.0,
         },
         "data_quality": _data_quality(db, run, li),
+        # GHG Protocol Scope 3 by the 15 categories, from frozen lineage.
+        "scope3_ghgp": _scope3_ghgp(db, run),
         # A partial run cannot honestly answer the question asked of it — flag it
         # at the TOP level, not only inside the nested coverage block.
         "partial": (run.mapped or 0) < (run.total_activities or 0),
@@ -143,6 +145,40 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         "notes": "Quantities are unit-converted to factor units; incompatible units are "
                  "rejected (not guessed). Scope 2 is dual-reported (location + market).",
     }
+
+
+def _inventory_coverage(db: Session, run: CalculationRun) -> dict:
+    """Coverage of the VALUE CHAIN (the 15 GHGP Scope 3 categories) — orthogonal to
+    coverage_pct, which is coverage of the activity rows the user uploaded."""
+    from ..services.ghgp import scope3_completeness
+    g = scope3_completeness(db, run)
+    if not g.get("assessable"):
+        return {"basis": "ghgp_scope3_15_categories", "assessable": False,
+                "note": "Legacy run — recompute to assess value-chain completeness."}
+    st = g["by_status"]
+    return {
+        "basis": "ghgp_scope3_15_categories",
+        "standard_version": run.ghgp_standard_version,
+        "assessable": True,
+        "categories_total": 15,
+        "categories_included": st["included"],
+        "categories_not_applicable": st["not_applicable"],
+        "categories_not_material": st["not_material"],
+        "categories_not_measured": st["not_measured"],
+        "categories_undeclared": st["undeclared"],
+        "categories_accounted_for": g["categories_accounted_for"],
+        "inventory_coverage_pct": g["inventory_coverage_pct"],
+        "unassigned_scope3_sources": g["unassigned_sources"],
+        "note": "Coverage of the 15 GHG Protocol Scope 3 categories. Orthogonal to "
+                "coverage_pct: a firm uploading only electricity/gas/flights has 100% "
+                "mapping coverage and ~7% inventory coverage.",
+    }
+
+
+def _scope3_ghgp(db: Session, run: CalculationRun) -> dict:
+    # Imported lazily: scope3.py reads _resolve_run from this module.
+    from .scope3 import scope3_by_ghgp_category
+    return scope3_by_ghgp_category(db, run)
 
 
 def _data_quality(db: Session, run: CalculationRun, li):
@@ -308,8 +344,14 @@ def coverage(db: Session, run: CalculationRun):
         "stale": stale,
         "coverage_pct": round(100.0 * n_calc / n_total, 2) if n_total else 0.0,
         "coverage_basis": "activity_count",
+        # Naming the LIMIT of this number is the point: it is coverage of the rows the
+        # user uploaded, NOT coverage of the value chain. A firm uploading only
+        # electricity/gas/flights has 100% mapping coverage and ~7% inventory coverage.
+        "coverage_scope": "uploaded_activities_only — NOT value-chain completeness; "
+                          "see inventory_coverage",
         "coverage_caveat": "Count-based, NOT emissions-weighted; see largest_unmapped. "
                            "Emissions-weighted coverage is planned (analytics phase).",
+        "inventory_coverage": _inventory_coverage(db, run),
         "unmapped_by_category": {c or "?": n for c, n in unmapped_by_cat},
         "largest_unmapped": [
             {"category": c or "?", "quantity": q, "unit": u} for c, q, u in largest_unmapped

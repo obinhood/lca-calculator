@@ -26,8 +26,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import CalculationRun, EmissionLineItem
-from .summary import summary, run_factor_sources, scope3_by_category
+from .summary import summary, run_factor_sources
 from .secr import _energy_kwh
+from ..services.ghgp import scope3_completeness
 
 NOT_COVERED = [
     "E1-1 transition plan for climate change mitigation",
@@ -115,6 +116,12 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             or net_revenue_millions <= 0):
         blockers.append("net_revenue_millions required: E1-6 mandates GHG intensity "
                         "per net revenue")
+    # ESRS AR 46(i): Scope 3 must be screened across all 15 GHG Protocol categories,
+    # each quantified or excluded with a justification. An UNDECLARED or NOT-MEASURED
+    # category, or a Scope 3 line with no category, blocks the disclosure — this is
+    # what stops "3 of 15 categories" reading as a complete inventory.
+    s3gate = scope3_completeness(db, run)
+    blockers.extend(s3gate.get("blockers", []))
 
     # E1-5: ESRS reports energy in MWh, bounded to own operations (Scope 1/2
     # line items) — unlike SECR's deliberately scope-agnostic UK energy figure.
@@ -132,13 +139,16 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
                  "captured. " + " ".join(energy_kwh["notes"])),
     }
 
-    # E1-6 scope 3 by (platform) category — filtered by the line items' FROZEN
-    # scope, never category-name heuristics (a preset scope or a new Scope-1
-    # category must not leak into the Scope 3 breakdown). GHG Protocol
-    # 15-category mapping is a labelled limitation until activities carry a
-    # ghgp_category.
-    scope3_by_cat = {c: round(v / 1000.0, 6)
-                     for c, v in scope3_by_category(db, run).items()}
+    # E1-6 Scope 3 by the 15 GHG Protocol categories (ESRS ¶51 / AR 46), from the
+    # run's frozen lineage. The value-chain completeness statement (AR 46(i)) lives
+    # in scope3_screening below.
+    s3inv = s.get("scope3_ghgp") or {}
+    scope3_ghgp_categories = {
+        k: {"name": v["name"], "tco2e": v["tco2e"], "declared_status": v["declared_status"],
+            "primary_data_pct": v["primary_data_pct"],
+            "method_description": v["method_description"]}
+        for k, v in (s3inv.get("categories") or {}).items()
+    } if s3inv.get("assessable") else None
 
     intensity = None
     if net_revenue_millions and math.isfinite(net_revenue_millions) and net_revenue_millions > 0:
@@ -180,14 +190,26 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             "scope2_location_based": round(scope2_loc_kg / 1000.0, 6),
             "scope2_market_based": round(scope2_mkt_kg / 1000.0, 6),
             "scope3": round(scope3_kg / 1000.0, 6),
-            "scope3_by_category": scope3_by_cat,
-            "scope3_category_note": "Categories are platform activity categories; "
-                                    "GHG Protocol 15-category mapping pending.",
+            "scope3_ghgp_categories": scope3_ghgp_categories,
             "total_location_based": round(run.total_co2e / 1000.0, 6),
             "total_market_based": round(run.total_co2e_market / 1000.0, 6),
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
             "ghg_intensity": intensity,
         },
+        # AR 46(i): the value-chain completeness statement — which categories are
+        # included vs excluded, and why. The 15-row detail is at /reports/scope3_inventory.
+        "e1_6_scope3_screening": ({
+            "standard": s3inv.get("standard_version"),
+            "included": s3inv["completeness"]["by_status"]["included"],
+            "not_applicable": s3inv["completeness"]["by_status"]["not_applicable"],
+            "not_material": s3inv["completeness"]["by_status"]["not_material"],
+            "not_measured": s3inv["completeness"]["by_status"]["not_measured"],
+            "undeclared": s3inv["completeness"]["by_status"]["undeclared"],
+            "inventory_coverage_pct": s3inv["completeness"]["inventory_coverage_pct"],
+            "warnings": s3inv["completeness"]["warnings"],
+        } if s3inv.get("assessable") else {
+            "assessable": False,
+            "note": "run predates the 15-category dimension — recompute"}),
         "e1_5_energy_consumption": energy,
         "e1_7_removals_and_credits": _e1_7(db, run, as_of=credits_as_of),
         "not_covered": NOT_COVERED,

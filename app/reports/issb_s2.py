@@ -21,7 +21,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import CalculationRun
-from .summary import summary, run_factor_sources, scope3_by_category
+from .summary import summary, run_factor_sources
+from .scope3 import category_tco2e
+from ..services.ghgp import scope3_completeness
 
 JURISDICTION_PROFILES = {
     "ISSB": {
@@ -100,10 +102,16 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
                         f"used {run.gwp_set} — recompute or document the jurisdictional "
                         f"requirement permitting it")
 
+    # IFRS S2 ¶29(a)(vi): disclose the Scope 3 categories included. Screen all 15.
+    s3gate = scope3_completeness(db, run)
+    blockers.extend(s3gate.get("blockers", []))
+
     ef_sources = run_factor_sources(db, run)
     dq = s.get("data_quality") or {}
-    scope3_cats = {c: round(v / 1000.0, 6)
-                   for c, v in scope3_by_category(db, run).items()}
+    s3inv = s.get("scope3_ghgp") or {}
+    scope3_cats = category_tco2e(s3inv)
+    scope3_categories_included = (
+        s3inv["completeness"]["by_status"]["included"] if s3inv.get("assessable") else None)
 
     methodology = (
         f"GHG emissions measured in accordance with the GHG Protocol Corporate "
@@ -136,9 +144,8 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
                 "kwh_grid_fallback": s["scope2"]["kwh_grid_fallback"],
             },
             "scope3_gross": round(by_scope.get("3", 0.0) / 1000.0, 6),
-            "scope3_by_category": scope3_cats,
-            "scope3_category_note": "Categories are platform activity categories; "
-                                    "GHG Protocol 15-category mapping pending.",
+            "scope3_by_ghgp_category_tco2e": scope3_cats,
+            "scope3_categories_included": scope3_categories_included,
             "total_location_based": round(run.total_co2e / 1000.0, 6),
             "total_market_based": round(run.total_co2e_market / 1000.0, 6),
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),

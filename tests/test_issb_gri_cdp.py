@@ -31,13 +31,18 @@ def _activity(db, org_id, factor_id, category, quantity, unit):
 
 @pytest.fixture
 def seeded(db):
-    """electricity 1200 kWh (S2), gas 800 kWh (S1), waste 250 kg (S3)."""
+    """electricity 1200 kWh (S2), gas 800 kWh (S1), waste 250 kg (S3, Cat 5).
+
+    Period-scoped, fully-screened, disclosure-ready run."""
+    from tests.scope3_util import ready_run
     org = _org(db)
     _activity(db, org.id, _factor(db, "electricity", "kWh", 0.170).id,
               "electricity", 1200, "kWh")
     _activity(db, org.id, _factor(db, "gas", "kWh", 0.184).id, "gas", 800, "kWh")
-    _activity(db, org.id, _factor(db, "waste", "kg", 0.480).id, "waste", 250, "kg")
-    run = compute_co2e(db, org.id)
+    waste = _activity(db, org.id, _factor(db, "waste", "kg", 0.480).id, "waste", 250, "kg")
+    waste.ghgp_category = 5
+    db.commit()
+    run, _period = ready_run(db, org.id)
     return org, run
 
 
@@ -87,7 +92,7 @@ def test_gri_golden_values(db, seeded):
                    intensity_denominator_unit="FTE (hundreds)")
     assert r["gri_305_1_scope1"]["gross_tco2e"] == pytest.approx(0.1472)
     assert r["gri_305_2_scope2"]["location_based_tco2e"] == pytest.approx(0.204)
-    assert r["gri_305_3_scope3"]["by_category_tco2e"]["waste"] == pytest.approx(0.120)
+    assert r["gri_305_3_scope3"]["by_ghgp_category_tco2e"]["5"] == pytest.approx(0.120)
     # 302-1: scope 1/2 energy only (gas + electricity), waste has none
     assert r["gri_302_1_energy"]["total_mwh"] == pytest.approx(2.0)
     assert r["gri_305_4_intensity"]["tco2e_per_unit"] == pytest.approx(0.4712 / 2.0)
