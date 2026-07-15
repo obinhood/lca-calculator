@@ -33,7 +33,7 @@ paths emitted a materially wrong number while stamping the report
 | 1 | A "Global" grid factor auto-binds to any country for Scope 2 (~25× overstatement) | ✅ Fixed (PR #4) |
 | 2 | An unvalidated `factor.value` (NULL/inf) crashes or poisons the whole run | ✅ Fixed (PR #4) |
 | 3 | Unknown activity categories silently classified Scope 3 (steam/refrigerant mis-scoped) | ✅ Fixed (PR #4) |
-| 4 | Market-based Scope 2 not grid-matched; residual-mix → location-average | ⬜ Open |
+| 4 | Market-based Scope 2 not grid-matched; residual-mix → location-average | ✅ Fixed (PR #10) — grid matching + determinism |
 | 5 | Consolidation boundary declared but never applied (a 40%-owned JV counted at 100%) | ⬜ Open |
 | 6 | Scope 3 completeness invisible — 3-of-15 categories reads as "100% complete" | ✅ Fixed (PR #7) |
 | 7 | Mandatory energy totals silently drop carriers; ESOS had no gate | ✅ Fixed (PR #6) |
@@ -77,6 +77,13 @@ paths emitted a materially wrong number while stamping the report
   the freeze block (a filtered-empty `as_of` froze `financed_co2e = 0`), a
   staleness-fingerprint false-positive, and a `scope3_gross` double-count — all
   fixed with regression tests.
+
+- **PR #10** — _Market-based Scope 2 grid matching + determinism._ A contractual
+  instrument now only covers consumption on its declared `market` (a US REC can no
+  longer zero German load); a NULL market still applies but flags
+  `kwh_market_unverified` (backward compatible); the activity set is id-ordered so
+  the market total is deterministic. A pre-merge adversarial review confirmed the
+  change is sound (one low-severity disclosure-consistency nit, fixed).
 
 ## Strengths worth preserving
 

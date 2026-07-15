@@ -172,6 +172,10 @@ class MarketInstrument(Base):
     instrument_type = Column(String, nullable=False)  # supplier_specific | ppa | rec | residual_mix
     kg_co2e_per_kwh = Column(Float, nullable=False)
     coverage_kwh = Column(Float, nullable=True)  # kWh covered; NULL = unbounded
+    # The grid/market the instrument belongs to (e.g. "GB", "DE"), matched against
+    # the consumption's geo (Scope 2 Guidance quality criteria). NULL = unspecified:
+    # the instrument still applies but the allocation is flagged market_unverified.
+    market = Column(String, nullable=True)
     gwp_set = Column(String, nullable=True, default="AR6")
     start_date = Column(String, nullable=True)  # ISO; window the instrument covers
     end_date = Column(String, nullable=True)
