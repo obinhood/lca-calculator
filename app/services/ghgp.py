@@ -367,6 +367,46 @@ def scope3_completeness(db: Session, run) -> dict:
                             "run's exclusion statement no longer matches the live declarations; "
                             "recompute so the filed statement is the one you screened")
 
+    # --- Category 15: PCAF financed emissions (frozen onto the run) ---
+    from ..models import FinancedPosition, RunFinancedLine
+    from ..services.calc import _financed_fingerprint, financed_included_positions
+    n_financed_lines = db.query(RunFinancedLine).filter(
+        RunFinancedLine.run_id == run.id).count()
+    # B13 — the run holds BOTH activity-derived Cat-15 lines and PCAF financed lines.
+    # The platform refuses to sum them (an equity-stake activity and a loan book are
+    # different accounting; investee-vs-own double counting is out of reach).
+    if n_financed_lines and len(lines_by_cat.get(15, [])):
+        blockers.append("Cat 15 has BOTH activity-derived lines and PCAF financed lines — "
+                        "the platform will not sum them; move investments to FinancedPosition "
+                        "or remove the activity-derived Cat 15 lines")
+    positions = db.query(FinancedPosition).filter(
+        FinancedPosition.organisation_id == run.organisation_id).all()
+    if positions:
+        # B9 (Cat 15) — can't be "not applicable" when the org holds financed positions.
+        if decls.get(15) is not None and decls[15].status == "not_applicable":
+            blockers.append("category 15 (investments) declared NOT APPLICABLE while the org "
+                            "holds financed positions — financed emissions necessarily occur")
+        # B14a — positions exist but financed emissions are not in the run's figure.
+        if run.financed_co2e is None:
+            if run.financed_as_of:
+                # The freeze left it None because the as_of cutoff excluded EVERY
+                # position (the silent-empty-portfolio case, surfaced here).
+                blockers.append(f"the financed as_of {run.financed_as_of} excluded every financed "
+                                f"position although the org holds {len(positions)} — recompute with "
+                                "a valid as_of (check the positions' as_of dates)")
+            else:
+                blockers.append(f"{len(positions)} financed position(s) exist but this run did not "
+                                "evaluate financed emissions (Scope 3 Cat 15) — recompute with "
+                                "financed emissions included")
+        else:
+            # B14b — the positions that FED this run's Cat 15 figure changed since it
+            # was filed. Fingerprint the as_of-included set, so a position dated AFTER
+            # the cutoff (not in the figure) does not false-flag a correct run.
+            included = financed_included_positions(positions, run.financed_as_of)
+            if run.financed_fingerprint and _financed_fingerprint(included) != run.financed_fingerprint:
+                blockers.append("the financed positions feeding this run's Cat 15 changed since it "
+                                "was filed — the frozen figure no longer matches; recompute")
+
     accounted = sum(1 for c in CATEGORIES
                     if decls.get(c) is not None and decls[c].status in PASSING_STATUSES)
     return {

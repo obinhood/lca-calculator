@@ -105,8 +105,13 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
                     "verify none are purchased energy (Scope 2) or direct/fugitive "
                     "(Scope 1) before relying on the scope split.",
         } if scope_assumed else None),
-        "total_co2e": run.total_co2e,                     # location-based (headline)
+        "total_co2e": run.total_co2e,                     # location-based (headline, activity-derived)
         "total_co2e_market": run.total_co2e_market,       # dual reporting counterpart
+        # DISCLOSED total incl. Scope 3 Cat 15 financed emissions (PCAF), when
+        # evaluated. total_co2e itself is never changed (positions are a live ledger).
+        "financed_co2e": run.financed_co2e,
+        "total_co2e_incl_financed_kg": ((run.total_co2e or 0.0) + run.financed_co2e
+                                        if run.financed_co2e is not None else None),
         # ISO 14067: biogenic CO2 reported separately, never netted into the above.
         "biogenic_co2e_separate": run.total_biogenic_co2e or 0.0,
         "by_scope": [{"scope": s or "?", "co2e": v or 0.0} for s, v in by_scope],

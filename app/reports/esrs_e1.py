@@ -150,13 +150,24 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
         for k, v in (s3inv.get("categories") or {}).items()
     } if s3inv.get("assessable") else None
 
+    # ESRS ¶51-52: gross Scope 3 includes every significant category — for a
+    # financial institution, Cat 15 (financed emissions) always is. The DISCLOSED
+    # totals therefore add financed emissions; run.total_co2e (activity-derived) is
+    # never changed. Both figures are emitted and reconciled.
+    financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
+    scope3_disclosed = scope3_kg / 1000.0 + financed_tco2e
+    total_loc_disclosed = run.total_co2e / 1000.0 + financed_tco2e
+    total_mkt_disclosed = run.total_co2e_market / 1000.0 + financed_tco2e
+
     intensity = None
     if net_revenue_millions and math.isfinite(net_revenue_millions) and net_revenue_millions > 0:
+        # ¶52's total and E1-6 intensity must agree inside one payload -> intensity
+        # is off the DISCLOSED total (financed included).
         intensity = {
             "tco2e_total_location_per_million_revenue":
-                round(run.total_co2e / 1000.0 / net_revenue_millions, 6),
+                round(total_loc_disclosed / net_revenue_millions, 6),
             "tco2e_total_market_per_million_revenue":
-                round(run.total_co2e_market / 1000.0 / net_revenue_millions, 6),
+                round(total_mkt_disclosed / net_revenue_millions, 6),
             "net_revenue_millions": net_revenue_millions,
             "revenue_currency": revenue_currency,
         }
@@ -189,11 +200,21 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             "scope1": round(scope1_kg / 1000.0, 6),
             "scope2_location_based": round(scope2_loc_kg / 1000.0, 6),
             "scope2_market_based": round(scope2_mkt_kg / 1000.0, 6),
-            "scope3": round(scope3_kg / 1000.0, 6),
+            "scope3_excl_financed": round(scope3_kg / 1000.0, 6),
+            "scope3": round(scope3_disclosed, 6),          # gross, incl. Cat 15 financed
             "scope3_ghgp_categories": scope3_ghgp_categories,
-            "total_location_based": round(run.total_co2e / 1000.0, 6),
-            "total_market_based": round(run.total_co2e_market / 1000.0, 6),
+            "total_location_based_excl_financed": round(run.total_co2e / 1000.0, 6),
+            "total_location_based": round(total_loc_disclosed, 6),
+            "total_market_based": round(total_mkt_disclosed, 6),
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
+            "financed_emissions": ({
+                "included_in_total": True,
+                "tco2e": round(financed_tco2e, 6),
+                "as_of": run.financed_as_of,
+                "note": "PCAF Part A (Dec 2022), frozen to immutable run #%d. NOT part of "
+                        "run.total_co2e (which is activity-derived; positions are a live "
+                        "ledger). Re-pull the run to reproduce." % run.id,
+            } if run.financed_co2e is not None else {"included_in_total": False}),
             "ghg_intensity": intensity,
         },
         # AR 46(i): the value-chain completeness statement — which categories are

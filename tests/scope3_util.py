@@ -8,7 +8,9 @@ not_applicable — anti-gaming rule B9); everything else is `not_applicable`.
 """
 import json
 
-from app.models import Scope3CategoryDeclaration, EmissionLineItem, ReportingPeriod
+from app.models import (
+    Scope3CategoryDeclaration, EmissionLineItem, ReportingPeriod, RunFinancedLine,
+)
 from app.reports.scope3 import scope3_by_ghgp_category
 from app.services.ghgp import SEVEN_CRITERIA
 from app.services.calc import compute_co2e
@@ -25,6 +27,10 @@ def screen_complete(db, org_id, period_id, run):
     """Declare all 15 categories against `run`'s observed lines. Does NOT recompute."""
     inv = scope3_by_ghgp_category(db, run)
     has_lines = {int(k) for k, v in inv["categories"].items() if v["line_count"]}
+    # Cat 15 is 'included' when the run froze financed (PCAF) lines — those are
+    # RunFinancedLine rows, not EmissionLineItem lines, so they aren't in has_lines.
+    if db.query(RunFinancedLine).filter(RunFinancedLine.run_id == run.id).count():
+        has_lines.add(15)
     has_energy = db.query(EmissionLineItem).filter(
         EmissionLineItem.run_id == run.id, EmissionLineItem.method == "location",
         EmissionLineItem.scope.in_(("1", "2"))).first() is not None

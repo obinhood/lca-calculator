@@ -325,6 +325,9 @@ def create_market_instrument(instrument_type: str = Query(...),
 @app.post("/calculate/run")
 def run_calculation(gwp_set: str = Query("AR6"),
                     reporting_period_id: Optional[int] = None,
+                    include_financed: Optional[bool] = None,
+                    financed_as_of: Optional[str] = None,
+                    financed_include_scope3: bool = True,
                     org: Organisation = Depends(current_org),
                     db: Session = Depends(get_db)):
     # Normalise + validate the GWP set: an unknown value (e.g. "ar6" typo) would
@@ -334,8 +337,12 @@ def run_calculation(gwp_set: str = Query("AR6"),
     if gwp_set not in SUPPORTED_GWP_SETS:
         raise HTTPException(status_code=400,
                             detail=f"gwp_set must be one of {list(SUPPORTED_GWP_SETS)}")
+    if financed_as_of is not None and _parse_iso_date(financed_as_of) is None:
+        raise HTTPException(status_code=400, detail="financed_as_of must be an ISO date")
     try:
-        run = compute_co2e(db, org.id, gwp_set=gwp_set, reporting_period_id=reporting_period_id)
+        run = compute_co2e(db, org.id, gwp_set=gwp_set, reporting_period_id=reporting_period_id,
+                           include_financed=include_financed, financed_as_of=financed_as_of,
+                           financed_include_scope3=financed_include_scope3)
     except ReportingPeriodError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return JSONResponse(summary(db, organisation_id=org.id, run_id=run.id))

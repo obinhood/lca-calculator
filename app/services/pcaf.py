@@ -46,10 +46,16 @@ def position_financed(pos: FinancedPosition, include_scope3: bool) -> dict:
 
 def portfolio_financed(db: Session, organisation_id: int, include_scope3: bool = True,
                        as_of: Optional[str] = None) -> dict:
-    q = db.query(FinancedPosition).filter(
+    base = db.query(FinancedPosition).filter(
         FinancedPosition.organisation_id == organisation_id)
+    n_available = base.count()
+    q = base
     if as_of is not None:
-        q = q.filter(FinancedPosition.as_of_date == as_of)
+        # AT OR BEFORE the cutoff — not an exact-date match. Exact match (== as_of)
+        # silently returned an EMPTY portfolio whenever the cutoff didn't equal a
+        # position's stored date, making a bank's entire financed footprint vanish
+        # with no error. <= takes the positions established by the reporting date.
+        q = q.filter(FinancedPosition.as_of_date <= as_of)
     positions = q.order_by(FinancedPosition.id).all()
 
     lines = [position_financed(p, include_scope3) for p in positions]
@@ -75,6 +81,11 @@ def portfolio_financed(db: Session, organisation_id: int, include_scope3: bool =
     return {
         "framework": "PCAF financed emissions",
         "positions": len(positions),
+        "positions_available": n_available,
+        "as_of": as_of,
+        # True when an as_of cutoff excluded EVERY position although the org holds
+        # some — the caller must treat this as an error, not a zero footprint.
+        "as_of_filtered_empty": bool(as_of is not None and n_available > 0 and not positions),
         "include_scope3": include_scope3,
         "financed_emissions_tco2e": {k: round(v, 6) for k, v in total.items()},
         "by_asset_class_tco2e": {k: round(v, 6) for k, v in by_asset.items()},

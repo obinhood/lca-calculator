@@ -14,10 +14,38 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import EmissionLineItem, RunScope3Declaration
+from ..models import EmissionLineItem, RunScope3Declaration, RunFinancedLine
 from ..services.ghgp import (
     CATEGORIES, GHGP_TAXONOMIES, UNASSIGNED_SOURCES, scope3_completeness,
 )
+
+
+def _financed_block(db, run) -> dict:
+    """Cat 15 financed emissions from the run's FROZEN RunFinancedLine rows."""
+    rows = db.query(RunFinancedLine).filter(RunFinancedLine.run_id == run.id).all()
+    if not rows and run.financed_co2e is None:
+        return {}
+    kg = sum(r.co2e for r in rows)
+    by_asset, primary_kg = {}, 0.0
+    for r in rows:
+        d = json.loads(r.details or "{}")
+        ac = d.get("asset_class", "?")
+        by_asset[ac] = by_asset.get(ac, 0.0) + r.co2e
+        if (d.get("data_quality_score") or 5) <= 2:
+            primary_kg += r.co2e
+    return {
+        "tco2e": round(kg / 1000.0, 6),
+        "positions": len(rows),
+        "as_of": run.financed_as_of,
+        "include_investee_scope3": run.financed_include_scope3,
+        "by_asset_class_tco2e": {k: round(v / 1000.0, 6) for k, v in by_asset.items()},
+        # PCAF's own 1-5 scale — deliberately NOT the ecoinvent pedigree scale, and
+        # never blended into the run's data_quality_score.
+        "primary_data_pct": (round(100.0 * primary_kg / kg, 2) if kg else None),
+        "primary_data_basis": "pcaf_data_quality<=2",
+        "data_quality_scale": "PCAF 1 best .. 5 proxy (NOT the ecoinvent pedigree scale)",
+        "methodology": "PCAF Part A Financed Emissions (Dec 2022), frozen to the run",
+    }
 
 
 def _tax(run):
@@ -105,6 +133,13 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
             "boundary_failed_lines": b["boundary_failed_lines"],
         }
 
+    # Category 15 financed emissions (frozen), attached to the Cat 15 entry.
+    financed = _financed_block(db, run)
+    financed_kg = (run.financed_co2e or 0.0)
+    if financed:
+        out["15"]["financed_emissions"] = financed
+        out["15"]["activity_derived_tco2e"] = out["15"]["tco2e"]
+
     unassigned["tco2e"] = round(unassigned["co2e_kg"] / 1000.0, 6)
     unassigned["co2e_kg"] = round(unassigned["co2e_kg"], 6)
     unassigned["note"] = (
@@ -114,6 +149,12 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
 
     gate = scope3_completeness(db, run)
     assigned_kg = sum(cats[c]["co2e_kg"] for c in CATEGORIES)
+    # If a run holds BOTH activity-derived Cat-15 lines and PCAF financed lines, the
+    # gate (B13) blocks it and the two must NOT be summed — so the gross is not a
+    # meaningful number. Report it as None rather than a double-counted total.
+    cat15_double_count = financed_kg > 0 and cats[15]["co2e_kg"] > 0
+    scope3_gross_kg = (None if cat15_double_count
+                       else round(assigned_kg + unassigned["co2e_kg"] + financed_kg, 6))
     return {
         "assessable": True,
         "standard_version": run.ghgp_standard_version,
@@ -123,7 +164,13 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
         "totals": {
             "scope3_assigned_kg": round(assigned_kg, 6),
             "scope3_unassigned_kg": unassigned["co2e_kg"],
-            "scope3_gross_kg": round(assigned_kg + unassigned["co2e_kg"], 6),
+            "scope3_financed_kg": round(financed_kg, 6),
+            # Gross Scope 3 INCLUDES financed emissions (Cat 15). The activity-derived
+            # part (assigned + unassigned) is by_scope["3"]; financed is added here.
+            # None when Cat 15 is double-declared (activity + financed): summing is
+            # refused, so no gross is reported (the run is blocked, B13).
+            "scope3_gross_kg": scope3_gross_kg,
+            "cat15_double_count_blocked": cat15_double_count,
         },
         "completeness": {
             "by_status": gate.get("by_status"),

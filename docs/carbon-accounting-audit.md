@@ -45,7 +45,7 @@ paths emitted a materially wrong number while stamping the report
 | Gap | Status |
 |---|---|
 | A. Scope 3 never structured into the 15 GHG-Protocol categories | ✅ Fixed (PR #7) |
-| B. Financed emissions (PCAF = Cat 15) never roll into the entity total | 🚧 In progress (PR #8) |
+| B. Financed emissions (PCAF = Cat 15) never roll into the entity total | ✅ Fixed (PR #9) |
 | C. No inventory line for removals (DAC, biochar, afforestation) | ⬜ Open |
 | Temporal straddle proration; float accumulation vs neutrality threshold; GLEC not truly modelled | ⬜ Open |
 
@@ -68,10 +68,15 @@ paths emitted a materially wrong number while stamping the report
   (the value-chain axis, orthogonal to mapping coverage); ESRS/ISSB/CDP/GRI gate
   on it. **Deliberate consequence:** every existing or unscreened run is now
   `disclosure_ready: false` — correct, not a regression.
-- **PR #8** (in progress) — _Category 15 = PCAF financed emissions._ Freeze
-  financed emissions into the run and roll them into the disclosed entity total
-  (for a bank, the majority of the footprint); fix the panel-found `pcaf` `as_of`
-  exact-match bug that silently returned a zero portfolio.
+- **PR #9** — _Category 15 = PCAF financed emissions._ Freeze financed emissions
+  into the run (`RunFinancedLine`) and roll them into the disclosed entity total in
+  ESRS/ISSB/CDP (for a bank, the majority of the footprint) while `run.total_co2e`
+  and the pedigree data-quality score stay untouched; fixed the `pcaf` `as_of`
+  exact-match bug that silently returned a zero portfolio. A pre-merge adversarial
+  review caught three more issues — a HIGH re-introduction of the silent-zero in
+  the freeze block (a filtered-empty `as_of` froze `financed_co2e = 0`), a
+  staleness-fingerprint false-positive, and a `scope3_gross` double-count — all
+  fixed with regression tests.
 
 ## Strengths worth preserving
 
