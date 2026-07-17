@@ -20,19 +20,27 @@ from ..services.ghgp import (
 )
 
 
-def _financed_block(db, run) -> dict:
+def _financed_block(db, run, declaration=None) -> dict:
     """Cat 15 financed emissions from the run's FROZEN RunFinancedLine rows."""
     rows = db.query(RunFinancedLine).filter(RunFinancedLine.run_id == run.id).all()
     if not rows and run.financed_co2e is None:
         return {}
     kg = sum(r.co2e for r in rows)
     by_asset, primary_kg = {}, 0.0
+    covered_exposure = 0.0     # outstanding of positions that HAVE investee emissions
     for r in rows:
         d = json.loads(r.details or "{}")
         ac = d.get("asset_class", "?")
         by_asset[ac] = by_asset.get(ac, 0.0) + r.co2e
         if (d.get("data_quality_score") or 5) <= 2:
             primary_kg += r.co2e
+        # IFRS S2 ¶B58-B63: exposure is "covered" when the position carries investee
+        # emissions — a position with none contributes exposure but no emissions.
+        if (d.get("investee_scope1_tco2e") is not None
+                or d.get("investee_scope2_tco2e") is not None):
+            covered_exposure += d.get("outstanding_amount") or 0.0
+    gross_exposure = getattr(declaration, "gross_exposure_total", None) if declaration else None
+    gross_currency = getattr(declaration, "gross_exposure_currency", None) if declaration else None
     return {
         "tco2e": round(kg / 1000.0, 6),
         "positions": len(rows),
@@ -45,6 +53,12 @@ def _financed_block(db, run) -> dict:
         "primary_data_basis": "pcaf_data_quality<=2",
         "data_quality_scale": "PCAF 1 best .. 5 proxy (NOT the ecoinvent pedigree scale)",
         "methodology": "PCAF Part A Financed Emissions (Dec 2022), frozen to the run",
+        # IFRS S2 ¶B58-B63: gross exposure and the % of it these emissions cover.
+        "gross_exposure_total": gross_exposure,
+        "gross_exposure_currency": gross_currency,
+        "exposure_covered": round(covered_exposure, 2),
+        "pct_gross_exposure_covered": (round(100.0 * covered_exposure / gross_exposure, 2)
+                                       if gross_exposure else None),
     }
 
 
@@ -134,7 +148,8 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
         }
 
     # Category 15 financed emissions (frozen), attached to the Cat 15 entry.
-    financed = _financed_block(db, run)
+    # The gross exposure comes from the run's FROZEN Cat 15 declaration.
+    financed = _financed_block(db, run, declaration=decls.get(15))
     financed_kg = (run.financed_co2e or 0.0)
     if financed:
         out["15"]["financed_emissions"] = financed

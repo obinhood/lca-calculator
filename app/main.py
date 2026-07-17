@@ -665,6 +665,8 @@ def upsert_scope3_declaration(
         method_description: Optional[str] = None,
         calculation_tools: Optional[str] = None,
         minimum_boundary_met: Optional[bool] = None,
+        gross_exposure_total: Optional[float] = None,
+        gross_exposure_currency: Optional[str] = None,
         screened_at: Optional[str] = None, declared_by: Optional[str] = None,
         org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     """Declare one Scope 3 category for a reporting period.
@@ -735,6 +737,12 @@ def upsert_scope3_declaration(
     d.method_description = method_description
     d.calculation_tools = calculation_tools
     d.minimum_boundary_met = minimum_boundary_met
+    if gross_exposure_total is not None and (
+            not math.isfinite(gross_exposure_total) or gross_exposure_total <= 0):
+        raise HTTPException(status_code=400,
+                            detail="gross_exposure_total must be a finite number > 0")
+    d.gross_exposure_total = gross_exposure_total
+    d.gross_exposure_currency = gross_exposure_currency
     d.screened_at = screened_at or now[:10]
     d.declared_by = declared_by
     d.standard_version = GHGP_STANDARD_VERSION
