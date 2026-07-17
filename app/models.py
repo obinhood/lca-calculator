@@ -13,11 +13,16 @@ class Organisation(Base):
     api_key_hash = Column(String, unique=True, nullable=True, index=True)
     api_key_revoked = Column(Boolean, nullable=False, default=False)
     key_rotated_at = Column(String, nullable=True)
-    # GHG Protocol consolidation approach: operational_control | financial_control | equity_share.
-    # NOTE: stored for provenance but NOT yet wired into the calc engine — every run currently
-    # includes 100% of the org's own activities. Multi-entity roll-up / equity-share weighting
-    # (which needs a parent/child org hierarchy + ownership %) is future work; do not assume live.
+    # GHG Protocol Ch.3 consolidation approach: operational_control | financial_control |
+    # equity_share. Now APPLIED by the calc engine (see services/boundary.py): it decides
+    # what share of each ReportingEntity's emissions enters the inventory. Validated
+    # against boundary.APPROACHES in code, not a DB CHECK (organisations is an FK target,
+    # and the Corporate Standard is under revision with the approaches themselves in scope).
     consolidation_approach = Column(String, nullable=True, default="operational_control")
+    # GHG Protocol Ch.3 asks a company to state AND justify its chosen approach. A reason
+    # cannot be defaulted or back-filled — fabricating one is the very failure this fixes —
+    # so it is NULL until a human writes it.
+    consolidation_approach_reason = Column(Text, nullable=True)
 
 class ActivityRecord(Base):
     __tablename__ = "activities"
@@ -52,6 +57,15 @@ class ActivityRecord(Base):
     # on the model but not in the migration would exist in tests (create_all) and
     # NOT in production (alembic). The 1..15 range is enforced in code instead.
     ghgp_category = Column(Integer, nullable=True)
+    # The operation this activity belongs to (GHGP Ch.3 organisational boundary).
+    # NULL = the reporting organisation ITSELF, which owns and controls itself -> share
+    # 1.0 under all three approaches. Every pre-existing row is NULL, so the boundary is
+    # a no-op until entities exist — that is the whole backward-compatibility mechanism.
+    # Deliberately a plain Integer with NO ForeignKey, same doctrine as ghgp_category
+    # above: an FK on this FK-target table would need batch_alter_table, and an FK could
+    # not enforce the TENANT match anyway — which is the check that actually matters.
+    # Existence + org ownership are validated at the API boundary and re-checked by the gate.
+    entity_id = Column(Integer, nullable=True, index=True)
 
     factor = relationship("EmissionFactor", back_populates="activities",
                           foreign_keys=[factor_id])
@@ -494,6 +508,126 @@ class CalculationRun(Base):
     # Hash of the position set frozen onto this run — detects the live loan/investment
     # ledger being edited after the run that filed it.
     financed_fingerprint = Column(String, nullable=True)
+    # --- Frozen GHG Protocol Ch.3 organisational boundary ---
+    # NULL boundary_version is the LEGACY-RUN sentinel (mirrors ghgp_standard_version):
+    # such a run has no boundary statement and must NEVER render as a clean
+    # "operational_control, 100%" claim it never made.
+    boundary_version = Column(String, nullable=True)
+    consolidation_approach = Column(String, nullable=True)
+    consolidation_reason = Column(Text, nullable=True)
+    # activities_fingerprint hashes ACTIVITIES and is structurally blind to an
+    # equity_share_pct 40->100 edit or an approach flip — either changes every number
+    # while every run still reports FRESH. This closes that.
+    consolidation_fingerprint = Column(String, nullable=True)
+    # KG of GROSS emissions EXCLUDED by the boundary: sum of (1 - share) * gross.
+    # NEVER in total_co2e (which stays exactly the sum of location line items — the
+    # assurer's invariant), and never added to the disclosed total either: unlike
+    # financed_co2e this is a DIFFERENT measure, not a missing addend (adding an
+    # equity-excluded associate's gross back is the double count Cat 15 exists to
+    # avoid). NULL = not evaluated (legacy); 0.0 = evaluated, nothing excluded.
+    total_co2e_non_consolidated = Column(Float, nullable=True)
+
+
+class ReportingEntity(Base):
+    """One operation/investee inside a tenant's organisational boundary (GHGP Ch.3).
+
+    NOT a tenant: organisation_id remains the security boundary; an entity is a
+    sub-dimension inside one org.
+
+    FLAT by construction — deliberately NO parent_entity_id. Indirect chains (80% of a
+    sub holding 50% of a JV) are NOT multiplied: the GHG Protocol specifies no
+    multiplication rule, so computing one would be an uncitable platform policy that
+    silently changes the number. The preparer asserts the EFFECTIVE economic interest
+    and justifies it in equity_share_basis.
+
+    The control facts are INDEPENDENT of accounting_category and of ownership %:
+    operational control is an asserted judgement, not a function of equity (IFRS S2
+    educational material Ex. 2A vs 2B — the same 20% associate, opposite outcomes).
+    accounting_category drives DISCLOSURE only, never the weight.
+    """
+    __tablename__ = "reporting_entities"
+    __table_args__ = (
+        UniqueConstraint("organisation_id", "name", name="uq_entity_org_name"),
+        CheckConstraint("equity_share_pct IS NULL OR "
+                        "(equity_share_pct >= 0 AND equity_share_pct <= 100)",
+                        name="ck_entity_equity_pct_range"),
+        CheckConstraint("accounting_category IN ('subsidiary','joint_venture_incorporated',"
+                        "'joint_operation','associate','fixed_asset_investment',"
+                        "'franchise','lease_finance','lease_operating')",
+                        name="ck_entity_acct_category"),
+        # Joint financial control is the one place a control approach falls back to a
+        # percentage; it is not compatible with sole financial control.
+        CheckConstraint("NOT (financial_control = 1 AND joint_financial_control = 1)",
+                        name="ck_entity_joint_vs_sole_fc"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    name = Column(String, nullable=False)
+    entity_ref = Column(String, nullable=True)          # the client's own group/ERP code
+    accounting_category = Column(String, nullable=False)
+    # Economic interest — an ASSERTED, evidenced input, never read from a share
+    # register ("economic substance overrides legal ownership"). NULL = not asserted.
+    equity_share_pct = Column(Float, nullable=True)
+    equity_share_basis = Column(Text, nullable=True)
+    # Control judgements, each independent of ownership %. NULL = NOT ASSERTED.
+    financial_control = Column(Boolean, nullable=True)
+    joint_financial_control = Column(Boolean, nullable=True)
+    operational_control = Column(Boolean, nullable=True)
+    control_rationale = Column(Text, nullable=True)
+    # Financial-statement group membership — INDEPENDENT of the GHGP approach and of
+    # accounting_category. Without it the IFRS S2 29(a)(iv) disaggregation is not
+    # derivable: that clause splits on the consolidated ACCOUNTING group.
+    in_consolidated_accounting_group = Column(Boolean, nullable=True)
+    effective_from = Column(String, nullable=True)      # ISO; NULL = unbounded
+    effective_to = Column(String, nullable=True)
+    created_at = Column(String, nullable=True)
+
+
+class RunEntityBoundary(Base):
+    """The IMMUTABLE per-run boundary — the gross -> share -> consolidated walk.
+
+    Complete by construction (the RunScope3Declaration doctrine): one row per entity
+    the org holds INCLUDING entities weighted 0.0 (those rows ARE the "other investees
+    excluded" list the disclosure clauses ask for), plus always exactly one 'self' row.
+    """
+    __tablename__ = "run_entity_boundary"
+    __table_args__ = (
+        # entity_key, not entity_id: SQLite treats NULLs as DISTINCT in a unique index,
+        # so a nullable entity_id could not stop two 'self' rows.
+        UniqueConstraint("run_id", "entity_key", name="uq_run_entity_boundary"),
+        CheckConstraint("share_factor >= 0 AND share_factor <= 1", name="ck_reb_share_range"),
+        CheckConstraint("group_class IN ('consolidated_accounting_group','other_investee',"
+                        "'unclassified')", name="ck_reb_group_class"),
+    )
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
+    entity_key = Column(String, nullable=False)        # 'self' | 'e:<id>'
+    entity_id = Column(Integer, nullable=True)         # provenance only, never joined back
+    entity_name = Column(String, nullable=False)
+    entity_ref = Column(String, nullable=True)
+    accounting_category = Column(String, nullable=False)   # 'reporting_org' for the self row
+    # --- frozen INPUTS (the weight is re-derivable from the run alone) ---
+    equity_share_pct = Column(Float, nullable=True)
+    equity_share_basis = Column(Text, nullable=True)
+    financial_control = Column(Boolean, nullable=True)
+    joint_financial_control = Column(Boolean, nullable=True)
+    operational_control = Column(Boolean, nullable=True)
+    control_rationale = Column(Text, nullable=True)
+    in_consolidated_accounting_group = Column(Boolean, nullable=True)
+    effective_from = Column(String, nullable=True)
+    effective_to = Column(String, nullable=True)
+    # --- frozen VERDICT (freeze the verdict, not just the inputs — a later fix to the
+    #     share function must be DETECTABLE, never retroactively applied to a filed run) ---
+    approach = Column(String, nullable=False)
+    share_factor = Column(Float, nullable=False)       # 0.0..1.0, UNROUNDED
+    share_basis = Column(String, nullable=False)
+    resolved = Column(Boolean, nullable=False)         # False => a disclosure blocker
+    group_class = Column(String, nullable=False)
+    gross_co2e = Column(Float, nullable=False)         # KG, before the share
+    consolidated_co2e = Column(Float, nullable=False)  # KG, after the share
+    line_count = Column(Integer, nullable=False, default=0)
+    boundary_version = Column(String, nullable=False)
+    frozen_at = Column(String, nullable=False)
 
 
 class Scope3CategoryDeclaration(Base):

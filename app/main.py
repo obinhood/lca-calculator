@@ -652,6 +652,111 @@ def get_pcaf_report(include_scope3: bool = True, as_of: Optional[str] = None,
                                                          as_of=as_of)))
 
 
+# --- GHG Protocol Ch.3: the organisational boundary ---------------------------
+
+@app.post("/organisations/consolidation")
+def set_consolidation_approach(approach: str = Query(...), reason: str = Query(...),
+                               org: Organisation = Depends(current_org),
+                               db: Session = Depends(get_db)):
+    """Set the org's GHGP Ch.3 consolidation approach and the reason for the choice.
+
+    The approach decides what share of each entity's emissions is consolidated, so it
+    is a determinant of every reported figure — recompute after changing it.
+    """
+    from .services.boundary import APPROACHES
+    from .services.ghgp import is_boilerplate, MIN_JUSTIFICATION_CHARS
+    if approach not in APPROACHES:
+        raise HTTPException(status_code=400, detail=f"approach must be one of {list(APPROACHES)}")
+    if is_boilerplate(reason):
+        raise HTTPException(
+            status_code=400,
+            detail=f"a reason for the choice is required (>= {MIN_JUSTIFICATION_CHARS} chars, "
+                   f"not boilerplate) — GHG Protocol Ch.3 asks a company to state and justify "
+                   f"its chosen consolidation approach")
+    org.consolidation_approach = approach
+    org.consolidation_approach_reason = reason
+    db.commit()
+    return {"consolidation_approach": approach,
+            "note": "Recompute the run — the approach changes the reported figures, and a "
+                    "change of boundary triggers a GHG Protocol Ch.5 base-year recalculation "
+                    "assessment."}
+
+
+@app.post("/entities")
+def create_entity(name: str = Query(...), accounting_category: str = Query(...),
+                  equity_share_pct: Optional[float] = None,
+                  equity_share_basis: Optional[str] = None,
+                  financial_control: Optional[bool] = None,
+                  joint_financial_control: Optional[bool] = None,
+                  operational_control: Optional[bool] = None,
+                  control_rationale: Optional[str] = None,
+                  in_consolidated_accounting_group: Optional[bool] = None,
+                  entity_ref: Optional[str] = None,
+                  effective_from: Optional[str] = None, effective_to: Optional[str] = None,
+                  org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Declare an operation inside the organisational boundary (GHGP Ch.3).
+
+    The control facts are ASSERTED judgements, independent of ownership %: the same 20%
+    associate is consolidated at 100% or 0% purely on whether operational control is
+    asserted. NULL means "not asserted" (which blocks disclosure), never "no".
+    """
+    from .models import ReportingEntity
+    from .services.boundary import ACCOUNTING_CATEGORIES
+    from .services.calc import _utcnow_iso
+    if accounting_category not in ACCOUNTING_CATEGORIES:
+        raise HTTPException(status_code=400,
+                            detail=f"accounting_category must be one of {list(ACCOUNTING_CATEGORIES)}")
+    if equity_share_pct is not None and (
+            not math.isfinite(equity_share_pct) or not 0 <= equity_share_pct <= 100):
+        raise HTTPException(status_code=400, detail="equity_share_pct must be finite in [0, 100]")
+    if financial_control and joint_financial_control:
+        raise HTTPException(status_code=400,
+                            detail="an entity cannot have both sole and joint financial control")
+    for nm, v in (("effective_from", effective_from), ("effective_to", effective_to)):
+        if v is not None and _parse_iso_date(v) is None:
+            raise HTTPException(status_code=400, detail=f"{nm} must be an ISO date")
+    if db.query(ReportingEntity).filter(ReportingEntity.organisation_id == org.id,
+                                        ReportingEntity.name == name).first():
+        raise HTTPException(status_code=409, detail=f"entity {name!r} already exists")
+    e = ReportingEntity(organisation_id=org.id, name=name, entity_ref=entity_ref,
+                        accounting_category=accounting_category,
+                        equity_share_pct=equity_share_pct, equity_share_basis=equity_share_basis,
+                        financial_control=financial_control,
+                        joint_financial_control=joint_financial_control,
+                        operational_control=operational_control,
+                        control_rationale=control_rationale,
+                        in_consolidated_accounting_group=in_consolidated_accounting_group,
+                        effective_from=effective_from, effective_to=effective_to,
+                        created_at=_utcnow_iso())
+    db.add(e); db.commit(); db.refresh(e)
+    return {"id": e.id, "name": e.name, "accounting_category": e.accounting_category,
+            "note": "Attribute activities to it via POST /activities/entity, then recompute."}
+
+
+@app.post("/activities/entity")
+def attribute_activities_to_entity(entity_id: int = Query(...),
+                                   category: Optional[str] = None,
+                                   source_file: Optional[str] = None,
+                                   org: Organisation = Depends(current_org),
+                                   db: Session = Depends(get_db)):
+    """Attribute the org's activities to an entity (bulk, by category/source file)."""
+    from .models import ReportingEntity
+    e = db.query(ReportingEntity).filter(ReportingEntity.id == entity_id,
+                                         ReportingEntity.organisation_id == org.id).first()
+    if e is None:
+        raise HTTPException(status_code=404, detail="entity not found for this organisation")
+    q = db.query(ActivityRecord).filter(ActivityRecord.organisation_id == org.id)
+    if category is not None:
+        q = q.filter(ActivityRecord.category == category)
+    if source_file is not None:
+        q = q.filter(ActivityRecord.source_file == source_file)
+    rows = q.all()
+    for a in rows:
+        a.entity_id = e.id
+    db.commit()
+    return {"updated": len(rows), "entity_id": e.id, "note": "Recompute the run to apply."}
+
+
 # --- GHG Protocol Scope 3: the 15-category screen ----------------------------
 
 @app.post("/scope3/declarations")

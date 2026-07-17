@@ -34,7 +34,7 @@ paths emitted a materially wrong number while stamping the report
 | 2 | An unvalidated `factor.value` (NULL/inf) crashes or poisons the whole run | ✅ Fixed (PR #4) |
 | 3 | Unknown activity categories silently classified Scope 3 (steam/refrigerant mis-scoped) | ✅ Fixed (PR #4) |
 | 4 | Market-based Scope 2 not grid-matched; residual-mix → location-average | ✅ Fixed (PR #10) — grid matching + determinism |
-| 5 | Consolidation boundary declared but never applied (a 40%-owned JV counted at 100%) | ⬜ Open |
+| 5 | Consolidation boundary declared but never applied (a 40%-owned JV counted at 100%) | ✅ Fixed (PR #12) |
 | 6 | Scope 3 completeness invisible — 3-of-15 categories reads as "100% complete" | ✅ Fixed (PR #7) |
 | 7 | Mandatory energy totals silently drop carriers; ESOS had no gate | ✅ Fixed (PR #6) |
 | 8 | EN 15804/15978 Module D netted into the headline LCA total (−25%) | ✅ Fixed (PR #6) |
@@ -84,6 +84,19 @@ paths emitted a materially wrong number while stamping the report
   `kwh_market_unverified` (backward compatible); the activity set is id-ordered so
   the market total is deterministic. A pre-merge adversarial review confirmed the
   change is sound (one low-severity disclosure-consistency nit, fixed).
+
+- **PR #12** — _GHG Protocol Ch.3 organisational boundary applied._ The declared
+  consolidation approach now decides what share of each entity enters the inventory
+  (a 40% JV consolidates at 40%, not 100%). `accounting_category` appears in no
+  weight branch — the same 20% associate is 100% or 0% purely on asserted control
+  (IFRS S2 Ex. 2A/2B). The share is applied per LINE so `sum(lines) == total_co2e`
+  holds by construction; the boundary is frozen per run (`run_entity_boundary`) so a
+  later ownership edit is detected drift, never a silent restatement. Fail-open on
+  the number (an unresolved fact includes at 100% — never understate) and fail-closed
+  on the disclosure. The excluded residual is measured and blocks, but is never
+  auto-routed to Scope 3. Designed by a 3-way panel + judge; a pre-merge adversarial
+  review caught six issues (incl. a falsy NULL check that silently excluded a 50/50
+  JV at 0%, and gross energy disclosed beside consolidated emissions) — all fixed.
 
 ## Strengths worth preserving
 

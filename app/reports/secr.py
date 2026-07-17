@@ -11,6 +11,7 @@ Fail-closed disclosure: the report always states whether it is disclosure-ready
 and WHY NOT if it isn't (partial run, unmapped activities, stale run) — a
 pre-submission validation gate, not a silent pass.
 """
+import json
 import math
 from typing import Optional
 
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..models import ActivityRecord, CalculationRun, EmissionLineItem
 from ..services.units import convert, UnitConversionError
+from ..services.boundary import boundary_completeness
 from .summary import summary, run_factor_sources
 
 # Energy content used to express transport fuel as kWh for the SECR energy
@@ -29,14 +31,26 @@ DIESEL_KWH_PER_LITRE_DEMO = 10.0
 _ENERGY_CARRIERS = ("electricity", "gas", "diesel")
 
 
-def _energy_kwh(db: Session, run: CalculationRun, scopes=None) -> dict:
+def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
+                consolidated: bool = False) -> dict:
     """kWh of energy use per carrier for the activities in this run.
 
     ``scopes`` filters by the line items' FROZEN scope (e.g. ("1", "2") for
     ESRS E1-5 own-operations energy); None means unscoped (SECR's total UK
     energy use is deliberately scope-agnostic).
+
+    ``consolidated`` selects the BASIS, which differs by framework and must never be
+    left implicit — energy reported on a different basis from the emissions beside it
+    implies a wrong intensity (a 40% JV's 1000 kWh next to its consolidated 0.2 tCO2e
+    implies 0.2 kgCO2e/kWh against a 0.5 factor):
+      * False (default) = GROSS physical energy — correct for the site-level regimes.
+        SECR reports UK energy USE and ESOS audits significant energy CONSUMPTION at
+        the sites you operate; that is a physical quantity, not an equity share of one.
+      * True = energy weighted by the GHGP Ch.3 entity share, read from the location
+        line's FROZEN share_factor (never the live entity — reproduction contract).
+        Correct for ESRS E1-5, whose scope follows the consolidation scope.
     """
-    q = db.query(ActivityRecord).join(
+    q = db.query(ActivityRecord, EmissionLineItem.details).join(
         EmissionLineItem, EmissionLineItem.activity_id == ActivityRecord.id)\
         .filter(EmissionLineItem.run_id == run.id,
                 EmissionLineItem.method == "location",
@@ -46,18 +60,29 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None) -> dict:
     rows = q.all()
     out = {c: 0.0 for c in _ENERGY_CARRIERS}
     notes = []
-    for a in rows:
+    weighted_any = False
+    for a, details in rows:
+        share = 1.0
+        if consolidated:
+            share = ((json.loads(details or "{}").get("consolidation") or {})
+                     .get("share_factor", 1.0))
+            if share != 1.0:
+                weighted_any = True
         try:
             if a.category == "diesel":
                 litres = convert(a.quantity, a.unit, "L")
-                out["diesel"] += litres * DIESEL_KWH_PER_LITRE_DEMO
+                out["diesel"] += litres * DIESEL_KWH_PER_LITRE_DEMO * share
                 notes.append(f"diesel converted at DEMO constant "
                              f"{DIESEL_KWH_PER_LITRE_DEMO} kWh/L")
             else:
-                out[a.category] += convert(a.quantity, a.unit, "kWh")
+                out[a.category] += convert(a.quantity, a.unit, "kWh") * share
         except UnitConversionError as exc:
             notes.append(f"activity {a.id} excluded from energy figure: {exc}")
     out["total_kwh"] = sum(v for k, v in out.items() if k in _ENERGY_CARRIERS)
+    out["basis"] = "consolidated_entity_share" if consolidated else "gross_physical_energy"
+    if consolidated and weighted_any:
+        notes.append("energy weighted by the GHGP Ch.3 entity share, on the same basis "
+                     "as the emissions reported beside it")
     out["notes"] = sorted(set(notes))
     return out
 
@@ -89,6 +114,11 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
     if cov["coverage_pct"] < 100.0:
         blockers.append(f"coverage is {cov['coverage_pct']}% (count-based) — "
                         f"resolve unmapped/errored activities or document exclusions")
+
+    # SECR's emissions are consolidated under the GHGP Ch.3 boundary, so an
+    # unresolved boundary blocks. Its ENERGY figure stays gross physical energy
+    # (UK energy use at operated sites), which is labelled via energy["basis"].
+    blockers.extend(boundary_completeness(db, run).get("blockers", []))
 
     energy = _energy_kwh(db, run)
 

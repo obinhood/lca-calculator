@@ -16,6 +16,7 @@ from ..models import CalculationRun
 from .summary import summary, run_factor_sources
 from .scope3 import category_tco2e
 from ..services.ghgp import scope3_completeness
+from ..services.boundary import boundary_completeness
 
 
 def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
@@ -44,6 +45,7 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
         blockers.append("intensity_denominator required (finite, > 0) for C6.10")
     # CDP C6.5 IS the 15-category Scope 3 grid — screen all 15.
     blockers.extend(scope3_completeness(db, run).get("blockers", []))
+    blockers.extend(boundary_completeness(db, run).get("blockers", []))
     _financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
 
     by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}

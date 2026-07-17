@@ -29,6 +29,7 @@ from ..models import CalculationRun, EmissionLineItem
 from .summary import summary, run_factor_sources
 from .secr import _energy_kwh
 from ..services.ghgp import scope3_completeness
+from ..services.boundary import boundary_completeness
 
 NOT_COVERED = [
     "E1-1 transition plan for climate change mitigation",
@@ -122,10 +123,16 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     # what stops "3 of 15 categories" reading as a complete inventory.
     s3gate = scope3_completeness(db, run)
     blockers.extend(s3gate.get("blockers", []))
+    # GHG Protocol Ch.3: the consolidation boundary determines what share of each
+    # entity is in these figures — an unresolved boundary cannot be disclosed.
+    blockers.extend(boundary_completeness(db, run).get("blockers", []))
 
     # E1-5: ESRS reports energy in MWh, bounded to own operations (Scope 1/2
     # line items) — unlike SECR's deliberately scope-agnostic UK energy figure.
-    energy_kwh = _energy_kwh(db, run, scopes=("1", "2"))
+    # ESRS E1-5's scope follows the consolidation scope, so energy must be on the
+    # SAME basis as the E1-6 emissions beside it — otherwise the payload implies
+    # a wrong intensity (gross kWh over consolidated tCO2e).
+    energy_kwh = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
     renewable_mwh = _renewable_contractual_mwh(db, run)
     total_mwh = energy_kwh["total_kwh"] / 1000.0
     energy = {

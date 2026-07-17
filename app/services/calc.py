@@ -7,10 +7,14 @@ from sqlalchemy.orm import Session
 from ..models import (
     ActivityRecord, EmissionFactor, CalculationRun, EmissionLineItem, ReportingPeriod,
     MarketInstrument, Scope3CategoryDeclaration, RunScope3Declaration,
+    Organisation, ReportingEntity, RunEntityBoundary,
 )
 from .ghgp import (
     GHGP_STANDARD_VERSION, CATEGORY_MAP_VERSION, CATEGORIES, taxonomy,
     derive_ghgp_category, boundary_meets_minimum, declarations_fingerprint,
+)
+from .boundary import (
+    BOUNDARY_VERSION, entity_weight, group_class, consolidation_fingerprint,
 )
 from .units import convert, UnitConversionError, QuantityError
 from .gwp import co2e_from_gases, gwp
@@ -74,7 +78,8 @@ def _parse_iso_date(value: Optional[str]) -> Optional[date_cls]:
 
 # Bumped whenever the fingerprint's INPUTS change, so a run stamped under an older
 # scheme is reported as "staleness not assessable" rather than falsely STALE.
-FINGERPRINT_VERSION = "v3"
+FINGERPRINT_VERSION = "v4"   # v4: entity_id — re-attributing an activity to a
+                             # different entity changes its SHARE and thus the RESULT.
 
 
 def activities_fingerprint(acts: List[ActivityRecord]) -> str:
@@ -87,8 +92,8 @@ def activities_fingerprint(acts: List[ActivityRecord]) -> str:
     because it changes the DISCLOSURE (v3).
     """
     parts = sorted(
-        f"{a.id}:{a.factor_id}:{a.quantity}:{a.unit}:{a.date}:{a.category}:{a.ghgp_category}"
-        for a in acts)
+        f"{a.id}:{a.factor_id}:{a.quantity}:{a.unit}:{a.date}:{a.category}:{a.ghgp_category}:"
+        f"{a.entity_id}" for a in acts)
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
     return f"{FINGERPRINT_VERSION}:{digest}"
 
@@ -340,6 +345,17 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         MarketInstrument.organisation_id == organisation_id).all()
     pool = _InstrumentPool(instruments, gwp_set)
 
+    # --- GHG Protocol Ch.3 organisational boundary -----------------------------
+    org = db.get(Organisation, organisation_id)
+    approach = ((org.consolidation_approach if org else None) or "operational_control").strip()
+    cons_reason = org.consolidation_approach_reason if org else None
+    entities = db.query(ReportingEntity).filter(
+        ReportingEntity.organisation_id == organisation_id)\
+        .order_by(ReportingEntity.id).all()
+    ent_by_id = {e.id: e for e in entities}       # loaded ONCE — no N+1 in the loop
+    total_non_consolidated = 0.0
+    per_entity = {}   # entity_key -> {"gross","consolidated","n","weight","basis","resolved"}
+
     run = CalculationRun(
         organisation_id=organisation_id,
         reporting_period_id=reporting_period_id,
@@ -350,6 +366,10 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         mapped=0, unmapped=0, unit_errors=0, data_errors=0, gwp_mismatch=0,
         total_co2e=0.0,
         activities_fingerprint=activities_fingerprint(acts),
+        boundary_version=BOUNDARY_VERSION,
+        consolidation_approach=approach,
+        consolidation_reason=cons_reason,
+        consolidation_fingerprint=consolidation_fingerprint(approach, cons_reason, entities),
     )
     errors = []
     try:
@@ -429,8 +449,51 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                     errors.append({"activity_id": a.id, "error": str(exc)})
                     continue
 
+            # --- GHG Protocol Ch.3 organisational boundary ------------------------
+            # entity_id NULL = the reporting org itself => share 1.0 (every pre-boundary
+            # row), so this is a no-op until entities exist.
+            _ent = ent_by_id.get(a.entity_id) if a.entity_id is not None else None
+            if a.entity_id is not None and _ent is None:
+                # Dangling or CROSS-TENANT entity_id (ent_by_id is org-scoped, so another
+                # tenant's entity is never resolvable). Fail-OPEN on the number — the
+                # emission is real — and fail-CLOSED on the disclosure via the gate.
+                # Its own bucket: keying this to "self" would both mis-attribute the
+                # emissions and mark the reporting entity itself unresolved.
+                _w, _basis, _resolved = 1.0, "unresolved_entity_not_found", False
+                _key = f"e:{a.entity_id}"
+            else:
+                _w, _basis, _resolved = entity_weight(approach, _ent)
+                _key = "self" if _ent is None else f"e:{_ent.id}"
+            co2e_gross = co2e
+            # The WEIGHTED value is what gets stored AND summed, so
+            # `sum(location line items) == run.total_co2e` — the invariant an assurer
+            # walks — holds by construction. Weighting at the total instead would make
+            # every line-summing consumer report gross while the run reported
+            # consolidated. The gross -> share -> consolidated walk is not lost: it is
+            # frozen in `details` and re-aggregated in run_entity_boundary.
+            co2e = co2e_gross * _w
+            total_non_consolidated += (co2e_gross - co2e)
+            _b = per_entity.setdefault(_key, {
+                "gross": 0.0, "consolidated": 0.0, "n": 0,
+                "weight": _w, "basis": _basis, "resolved": _resolved, "entity": _ent})
+            _b["gross"] += co2e_gross
+            _b["consolidated"] += co2e
+            _b["n"] += 1
+            if not _resolved:
+                _b["resolved"] = False
+
             dq = line_dq(a.factor, a, a.mapping_basis, _pdate.year if _pdate else None)
             detail = {
+                "consolidation": {
+                    "entity_key": _key,
+                    "entity_id": a.entity_id,
+                    "approach": approach,
+                    "share_factor": _w,          # UNROUNDED — no rounding rule exists
+                    "share_basis": _basis,
+                    "resolved": _resolved,
+                    "gross_co2e": co2e_gross,
+                    "consolidated_co2e": co2e,
+                },
                 "factor_id": a.factor_id,
                 "activity_unit": a.unit,
                 "factor_unit": a.factor.unit,
@@ -460,7 +523,11 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             # compute_activity_co2e above — so no guard is needed.
             if a.factor.kg_co2_biogenic is not None and math.isfinite(a.factor.kg_co2_biogenic):
                 qty_fu = convert(a.quantity, a.unit, a.factor.unit)
-                biogenic = qty_fu * a.factor.kg_co2_biogenic
+                # Weighted too, or the ISO 14067 biogenic pool would sit on a different
+                # (gross) basis from the consolidated total reported beside it.
+                biogenic_gross = qty_fu * a.factor.kg_co2_biogenic
+                biogenic = biogenic_gross * _w
+                detail["biogenic_co2e_gross"] = biogenic_gross
                 detail["biogenic_co2e"] = biogenic
                 total_biogenic += biogenic
 
@@ -513,24 +580,32 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             # contracts, so they only ever apply to electricity — other Scope 2
             # commodities (heat/steam) fall back to the location figure.
             if scope == "2":
-                market_co2e, market_detail = co2e, dict(detail)
+                # THE TRAP: the instrument pool prices contractual kWh at the
+                # instrument's UNWEIGHTED rate, so a pre-weighted grid_rate would mix
+                # bases and yield a plausible-looking but wrong market line. Run the
+                # pool ENTIRELY in gross terms, then weight the result once.
+                # Policy: the pool is consumed in GROSS kWh — a REC covers physical
+                # MWh, not your equity share of them.
+                market_co2e_gross, market_detail = co2e_gross, dict(detail)
                 # Biogenic belongs to the (single) location line only; don't let it
                 # appear twice across the location+market lineage pair.
                 market_detail.pop("biogenic_co2e", None)
+                market_detail.pop("biogenic_co2e_gross", None)
                 is_electricity = (a.category or "").lower() == "electricity"
                 if is_electricity and instruments:
                     try:
                         kwh = convert(a.quantity, a.unit, "kWh")
-                        grid_rate = (co2e / kwh) if kwh else 0.0
+                        grid_rate = (co2e_gross / kwh) if kwh else 0.0   # GROSS on GROSS
                         # a.geo is the consumption's grid/market — instruments only
                         # cover matching-market load (a US REC can't zero DE consumption).
                         alloc = pool.allocate(kwh, a.date, a.geo, grid_rate)
-                        market_co2e = alloc.pop("co2e")
+                        market_co2e_gross = alloc.pop("co2e")
                         # MERGE, don't replace: a wholesale replace discarded factor_id,
                         # method_type, data_quality, scope_source and every ghgp_* key
                         # from the market line's frozen lineage.
                         market_detail = {**detail, **alloc}
                         market_detail.pop("biogenic_co2e", None)
+                        market_detail.pop("biogenic_co2e_gross", None)
                     except UnitConversionError as exc:
                         market_detail["method_basis"] = "grid_average_fallback"
                         market_detail["fallback_reason"] = str(exc)
@@ -539,13 +614,19 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                     if not is_electricity:
                         market_detail["fallback_reason"] = \
                             "non-electricity scope 2: electricity instruments not applicable"
+                market_co2e = market_co2e_gross * _w
+                market_detail["consolidation"] = {
+                    **detail["consolidation"],
+                    "gross_co2e": market_co2e_gross,
+                    "consolidated_co2e": market_co2e,
+                }
                 line_items.append(EmissionLineItem(
                     run_id=run.id, activity_id=a.id, scope=scope, method="market",
                     co2e=market_co2e, details=json.dumps(market_detail),
                 ))
                 total_market += market_co2e
             else:
-                total_market += co2e
+                total_market += co2e          # already weighted
 
         db.add_all(line_items)
         run.total_co2e = total
@@ -554,6 +635,60 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         # Emissions-weighted data-quality score (1 best .. 5 worst); 0.0 = no data.
         run.data_quality_score = round(dq_weighted_sum / total, 3) if total else 0.0
         run.notes = json.dumps(errors)
+        run.total_co2e_non_consolidated = total_non_consolidated
+
+        # --- Freeze the organisational boundary onto the run ---
+        # One row per entity the org holds INCLUDING entities weighted 0.0 and entities
+        # with no activities (those rows ARE the "other investees excluded" list the
+        # disclosure clauses ask for), plus always exactly one 'self' row. Complete by
+        # construction: an assurer sees the whole entity population, not an absence.
+        frozen_at_b = _utcnow_iso()
+        _rows = [("self", None)] + [(f"e:{e.id}", e) for e in entities]
+        for key, e in _rows:
+            agg = per_entity.get(key, {})
+            if key in per_entity:
+                w, basis, resolved = agg["weight"], agg["basis"], agg["resolved"]
+            else:
+                # Declared but contributed nothing to this run — still freeze its verdict.
+                w, basis, resolved = entity_weight(approach, e)
+            db.add(RunEntityBoundary(
+                run_id=run.id, entity_key=key, entity_id=(e.id if e else None),
+                entity_name=(e.name if e else (org.name if org else "reporting organisation")),
+                entity_ref=(e.entity_ref if e else None),
+                accounting_category=(e.accounting_category if e else "reporting_org"),
+                equity_share_pct=(e.equity_share_pct if e else None),
+                equity_share_basis=(e.equity_share_basis if e else None),
+                financial_control=(e.financial_control if e else None),
+                joint_financial_control=(e.joint_financial_control if e else None),
+                operational_control=(e.operational_control if e else None),
+                control_rationale=(e.control_rationale if e else None),
+                in_consolidated_accounting_group=(
+                    e.in_consolidated_accounting_group if e else True),
+                effective_from=(e.effective_from if e else None),
+                effective_to=(e.effective_to if e else None),
+                approach=approach, share_factor=w, share_basis=basis, resolved=resolved,
+                group_class=group_class(e),
+                gross_co2e=agg.get("gross", 0.0),
+                consolidated_co2e=agg.get("consolidated", 0.0),
+                line_count=agg.get("n", 0),
+                boundary_version=BOUNDARY_VERSION, frozen_at=frozen_at_b,
+            ))
+        # Activities pointing at an entity that does not exist for this org get their
+        # own frozen row too — otherwise the run would carry emissions attributed to a
+        # bucket the boundary statement never mentions.
+        _covered = {k for k, _ in _rows}
+        for key, agg in per_entity.items():
+            if key in _covered:
+                continue
+            db.add(RunEntityBoundary(
+                run_id=run.id, entity_key=key, entity_id=None,
+                entity_name=f"unknown entity ({key})", accounting_category="unknown",
+                approach=approach, share_factor=agg["weight"], share_basis=agg["basis"],
+                resolved=False, group_class="unclassified",
+                gross_co2e=agg["gross"], consolidated_co2e=agg["consolidated"],
+                line_count=agg["n"],
+                boundary_version=BOUNDARY_VERSION, frozen_at=frozen_at_b,
+            ))
 
         # --- Freeze the Scope 3 completeness statement onto the run ---
         # EXACTLY 15 rows, ALWAYS. A category the org never screened is frozen as

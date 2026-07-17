@@ -9,6 +9,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import TaxonomyActivity, CalculationRun
+from ..services.boundary import boundary_completeness
 from .summary import summary
 from .secr import _energy_kwh
 
@@ -92,6 +93,8 @@ def esos_report(db: Session, organisation_id: int, run_id: Optional[int] = None)
         return {"framework": "UK ESOS", "report_ready": False,
                 "blockers": ["no calculation run exists"]}
     run = db.get(CalculationRun, run_info["id"])
+    # ESOS audits significant energy USE (gross physical energy at operated sites),
+    # but its emissions context is consolidated — gate on the boundary.
     energy = _energy_kwh(db, run)
     total_kwh = energy["total_kwh"]
     by_carrier = {c: energy[c] for c in ("electricity", "gas", "diesel")}
@@ -107,6 +110,7 @@ def esos_report(db: Session, organisation_id: int, run_id: Optional[int] = None)
         blockers.append("run is STALE — recompute")
     if total_kwh <= 0:
         blockers.append("no energy-carrier activity in this run")
+    blockers.extend(boundary_completeness(db, run).get("blockers", []))
 
     return {
         "framework": "UK ESOS",
