@@ -582,6 +582,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 method_description=d.method_description if d else None,
                 calculation_tools=d.calculation_tools if d else None,
                 primary_data_pct=d.primary_data_pct if d else None,
+                gross_exposure_total=d.gross_exposure_total if d else None,
+                gross_exposure_currency=d.gross_exposure_currency if d else None,
                 screened_at=d.screened_at if d else None,
                 ghgp_standard_version=GHGP_STANDARD_VERSION,
                 frozen_at=frozen_at,
@@ -618,12 +620,26 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 run.financed_include_scope3 = financed_include_scope3
                 run.financed_fingerprint = None
             else:
+                by_id = {p.id: p for p in all_positions}
                 for ln in pf["lines"]:
+                    p = by_id.get(ln["position_id"])
+                    # Freeze the FULL attribution lineage: an assurer must be able to
+                    # walk outstanding / denominator x investee emissions = financed,
+                    # and the exposure is needed for IFRS S2 B58-B63's % covered.
                     db.add(RunFinancedLine(
                         run_id=run.id, position_id=ln["position_id"], ghgp_category=15,
                         co2e=ln["financed_total_tco2e"] * 1000.0,   # tCO2e -> kg (explicit)
-                        details=json.dumps({**ln, "unit_note": "kg (PCAF tCO2e x1000)",
-                                            "pcaf_standard": "PCAF Part A Financed Emissions (Dec 2022)"})))
+                        details=json.dumps({
+                            **ln,
+                            "outstanding_amount": p.outstanding_amount if p else None,
+                            "attribution_denominator": p.attribution_denominator if p else None,
+                            "currency": p.currency if p else None,
+                            "investee_scope1_tco2e": p.investee_scope1_tco2e if p else None,
+                            "investee_scope2_tco2e": p.investee_scope2_tco2e if p else None,
+                            "investee_scope3_tco2e": p.investee_scope3_tco2e if p else None,
+                            "position_as_of_date": p.as_of_date if p else None,
+                            "unit_note": "kg (PCAF tCO2e x1000)",
+                            "pcaf_standard": "PCAF Part A Financed Emissions (Dec 2022)"})))
                 run.financed_co2e = pf["financed_emissions_tco2e"]["total"] * 1000.0
                 run.financed_as_of = as_of
                 run.financed_include_scope3 = financed_include_scope3

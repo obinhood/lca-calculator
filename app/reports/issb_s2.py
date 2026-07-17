@@ -111,11 +111,14 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     _cat15 = (((s.get("scope3_ghgp") or {}).get("categories") or {}).get("15") or {})
     _cat15_financed = _cat15.get("financed_emissions")
     if _cat15_financed is not None:
-        # ¶B58-B63 also requires the % of gross exposure covered. Gross-exposure
-        # capture is a follow-up; flag its absence honestly rather than omit silently.
-        _cat15_financed = {**_cat15_financed,
-                           "gross_exposure_disclosure": "REQUIRED by IFRS S2 ¶B58-B63 — "
-                           "supply gross exposure to report % covered (not yet captured)"}
+        # ¶B58-B63: financed emissions must be disclosed WITH the gross exposure and
+        # the % of it they cover — a financed figure without its exposure denominator
+        # is not interpretable. Now that gross exposure is capturable, its absence
+        # blocks rather than being silently omitted.
+        if _cat15_financed.get("gross_exposure_total") is None:
+            blockers.append("IFRS S2 Cat 15 (¶B58-B63): financed emissions disclosed without "
+                            "gross exposure — set gross_exposure_total on the Cat 15 Scope 3 "
+                            "declaration so the % of exposure covered can be reported")
 
     ef_sources = run_factor_sources(db, run)
     dq = s.get("data_quality") or {}

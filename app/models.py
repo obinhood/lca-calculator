@@ -532,6 +532,10 @@ class Scope3CategoryDeclaration(Base):
     method_description = Column(Text, nullable=True)    # required: included
     calculation_tools = Column(Text, nullable=True)
     primary_data_pct = Column(Float, nullable=True)
+    # IFRS S2 ¶B58-B63 (Cat 15 only): the financial institution's gross exposure, so
+    # the % of exposure covered by the reported financed emissions can be disclosed.
+    gross_exposure_total = Column(Float, nullable=True)
+    gross_exposure_currency = Column(String, nullable=True)
     screened_at = Column(String, nullable=False)        # ISO date — drives the 3-year clock
     declared_by = Column(String, nullable=True)
     standard_version = Column(String, nullable=False, default="ghgp-scope3-2011")
@@ -569,6 +573,8 @@ class RunScope3Declaration(Base):
     method_description = Column(Text, nullable=True)
     calculation_tools = Column(Text, nullable=True)
     primary_data_pct = Column(Float, nullable=True)
+    gross_exposure_total = Column(Float, nullable=True)
+    gross_exposure_currency = Column(String, nullable=True)
     screened_at = Column(String, nullable=True)
     ghgp_standard_version = Column(String, nullable=False)
     frozen_at = Column(String, nullable=False)

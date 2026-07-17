@@ -225,6 +225,61 @@ def test_double_count_gross_is_not_summed(db):
     assert inv["totals"]["scope3_gross_kg"] is None   # not a double-counted number
 
 
+def test_s2_blocks_cat15_without_gross_exposure(db):
+    """IFRS S2 B58-B63: financed emissions without their exposure denominator are
+    not interpretable — the disclosure must block, not silently omit it."""
+    from app.reports.issb_s2 import issb_s2_report
+    org = _org(db)
+    _act(db, org.id, _factor(db).id)
+    _pos(db, org.id, s1=1.0)
+    run, _p = ready_run(db, org.id)          # screens all 15, but sets no gross exposure
+    r = issb_s2_report(db, org.id, run_id=run.id)
+    assert r["disclosure_ready"] is False
+    assert any("gross exposure" in b for b in r["blockers"])
+
+
+def test_s2_gross_exposure_unblocks_and_reports_pct_covered(db):
+    from app.reports.issb_s2 import issb_s2_report
+    org = _org(db)
+    _act(db, org.id, _factor(db).id)
+    _pos(db, org.id, s1=1.0, outstanding=100.0)      # 100 of exposure, has investee data
+    run, p = ready_run(db, org.id)
+    # declare the gross exposure on the Cat 15 screen, then recompute to freeze it
+    d = db.query(Scope3CategoryDeclaration).filter_by(
+        organisation_id=org.id, reporting_period_id=p.id, category=15).first()
+    d.gross_exposure_total = 1000.0
+    d.gross_exposure_currency = "GBP"
+    db.commit()
+    run2 = compute_co2e(db, org.id, reporting_period_id=p.id)
+    r = issb_s2_report(db, org.id, run_id=run2.id)
+    assert r["disclosure_ready"] is True
+    fin = r["ghg_emissions_tco2e"]["scope3_cat15_financed"]
+    assert fin["gross_exposure_total"] == pytest.approx(1000.0)
+    assert fin["gross_exposure_currency"] == "GBP"
+    assert fin["exposure_covered"] == pytest.approx(100.0)
+    assert fin["pct_gross_exposure_covered"] == pytest.approx(10.0)   # 100 / 1000
+
+
+def test_gross_exposure_is_frozen_onto_the_run(db):
+    """A later edit to the live screen must not change a filed run's disclosure."""
+    org = _org(db)
+    _act(db, org.id, _factor(db).id)
+    _pos(db, org.id, s1=1.0, outstanding=100.0)
+    run, p = ready_run(db, org.id)
+    d = db.query(Scope3CategoryDeclaration).filter_by(
+        organisation_id=org.id, reporting_period_id=p.id, category=15).first()
+    d.gross_exposure_total = 1000.0
+    db.commit()
+    filed = compute_co2e(db, org.id, reporting_period_id=p.id)
+    before = scope3_by_ghgp_category(db, filed)["categories"]["15"][
+        "financed_emissions"]["pct_gross_exposure_covered"]
+    d.gross_exposure_total = 50_000.0          # restate the live screen after filing
+    db.commit()
+    after = scope3_by_ghgp_category(db, filed)["categories"]["15"][
+        "financed_emissions"]["pct_gross_exposure_covered"]
+    assert after == before == pytest.approx(10.0)   # the FILED run is unchanged
+
+
 def test_non_fi_run_is_unaffected(db):
     org = _org(db, "PlainCo")
     _act(db, org.id, _factor(db).id)
