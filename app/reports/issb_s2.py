@@ -24,6 +24,7 @@ from ..models import CalculationRun
 from .summary import summary, run_factor_sources
 from .scope3 import category_tco2e
 from ..services.ghgp import scope3_completeness
+from ..services.boundary import boundary_completeness
 
 JURISDICTION_PROFILES = {
     "ISSB": {
@@ -105,6 +106,8 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     # IFRS S2 ¶29(a)(vi): disclose the Scope 3 categories included. Screen all 15.
     s3gate = scope3_completeness(db, run)
     blockers.extend(s3gate.get("blockers", []))
+    # GHG Protocol Ch.3 boundary (S2 29(a)(iv) disaggregation depends on it).
+    blockers.extend(boundary_completeness(db, run).get("blockers", []))
 
     # Cat 15 financed emissions (frozen) roll into the disclosed Scope 3 / totals.
     _financed_tco2e = (run.financed_co2e or 0.0) / 1000.0

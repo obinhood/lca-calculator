@@ -140,6 +140,8 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             "spend_based_share_pct": round(100.0 * method_split.get("spend_based", 0.0)
                                            / total_methods, 2) if total_methods else 0.0,
         },
+        # GHG Protocol Ch.3 organisational boundary, from the run's FROZEN snapshot.
+        "consolidation": _consolidation(db, run),
         "data_quality": _data_quality(db, run, li),
         # GHG Protocol Scope 3 by the 15 categories, from frozen lineage.
         "scope3_ghgp": _scope3_ghgp(db, run),
@@ -157,6 +159,59 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         "exclusions": json.loads(run.notes or "[]"),
         "notes": "Quantities are unit-converted to factor units; incompatible units are "
                  "rejected (not guessed). Scope 2 is dual-reported (location + market).",
+    }
+
+
+def _consolidation(db: Session, run: CalculationRun) -> dict:
+    """The run's frozen GHGP Ch.3 boundary + the S2 29(a)(iv) disaggregation.
+
+    Built ONCE here so every renderer reads the same numbers. Reads only frozen state.
+    """
+    from ..models import RunEntityBoundary
+    from ..services.boundary import boundary_completeness
+    if not run.boundary_version:
+        return {"assessable": False,
+                "note": "This run predates the GHGP organisational-boundary dimension — "
+                        "recompute. It is deliberately NOT rendered as a clean "
+                        "'operational_control, 100%' claim it never made."}
+    rows = db.query(RunEntityBoundary).filter(
+        RunEntityBoundary.run_id == run.id).order_by(RunEntityBoundary.id).all()
+    g = boundary_completeness(db, run)
+    # IFRS S2 29(a)(iv): Scope 1+2 split between the consolidated accounting group and
+    # other investees — a FINANCIAL-statement split, not the GHGP category.
+    disagg = {}
+    for r in rows:
+        b = disagg.setdefault(r.group_class, {"consolidated_co2e_kg": 0.0, "entities": []})
+        b["consolidated_co2e_kg"] += r.consolidated_co2e
+        b["entities"].append(r.entity_name)
+    return {
+        "assessable": True,
+        "approach": run.consolidation_approach,
+        "boundary_version": run.boundary_version,
+        "reason_for_choice": run.consolidation_reason,
+        # Gross emissions the boundary EXCLUDED. Never in total_co2e, and never added
+        # to the disclosed total either — it is a different measure, not a missing
+        # addend (adding an equity-excluded associate's gross back is exactly the
+        # double count Scope 3 Cat 15 exists to avoid).
+        "excluded_by_boundary_kg": run.total_co2e_non_consolidated,
+        "entities": [{
+            "entity_key": r.entity_key, "name": r.entity_name,
+            "accounting_category": r.accounting_category,
+            "share_factor": r.share_factor, "share_basis": r.share_basis,
+            "resolved": r.resolved, "group_class": r.group_class,
+            "gross_co2e_kg": round(r.gross_co2e, 6),
+            "consolidated_co2e_kg": round(r.consolidated_co2e, 6),
+            "line_count": r.line_count,
+        } for r in rows],
+        "disaggregation_by_accounting_group": {
+            k: {"consolidated_co2e_kg": round(v["consolidated_co2e_kg"], 6),
+                "entities": sorted(v["entities"])} for k, v in disagg.items()},
+        "blockers": g.get("blockers", []),
+        "warnings": g.get("warnings", []),
+        "note": "Each entity's emissions enter the inventory at its share under the "
+                "declared approach. gross -> share -> consolidated is frozen per entity; "
+                "the excluded residual is measured, not re-routed (declare the Scope 3 "
+                "category for excluded operations).",
     }
 
 

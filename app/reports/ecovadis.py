@@ -24,6 +24,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import CalculationRun, EmissionsTarget, MarketInstrument, AssuranceEngagement
+from ..services.boundary import boundary_completeness
 from .summary import summary
 from .secr import _energy_kwh
 
@@ -69,6 +70,9 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
         blockers.append(f"run is PARTIAL — {s['partial_reasons']}")
     if s["coverage"]["stale"]:
         blockers.append("run is STALE — recompute before submitting evidence")
+    # EcoVadis evidence rests on consolidated emissions — an unresolved boundary
+    # means the figures in the evidence pack are not disclosable.
+    blockers.extend(boundary_completeness(db, run).get("blockers", []))
 
     by_scope = {r["scope"]: r["co2e"] for r in s["by_scope"]}
     scope1 = by_scope.get("1", 0.0)
