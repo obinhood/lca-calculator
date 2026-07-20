@@ -289,6 +289,22 @@ def _financed_fingerprint(positions) -> str:
     return "fp-v1:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+# GHG Protocol Land Sector and Removals Guidance — the removals dimension version.
+LSRG_VERSION = "ghgp-lsrg-2022"
+
+
+def _removals_fingerprint(records) -> str:
+    # attribute_retained / credit_registry / credit_serial_if_sold are hashed so a
+    # POST-FILING SALE of an already-filed removal (which R4 only reads from FROZEN
+    # detail) moves the fingerprint and is caught by the forgery gate (R5).
+    parts = sorted(
+        f"{r.id}:{r.removal_category}:{r.method}:{r.scope}:{r.record_kind}:"
+        f"{r.quantity_tco2e}:{r.entity_id}:{r.reverses_record_id}:{r.as_of_date}:"
+        f"{r.attribute_retained}:{r.credit_registry}:{r.credit_serial_if_sold}"
+        for r in records)
+    return "rm-v1:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
 def financed_included_positions(positions, financed_as_of: Optional[str]):
     """The positions that actually feed a run's Cat 15 figure — those at/before the
     as_of cutoff (matching pcaf.portfolio_financed's `<= as_of`). This is the set the
@@ -311,7 +327,9 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                  reporting_period_id: Optional[int] = None,
                  include_financed: Optional[bool] = None,
                  financed_as_of: Optional[str] = None,
-                 financed_include_scope3: bool = True) -> CalculationRun:
+                 financed_include_scope3: bool = True,
+                 include_removals: Optional[bool] = None,
+                 removals_as_of: Optional[str] = None) -> CalculationRun:
     """Create a NEW immutable calculation run for one organisation and return it.
 
     Prior runs are never mutated or deleted (Gap 5), and the calculation is scoped
@@ -784,6 +802,78 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 included = [p for p in all_positions
                             if p.id in {ln["position_id"] for ln in pf["lines"]}]
                 run.financed_fingerprint = _financed_fingerprint(included)
+
+        # --- Inventory REMOVALS (GHG Protocol Land Sector & Removals) ---
+        # A fourth frozen pool on the financed template, but arithmetic INVERTED:
+        # removals SUBTRACT into a render-time net, never touching total_co2e. Removals
+        # occur WITHIN the boundary, so each is weighted by the SAME entity share the
+        # emissions use (else net = consolidated emissions - gross removals mixes bases).
+        from ..models import RemovalRecord, RunRemovalLine
+        rq = db.query(RemovalRecord).filter(
+            RemovalRecord.organisation_id == organisation_id)
+        if reporting_period_id is not None:
+            rq = rq.filter(RemovalRecord.reporting_period_id == reporting_period_id)
+        rem = rq.order_by(RemovalRecord.id).all()
+        if include_removals is None:
+            include_removals = len(rem) > 0
+        if include_removals:
+            run.removals_lsrg_version = LSRG_VERSION      # the dimension WAS evaluated
+            rem_as_of = removals_as_of or (period.end_date if period is not None else None)
+            included_rem = [r for r in rem
+                            if rem_as_of is None or (r.as_of_date or "") <= rem_as_of]
+            if rem and not included_rem:
+                # FALSE-ZERO GUARD: an as_of that excludes every record must NOT freeze
+                # a fabricated clean zero. Leave None so the gate blocks (R2).
+                run.total_removals_co2e = None
+                run.removals_reversed_co2e = None
+                run.removals_as_of = rem_as_of
+                run.removals_fingerprint = None
+            else:
+                gross_rem = 0.0
+                reversed_rem = 0.0
+                for r in included_rem:
+                    _rent = ent_by_id.get(r.entity_id) if r.entity_id is not None else None
+                    if r.entity_id is not None and _rent is None:
+                        _rw, _rbasis, _rres = 1.0, "unresolved_entity_not_found", False
+                    else:
+                        _rw, _rbasis, _rres = entity_weight(approach, _rent)
+                    gross_kg = r.quantity_tco2e * 1000.0
+                    cons_kg = gross_kg * _rw
+                    permanence_class = "high" if r.removal_category == "technological" else "low"
+                    db.add(RunRemovalLine(
+                        run_id=run.id, removal_record_id=r.id,
+                        removal_category=r.removal_category, scope=r.scope,
+                        record_kind=r.record_kind, co2e=cons_kg,
+                        details=json.dumps({
+                            "consolidation": {"entity_id": r.entity_id, "approach": approach,
+                                              "share_factor": _rw, "share_basis": _rbasis,
+                                              "resolved": _rres, "gross_co2e": gross_kg,
+                                              "consolidated_co2e": cons_kg},
+                            "method": r.method,
+                            "quantification_method": r.quantification_method,
+                            "storage_medium": r.storage_medium,
+                            "expected_durability_years": r.expected_durability_years,
+                            "monitoring_method": r.monitoring_method,
+                            "monitoring_period_years": r.monitoring_period_years,
+                            "reversal_accounting": r.reversal_accounting,
+                            "attribute_retained": r.attribute_retained,
+                            "credit_registry": r.credit_registry,
+                            "credit_serial_if_sold": r.credit_serial_if_sold,
+                            "reverses_record_id": r.reverses_record_id,
+                            "uncertainty_pct": r.uncertainty_pct, "buffer_pct": r.buffer_pct,
+                            "vintage_year": r.vintage_year, "as_of_date": r.as_of_date,
+                            "gwp_set": gwp_set, "permanence_class": permanence_class,
+                            "unit_note": "kg (tCO2e x1000); positive removal quantity",
+                            "lsrg_note": "GHG Protocol Land Sector & Removals: reported "
+                                         "separately, never netted into gross total_co2e"})))
+                    if r.record_kind == "reversal":
+                        reversed_rem += cons_kg
+                    else:
+                        gross_rem += cons_kg
+                run.total_removals_co2e = gross_rem
+                run.removals_reversed_co2e = reversed_rem
+                run.removals_as_of = rem_as_of
+                run.removals_fingerprint = _removals_fingerprint(included_rem)
 
         run.status = "complete"
         db.commit()

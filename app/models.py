@@ -519,6 +519,17 @@ class CalculationRun(Base):
     # equity_share_pct 40->100 edit or an approach flip — either changes every number
     # while every run still reports FRESH. This closes that.
     consolidation_fingerprint = Column(String, nullable=True)
+    # --- Inventory REMOVALS (GHG Protocol Land Sector & Removals) ---
+    # KG of the org's OWN gross removals within its boundary (DAC, biochar,
+    # afforestation, ...). Reported SEPARATELY — the fourth disjoint pool alongside
+    # total_biogenic_co2e and financed_co2e. NEVER in total_co2e; "net" is derived at
+    # render time (there is deliberately no net column, so netting is impossible).
+    # NULL = not evaluated (legacy/false-zero); 0.0 = evaluated and genuinely zero.
+    total_removals_co2e = Column(Float, nullable=True)
+    removals_reversed_co2e = Column(Float, nullable=True)   # KG reversals booked this period
+    removals_as_of = Column(String, nullable=True)
+    removals_fingerprint = Column(String, nullable=True)    # detects the live ledger edited after filing
+    removals_lsrg_version = Column(String, nullable=True)   # legacy sentinel (NULL = dimension not evaluated)
     # KG of GROSS emissions EXCLUDED by the boundary: sum of (1 - share) * gross.
     # NEVER in total_co2e (which stays exactly the sum of location line items — the
     # assurer's invariant), and never added to the disclosed total either: unlike
@@ -526,6 +537,79 @@ class CalculationRun(Base):
     # equity-excluded associate's gross back is the double count Cat 15 exists to
     # avoid). NULL = not evaluated (legacy); 0.0 = evaluated, nothing excluded.
     total_co2e_non_consolidated = Column(Float, nullable=True)
+
+
+class RemovalRecord(Base):
+    """A CO2 REMOVAL within the org's boundary (GHG Protocol Land Sector & Removals).
+
+    The org's OWN sequestration — technological (DAC+storage, BECCS, enhanced
+    weathering) or land-based (afforestation, soil carbon, biochar) — NOT a purchased
+    offset credit (that is CarbonCredit, a market instrument) and NOT biogenic-CO2
+    flux. Reported separately from gross emissions, never netted into total_co2e.
+
+    A REVERSAL (a stored removal later re-emitted — a forest burns) is a first-class
+    record: record_kind='reversal', positive quantity, reverses_record_id -> original.
+    It reduces the CURRENT period's net removals; a prior filed run is never restated.
+    """
+    __tablename__ = "removal_records"
+    __table_args__ = (
+        CheckConstraint("quantity_tco2e > 0", name="ck_removal_qty_pos"),
+        CheckConstraint("removal_category IN ('technological','land_based')",
+                        name="ck_removal_category"),
+        CheckConstraint("record_kind IN ('removal','reversal')", name="ck_removal_record_kind"),
+        CheckConstraint("scope IN ('1','3')", name="ck_removal_scope"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    # Bare Integer, NO FK (mirrors ActivityRecord.entity_id): a cross-tenant/dangling
+    # id must resolve to fail-open at compute time, which an FK would forbid.
+    entity_id = Column(Integer, nullable=True, index=True)
+    reporting_period_id = Column(Integer, ForeignKey("reporting_periods.id"), nullable=True)
+    record_kind = Column(String, nullable=False, default="removal")   # removal | reversal
+    reverses_record_id = Column(Integer, ForeignKey("removal_records.id"), nullable=True)
+    removal_category = Column(String, nullable=False)      # technological | land_based
+    method = Column(String, nullable=False)                # dac | beccs | biochar | afforestation | ...
+    scope = Column(String, nullable=False)                 # 1 (own ops) | 3 (value chain)
+    quantity_tco2e = Column(Float, nullable=False)         # > 0 always; sign is carried by record_kind
+    quantification_method = Column(String, nullable=False)  # stock_difference | gain_loss | metered
+    storage_medium = Column(String, nullable=True)
+    expected_durability_years = Column(Integer, nullable=True)
+    monitoring_method = Column(Text, nullable=True)
+    monitoring_period_years = Column(Integer, nullable=True)
+    reversal_accounting = Column(Text, nullable=True)
+    # Removed carbon must not ALSO be sold as a credit (that is a double claim).
+    attribute_retained = Column(Boolean, nullable=False, default=True)
+    credit_registry = Column(String, nullable=True)
+    credit_serial_if_sold = Column(String, nullable=True)  # cross-check vs carbon_credits.serial_number
+    uncertainty_pct = Column(Float, nullable=True)
+    buffer_pct = Column(Float, nullable=True)
+    vintage_year = Column(Integer, nullable=True)
+    as_of_date = Column(String, nullable=True)
+    created_at = Column(String, nullable=True)
+
+
+class RunRemovalLine(Base):
+    """A removal frozen against an immutable run (the RunFinancedLine analogue).
+
+    NOT an EmissionLineItem: a removal is not an activity, and would pollute
+    total_activities / mapped / coverage / fingerprint / DQ. co2e is stored POSITIVE
+    (kg), and a CHECK forbids negatives — a removal can never be smuggled into a total
+    as a negative reduction; it lives in its own positive-signed pool.
+    """
+    __tablename__ = "run_removal_lines"
+    __table_args__ = (
+        UniqueConstraint("run_id", "removal_record_id", name="uq_run_removal_line"),
+        CheckConstraint("co2e >= 0", name="ck_rrl_co2e_nonneg"),
+        CheckConstraint("record_kind IN ('removal','reversal')", name="ck_rrl_record_kind"),
+    )
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
+    removal_record_id = Column(Integer, ForeignKey("removal_records.id"), nullable=False)
+    removal_category = Column(String, nullable=False)      # frozen copy (never joins the live table)
+    scope = Column(String, nullable=False)
+    record_kind = Column(String, nullable=False)
+    co2e = Column(Float, nullable=False)                   # KG, positive (tCO2e x1000 x entity share)
+    details = Column(Text, nullable=False)                 # frozen full lineage
 
 
 class ReportingEntity(Base):
