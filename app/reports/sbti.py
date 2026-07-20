@@ -7,6 +7,7 @@ from ..models import EmissionsTarget, CalculationRun
 from ..services.sbti import (
     run_scoped_emissions_kg, linear_pathway, assess_ambition,
 )
+from ..services.boundary import base_year_recalculation
 
 
 def sbti_report(db: Session, organisation_id: int, target_id: int,
@@ -50,6 +51,11 @@ def sbti_report(db: Session, organisation_id: int, target_id: int,
         elif current.gwp_set != base_run.gwp_set:
             blockers.append(f"current run GWP set {current.gwp_set} != base {base_run.gwp_set}"
                             f" — trajectory across GWP vintages is not comparable")
+        elif (recalc := base_year_recalculation(db, base_run, current)) is not None:
+            # GHG Protocol Ch.5: a change of organisational boundary between the base
+            # year and now makes the trajectory meaningless — the base year must be
+            # recalculated, not compared across (organic growth would be fine).
+            blockers.append(recalc)
         else:
             actual_t = run_scoped_emissions_kg(db, current.id, target.scope_coverage) / 1000.0
             allowed_t = linear_pathway(base_t, target.base_year, target.target_year,
@@ -77,6 +83,7 @@ def sbti_report(db: Session, organisation_id: int, target_id: int,
             "sbti_validated": target.sbti_validated,
         },
         "base": {"run_id": base_run.id, "gwp_set": base_run.gwp_set,
+                 "consolidation_approach": base_run.consolidation_approach,
                  "base_emissions_tco2e": round(base_t, 6)},
         "target_emissions_tco2e": round(target_t, 6),
         "ambition_assessment": ambition,

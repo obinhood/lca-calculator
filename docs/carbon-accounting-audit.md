@@ -98,6 +98,15 @@ paths emitted a materially wrong number while stamping the report
   review caught six issues (incl. a falsy NULL check that silently excluded a 50/50
   JV at 0%, and gross energy disclosed beside consolidated emissions) — all fixed.
 
+- **PR #13** — _GHG Protocol Ch.5 base-year recalculation detection._ An SBTi
+  trajectory measured across two different organisational boundaries is meaningless
+  (like measuring across GWP vintages). The SBTi report now blocks the trajectory when
+  a structural change — approach change, entity acquisition/divestment, or ownership
+  restatement — occurred between the base year and now, and forces a re-base. Organic
+  growth (same entities, more activity) is correctly comparable; detection reads only
+  frozen run state, and a filed run is never restated. Closes the follow-up the
+  consolidation panel flagged as needing to land immediately after PR #12.
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
