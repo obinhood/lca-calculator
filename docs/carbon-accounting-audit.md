@@ -119,6 +119,18 @@ paths emitted a materially wrong number while stamping the report
   review caught two gate defects (a period-scope mismatch that false-blocked a
   fiscal-year-rollover run, and a post-filing-sale escape) — both fixed.
 
+- **PR #15** — _IFRS S2 ¶29(a)(iv) per-scope entity disaggregation._ Repays the debt
+  flagged in PR #12: the boundary froze one all-scope figure per entity, and the
+  disaggregation reported that number under a "Scope 1+2 split" label — a clause it did
+  not satisfy. Scope 1 and Scope 2 (location-based) are now frozen per entity on
+  `run_entity_boundary` and disaggregated between the consolidated accounting group and
+  other investees, so ¶29(a)(iv) is actually met. Scope 2 is fed from the location line
+  once (no market double-count); the headline `total_co2e` is unchanged (frozen columns
+  + render-time split only). Legacy runs (NULL columns) fall back to the all-scope figure
+  with `scope_split_available=False` rather than a silent Scope 1/2 = 0 — fail-closed on
+  disclosure, reproduction contract preserved. Migration additive/nullable/reversible;
+  single head, zero drift. A pre-merge 3-lens adversarial review returned zero findings.
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
