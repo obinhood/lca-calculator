@@ -118,6 +118,16 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
                                         if run.financed_co2e is not None else None),
         # ISO 14067: biogenic CO2 reported separately, never netted into the above.
         "biogenic_co2e_separate": run.total_biogenic_co2e or 0.0,
+        # GHG Protocol Land Sector & Removals: the org's own removals, reported
+        # SEPARATELY. total_co2e (gross) stays the headline; net is derived, never
+        # stored. None when the dimension was not evaluated (distinct from 0.0).
+        "removals_co2e_separate": run.total_removals_co2e,
+        "removals_reversed_co2e": run.removals_reversed_co2e,
+        "net_removals_co2e": ((run.total_removals_co2e - (run.removals_reversed_co2e or 0.0))
+                              if run.total_removals_co2e is not None else None),
+        "net_co2e_after_removals_kg": (
+            (run.total_co2e or 0.0) - (run.total_removals_co2e - (run.removals_reversed_co2e or 0.0))
+            if run.total_removals_co2e is not None else None),
         "by_scope": [{"scope": s or "?", "co2e": v or 0.0} for s, v in by_scope],
         "by_category": [{"category": c or "?", "co2e": v or 0.0} for c, v in by_cat],
         # GHG Protocol Scope 2 Guidance: dual reporting, both bases side by side.

@@ -652,6 +652,92 @@ def get_pcaf_report(include_scope3: bool = True, as_of: Optional[str] = None,
                                                          as_of=as_of)))
 
 
+# --- GHG Protocol Land Sector & Removals: inventory removals ------------------
+
+@app.post("/removals")
+def create_removal(removal_category: str = Query(...), method: str = Query(...),
+                   scope: str = Query(...), quantity_tco2e: float = Query(...),
+                   quantification_method: str = Query(...),
+                   reporting_period_id: Optional[int] = None,
+                   record_kind: str = "removal", reverses_record_id: Optional[int] = None,
+                   entity_id: Optional[int] = None, storage_medium: Optional[str] = None,
+                   expected_durability_years: Optional[int] = None,
+                   monitoring_method: Optional[str] = None,
+                   monitoring_period_years: Optional[int] = None,
+                   reversal_accounting: Optional[str] = None,
+                   attribute_retained: bool = True,
+                   credit_registry: Optional[str] = None, credit_serial_if_sold: Optional[str] = None,
+                   uncertainty_pct: Optional[float] = None, buffer_pct: Optional[float] = None,
+                   vintage_year: Optional[int] = None, as_of_date: Optional[str] = None,
+                   org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Record an inventory carbon removal (GHG Protocol Land Sector & Removals).
+
+    The org's OWN within-boundary sequestration — NOT a purchased offset credit. It is
+    reported separately from gross emissions and never netted into the total. Permanence
+    metadata is disclosed as recorded; a land-based removal without monitoring and
+    reversal accounting blocks the disclosure (it is not reportable).
+    """
+    from .models import RemovalRecord
+    from .services.calc import _utcnow_iso
+    if removal_category not in ("technological", "land_based"):
+        raise HTTPException(status_code=400, detail="removal_category must be technological|land_based")
+    if record_kind not in ("removal", "reversal"):
+        raise HTTPException(status_code=400, detail="record_kind must be removal|reversal")
+    if scope not in ("1", "3"):
+        raise HTTPException(status_code=400, detail="scope must be '1' (own ops) or '3' (value chain)")
+    if quantification_method not in ("stock_difference", "gain_loss", "metered"):
+        raise HTTPException(status_code=400,
+                            detail="quantification_method must be stock_difference|gain_loss|metered")
+    if not math.isfinite(quantity_tco2e) or quantity_tco2e <= 0:
+        raise HTTPException(status_code=400, detail="quantity_tco2e must be finite > 0")
+    if as_of_date is not None and _parse_iso_date(as_of_date) is None:
+        raise HTTPException(status_code=400, detail="as_of_date must be an ISO date")
+    r = RemovalRecord(organisation_id=org.id, entity_id=entity_id,
+                      reporting_period_id=reporting_period_id, record_kind=record_kind,
+                      reverses_record_id=reverses_record_id, removal_category=removal_category,
+                      method=method, scope=scope, quantity_tco2e=quantity_tco2e,
+                      quantification_method=quantification_method, storage_medium=storage_medium,
+                      expected_durability_years=expected_durability_years,
+                      monitoring_method=monitoring_method,
+                      monitoring_period_years=monitoring_period_years,
+                      reversal_accounting=reversal_accounting, attribute_retained=attribute_retained,
+                      credit_registry=credit_registry, credit_serial_if_sold=credit_serial_if_sold,
+                      uncertainty_pct=uncertainty_pct, buffer_pct=buffer_pct,
+                      vintage_year=vintage_year, as_of_date=as_of_date, created_at=_utcnow_iso())
+    db.add(r); db.commit(); db.refresh(r)
+    return {"id": r.id, "removal_category": r.removal_category, "record_kind": r.record_kind,
+            "quantity_tco2e": r.quantity_tco2e,
+            "note": "Recompute the run to freeze it into the inventory."}
+
+
+@app.get("/reports/removals")
+def get_removals_report(run_id: Optional[int] = None,
+                        org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """The inventory-removals statement for a run (gross / removals / net + gate)."""
+    from .reports.summary import _resolve_run
+    from .services.removals import removals_completeness
+    run = _resolve_run(db, org.id, run_id)
+    if run is None:
+        return JSONResponse({"framework": "GHG Protocol Land Sector & Removals",
+                             "disclosure_ready": False, "blockers": ["no calculation run exists"]})
+    g = removals_completeness(db, run)
+    ready = bool(g.get("assessable")) and not g.get("blockers")
+    return JSONResponse(with_guidance({
+        "framework": "GHG Protocol Land Sector & Removals",
+        "disclosure_ready": ready, "blockers": g.get("blockers", []),
+        "warnings": g.get("warnings", []),
+        "gross_emissions_kg": run.total_co2e,
+        "inventory_removals_kg": run.total_removals_co2e,
+        "reversed_kg": run.removals_reversed_co2e,
+        "net_removals_kg": g.get("net_removals_kg"),
+        "net_emissions_after_removals_kg": (
+            (run.total_co2e or 0.0) - g.get("net_removals_kg", 0.0)
+            if run.total_removals_co2e is not None else None),
+        "note": "Removals are reported SEPARATELY from gross emissions (never netted); "
+                "net is derived. Distinct from purchased offset credits.",
+    }))
+
+
 # --- GHG Protocol Ch.3: the organisational boundary ---------------------------
 
 @app.post("/organisations/consolidation")

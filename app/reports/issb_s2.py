@@ -25,6 +25,7 @@ from .summary import summary, run_factor_sources
 from .scope3 import category_tco2e
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
+from ..services.removals import removals_completeness
 
 JURISDICTION_PROFILES = {
     "ISSB": {
@@ -108,6 +109,7 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     blockers.extend(s3gate.get("blockers", []))
     # GHG Protocol Ch.3 boundary (S2 29(a)(iv) disaggregation depends on it).
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    blockers.extend(removals_completeness(db, run).get("blockers", []))
 
     # Cat 15 financed emissions (frozen) roll into the disclosed Scope 3 / totals.
     _financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
@@ -170,6 +172,16 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             "total_location_based": round(run.total_co2e / 1000.0 + _financed_tco2e, 6),
             "total_market_based": round(run.total_co2e_market / 1000.0 + _financed_tco2e, 6),
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
+            # GHG Protocol Land Sector & Removals: own within-boundary removals, reported
+            # SEPARATELY. total_location_based (gross, ¶29(a)) above is UNCHANGED.
+            "ghg_removals_tco2e": ({
+                "inventory_removals": round(run.total_removals_co2e / 1000.0, 6),
+                "reversals": round((run.removals_reversed_co2e or 0.0) / 1000.0, 6),
+                "net_removals": round((run.total_removals_co2e
+                                       - (run.removals_reversed_co2e or 0.0)) / 1000.0, 6),
+                "note": "Own removals within the boundary (GHGP LSRG); never netted into "
+                        "the gross totals above. ¶36 target-reliance disclosure pending.",
+            } if run.total_removals_co2e is not None else None),
             "gwp_source": f"IPCC {run.gwp_set} GWP-100",
         },
         "not_covered": NOT_COVERED,

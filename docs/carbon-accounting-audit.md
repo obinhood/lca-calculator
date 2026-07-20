@@ -46,7 +46,7 @@ paths emitted a materially wrong number while stamping the report
 |---|---|
 | A. Scope 3 never structured into the 15 GHG-Protocol categories | ✅ Fixed (PR #7) |
 | B. Financed emissions (PCAF = Cat 15) never roll into the entity total | ✅ Fixed (PR #9) |
-| C. No inventory line for removals (DAC, biochar, afforestation) | ⬜ Open |
+| C. No inventory line for removals (DAC, biochar, afforestation) | ✅ Fixed (PR #14) |
 | Temporal straddle proration; float accumulation vs neutrality threshold; GLEC not truly modelled | ⬜ Open |
 
 ## Remediation log
@@ -106,6 +106,18 @@ paths emitted a materially wrong number while stamping the report
   growth (same entities, more activity) is correctly comparable; detection reads only
   frozen run state, and a filed run is never restated. Closes the follow-up the
   consolidation panel flagged as needing to land immediately after PR #12.
+
+- **PR #14** — _Inventory removals (GHG Protocol Land Sector & Removals)._ A fourth
+  frozen pool (`RemovalRecord` / `RunRemovalLine` / `total_removals_co2e`) for the
+  org's OWN within-boundary sequestration — technological or land-based — reported
+  SEPARATELY from gross emissions (never in `total_co2e`; net is render-time only),
+  distinct from purchased offset credits and from biogenic CO2. Weighted by the
+  organisational-boundary entity share; reversals reduce the current period's net
+  without restating a filed run. Fail-closed gate: a land-based removal with no
+  monitoring/reversal basis blocks, a tonne also sold as a credit blocks, permanence
+  is never overclaimed. Designed by a 3-way panel + judge; a pre-merge adversarial
+  review caught two gate defects (a period-scope mismatch that false-blocked a
+  fiscal-year-rollover run, and a post-filing-sale escape) — both fixed.
 
 ## Strengths worth preserving
 

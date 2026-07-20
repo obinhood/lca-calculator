@@ -30,6 +30,7 @@ from .summary import summary, run_factor_sources
 from .secr import _energy_kwh
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
+from ..services.removals import removals_completeness
 
 NOT_COVERED = [
     "E1-1 transition plan for climate change mitigation",
@@ -59,16 +60,49 @@ def _e1_7(db: Session, run: CalculationRun, as_of: Optional[str] = None) -> dict
     applied = q.all()
     removals = sum(c.quantity_tco2e for c in applied if c.credit_type == "removal")
     credits = sum(c.quantity_tco2e for c in applied)
+
+    # E1-7 ¶56-59 mandates THREE distinct pools: gross emissions != INVENTORY removals
+    # (the org's own within-boundary sequestration) != PURCHASED credits (market
+    # instruments). Inventory removals come from the frozen removals pool.
+    from ..models import RunRemovalLine
+    rlines = db.query(RunRemovalLine).filter(RunRemovalLine.run_id == run.id).all()
+    own = sum(l.co2e for l in rlines if l.scope == "1" and l.record_kind == "removal") / 1000.0
+    vc = sum(l.co2e for l in rlines if l.scope == "3" and l.record_kind == "removal") / 1000.0
+    reversals = (run.removals_reversed_co2e or 0.0) / 1000.0
+    by_cat = {}
+    for l in rlines:
+        if l.record_kind == "removal":
+            by_cat[l.removal_category] = by_cat.get(l.removal_category, 0.0) + l.co2e / 1000.0
+    inventory_removals = ({
+        "own_operations_tco2e": round(own, 6),
+        "value_chain_tco2e": round(vc, 6),
+        "reversals_tco2e": round(reversals, 6),
+        "net_removals_tco2e": round(own + vc - reversals, 6),
+        "by_category_tco2e": {k: round(v, 6) for k, v in by_cat.items()},
+        "as_of": run.removals_as_of,
+        "note": "Own within-boundary removals (GHG Protocol Land Sector & Removals). "
+                "Reported SEPARATELY — NOT counted toward gross emissions or gross-"
+                "reduction targets (E1-7 ¶56-57).",
+    } if run.total_removals_co2e is not None else {"evaluated": False})
     return {
+        # NEW: inventory removals — the org's own sequestration, distinct from credits.
+        "inventory_removals": inventory_removals,
+        # Purchased/retired carbon credits (market instruments), distinct from the above.
+        "purchased_credits": {
+            "removals_retired_tco2e": round(removals, 6),
+            "credits_retired_total_tco2e": round(credits, 6),
+            "credit_count": len(applied),
+            "as_of": as_of,
+            "note": "PURCHASED credits retired against this run (ISO 14068). A removal-type "
+                    "credit is a market instrument, distinct from an inventory removal above.",
+        },
+        # Back-compat keys (purchased credits), retained so existing consumers don't break.
         "removals_retired_tco2e": round(removals, 6),
         "credits_retired_total_tco2e": round(credits, 6),
         "credit_count": len(applied),
         "as_of": as_of,
-        "note": ("Retired credits applied to this run (ISO 14068 accounting). "
-                 "Not netted into gross emissions; disclosed separately per ESRS E1-7. "
-                 "Credits ledger is live — pass as_of to freeze this section for a filing."
-                 if applied else
-                 "No GHG removals or carbon credits recorded for this run."),
+        "note": ("Three separate pools: gross emissions, inventory removals, purchased "
+                 "credits — none netted into the gross total (E1-7 ¶56-59)."),
     }
 
 
@@ -126,6 +160,8 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     # GHG Protocol Ch.3: the consolidation boundary determines what share of each
     # entity is in these figures — an unresolved boundary cannot be disclosed.
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    # GHG Protocol Land Sector & Removals: an unresolved/unpermanent removal blocks.
+    blockers.extend(removals_completeness(db, run).get("blockers", []))
 
     # E1-5: ESRS reports energy in MWh, bounded to own operations (Scope 1/2
     # line items) — unlike SECR's deliberately scope-agnostic UK energy figure.
@@ -214,6 +250,13 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             "total_location_based": round(total_loc_disclosed, 6),
             "total_market_based": round(total_mkt_disclosed, 6),
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
+            # E1-7 ¶56-57: removals reported separately, NOT deducted from gross or
+            # gross-reduction targets — the net line is additional information only.
+            "inventory_removals_tco2e": (round(run.total_removals_co2e / 1000.0, 6)
+                                         if run.total_removals_co2e is not None else None),
+            "net_of_removals_tco2e": (
+                round((run.total_co2e - (run.total_removals_co2e - (run.removals_reversed_co2e or 0.0)))
+                      / 1000.0, 6) if run.total_removals_co2e is not None else None),
             "financed_emissions": ({
                 "included_in_total": True,
                 "tco2e": round(financed_tco2e, 6),
