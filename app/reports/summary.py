@@ -187,13 +187,33 @@ def _consolidation(db: Session, run: CalculationRun) -> dict:
     rows = db.query(RunEntityBoundary).filter(
         RunEntityBoundary.run_id == run.id).order_by(RunEntityBoundary.id).all()
     g = boundary_completeness(db, run)
-    # IFRS S2 29(a)(iv): Scope 1+2 split between the consolidated accounting group and
-    # other investees — a FINANCIAL-statement split, not the GHGP category.
+    # IFRS S2 29(a)(iv): Scope 1 and Scope 2 (location-based) disaggregated between the
+    # consolidated accounting group and other investees — a FINANCIAL-statement split,
+    # not the GHGP category. The per-scope figures are only trustworthy when the run
+    # FROZE them; a run predating this dimension has NULL scope columns, so we fall back
+    # to the all-scope figure and flag scope_split_available=False rather than report a
+    # silent 0 for Scope 1/2 (fail-closed-on-disclosure).
+    scope_split = bool(rows) and all(
+        r.scope1_consolidated_co2e is not None for r in rows)
     disagg = {}
     for r in rows:
-        b = disagg.setdefault(r.group_class, {"consolidated_co2e_kg": 0.0, "entities": []})
+        b = disagg.setdefault(r.group_class, {
+            "consolidated_co2e_kg": 0.0, "scope1_co2e_kg": 0.0,
+            "scope2_location_co2e_kg": 0.0, "entities": []})
         b["consolidated_co2e_kg"] += r.consolidated_co2e
+        b["scope1_co2e_kg"] += (r.scope1_consolidated_co2e or 0.0)
+        b["scope2_location_co2e_kg"] += (r.scope2_consolidated_co2e or 0.0)
         b["entities"].append(r.entity_name)
+
+    def _disagg_bucket(v):
+        out = {"consolidated_all_scopes_co2e_kg": round(v["consolidated_co2e_kg"], 6),
+               "entities": sorted(v["entities"])}
+        if scope_split:
+            out["scope1_co2e_kg"] = round(v["scope1_co2e_kg"], 6)
+            out["scope2_location_co2e_kg"] = round(v["scope2_location_co2e_kg"], 6)
+            out["scope1_2_co2e_kg"] = round(
+                v["scope1_co2e_kg"] + v["scope2_location_co2e_kg"], 6)
+        return out
     return {
         "assessable": True,
         "approach": run.consolidation_approach,
@@ -214,8 +234,13 @@ def _consolidation(db: Session, run: CalculationRun) -> dict:
             "line_count": r.line_count,
         } for r in rows],
         "disaggregation_by_accounting_group": {
-            k: {"consolidated_co2e_kg": round(v["consolidated_co2e_kg"], 6),
-                "entities": sorted(v["entities"])} for k, v in disagg.items()},
+            k: _disagg_bucket(v) for k, v in disagg.items()},
+        # IFRS S2 ¶29(a)(iv) is a Scope 1 / Scope 2 split; True only when the run froze
+        # the per-scope figures. Legacy runs expose all-scope totals with this False.
+        "disaggregation_scope_split_available": scope_split,
+        "disaggregation_basis": (
+            "scope1_and_scope2_location_ifrs_s2_29a_iv" if scope_split
+            else "all_scopes_only_run_predates_per_scope_freeze"),
         "blockers": g.get("blockers", []),
         "warnings": g.get("warnings", []),
         "note": "Each entity's emissions enter the inventory at its share under the "

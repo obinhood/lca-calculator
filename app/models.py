@@ -709,6 +709,14 @@ class RunEntityBoundary(Base):
     group_class = Column(String, nullable=False)
     gross_co2e = Column(Float, nullable=False)         # KG, before the share
     consolidated_co2e = Column(Float, nullable=False)  # KG, after the share
+    # IFRS S2 ¶29(a)(iv): the Scope 1 / Scope 2 (location-based) split, per entity,
+    # so the disaggregation between the consolidated group and other investees can be
+    # reported PER SCOPE (the clause asks for Scope 1 and Scope 2, not all-scope).
+    # NULL only on runs frozen before this dimension existed — the summary falls back
+    # to the all-scope figure and flags the scope split unavailable (reproduction
+    # contract: a legacy run renders exactly what it froze, never a back-filled claim).
+    scope1_consolidated_co2e = Column(Float, nullable=True)   # KG, after the share
+    scope2_consolidated_co2e = Column(Float, nullable=True)   # KG, after the share, location-based
     line_count = Column(Integer, nullable=False, default=0)
     boundary_version = Column(String, nullable=False)
     frozen_at = Column(String, nullable=False)

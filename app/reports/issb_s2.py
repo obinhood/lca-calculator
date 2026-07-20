@@ -127,6 +127,7 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
 
     ef_sources = run_factor_sources(db, run)
     dq = s.get("data_quality") or {}
+    _cons = s.get("consolidation") or {}
     s3inv = s.get("scope3_ghgp") or {}
     scope3_cats = category_tco2e(s3inv)
     scope3_categories_included = (
@@ -184,6 +185,15 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             } if run.total_removals_co2e is not None else None),
             "gwp_source": f"IPCC {run.gwp_set} GWP-100",
         },
+        # IFRS S2 ¶29(a)(iv): Scope 1 and Scope 2 disaggregated between the consolidated
+        # accounting group and other investees. Read straight from the frozen boundary
+        # (summary._consolidation) so it agrees with every other renderer.
+        "scope1_2_disaggregation_29a_iv": {
+            "by_accounting_group": _cons.get("disaggregation_by_accounting_group"),
+            "scope_split_available": _cons.get("disaggregation_scope_split_available"),
+            "basis": _cons.get("disaggregation_basis"),
+            "approach": _cons.get("approach"),
+        } if _cons.get("assessable") else None,
         "not_covered": NOT_COVERED,
         "method_split": s["method_split"],
         "data_quality": dq,
