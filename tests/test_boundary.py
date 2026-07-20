@@ -386,3 +386,80 @@ def test_legacy_run_is_not_assessable(db):
     g = boundary_completeness(db, run)
     assert g["assessable"] is False
     assert summary(db, organisation_id=org.id, run_id=run.id)["consolidation"]["assessable"] is False
+
+
+# --- IFRS S2 ¶29(a)(iv) per-scope disaggregation ------------------------------
+
+def _gas_factor(db, value=0.2):
+    f = EmissionFactor(source="T", version="1", geography="GB", year=2024, category="gas",
+                       subcategory="", unit="kWh", gwp_set="AR6", value=value)
+    db.add(f); db.commit(); db.refresh(f)
+    return f
+
+
+def _gas_act(db, org_id, factor_id, entity_id=None, kwh=1000.0):
+    a = ActivityRecord(organisation_id=org_id, date="2025-06-01", category="gas",
+                       subcategory="", description="", quantity=kwh, unit="kWh",
+                       geo="GB", factor_id=factor_id, entity_id=entity_id)
+    db.add(a); db.commit(); db.refresh(a)
+    return a
+
+
+def test_29a_iv_splits_scope1_and_scope2_by_accounting_group(db):
+    """IFRS S2 ¶29(a)(iv) is a Scope 1 / Scope 2 split — not the all-scope figure the
+    disaggregation used to report. Scope 2 is on the CONSOLIDATED location basis and
+    reconciles, group by group, to the run total."""
+    org = _org(db, approach="equity_share")
+    jv = _entity(db, org.id, equity_share_pct=40.0, joint_financial_control=True,
+                 equity_share_basis="40% of the ordinary shares per the JV agreement.")
+    elec = _factor(db, 0.5).id                       # electricity -> Scope 2
+    gas = _gas_factor(db, 0.2).id                     # gas -> Scope 1
+    # Reporting org (self, consolidated group, weight 1.0)
+    _act(db, org.id, elec, entity_id=None, kwh=1000)          # 500 kg S2
+    _gas_act(db, org.id, gas, entity_id=None, kwh=1000)       # 200 kg S1
+    # JV (other investee, weight 0.40)
+    _act(db, org.id, elec, entity_id=jv.id, kwh=1000)         # 500 gross -> 200 S2
+    _gas_act(db, org.id, gas, entity_id=jv.id, kwh=1000)      # 200 gross -> 80 S1
+    run = compute_co2e(db, org.id)
+
+    c = summary(db, organisation_id=org.id, run_id=run.id)["consolidation"]
+    assert c["disaggregation_scope_split_available"] is True
+    assert c["disaggregation_basis"] == "scope1_and_scope2_location_ifrs_s2_29a_iv"
+    d = c["disaggregation_by_accounting_group"]
+    grp = d["consolidated_accounting_group"]
+    assert grp["scope1_co2e_kg"] == pytest.approx(200.0)
+    assert grp["scope2_location_co2e_kg"] == pytest.approx(500.0)
+    assert grp["scope1_2_co2e_kg"] == pytest.approx(700.0)
+    inv = d["other_investee"]
+    assert inv["scope1_co2e_kg"] == pytest.approx(80.0)       # 200 * 0.40
+    assert inv["scope2_location_co2e_kg"] == pytest.approx(200.0)   # 500 * 0.40
+    assert inv["scope1_2_co2e_kg"] == pytest.approx(280.0)
+    # The per-scope split reconciles to the consolidated run total (location basis).
+    assert grp["scope1_2_co2e_kg"] + inv["scope1_2_co2e_kg"] == pytest.approx(run.total_co2e)
+    # And the ISSB report — the clause's own renderer — surfaces the same numbers.
+    from app.reports.issb_s2 import issb_s2_report
+    r = issb_s2_report(db, org.id, run_id=run.id)
+    dd = r["scope1_2_disaggregation_29a_iv"]
+    assert dd["scope_split_available"] is True
+    assert dd["by_accounting_group"]["other_investee"]["scope1_2_co2e_kg"] == pytest.approx(280.0)
+
+
+def test_29a_iv_falls_back_for_a_run_frozen_before_the_per_scope_columns(db):
+    """Reproduction contract: a run whose boundary rows never froze the per-scope split
+    (NULL columns) must NOT report a silent Scope 1/2 of 0 — it falls back to the
+    all-scope figure and flags scope_split_available=False."""
+    org = _org(db, approach="equity_share")
+    jv = _entity(db, org.id, equity_share_pct=40.0, joint_financial_control=True)
+    _act(db, org.id, _factor(db, 0.5).id, entity_id=jv.id, kwh=1000)   # 200 kg consolidated
+    run = compute_co2e(db, org.id)
+    # Simulate a legacy freeze: blank the per-scope columns on every boundary row.
+    for r in db.query(RunEntityBoundary).filter(RunEntityBoundary.run_id == run.id).all():
+        r.scope1_consolidated_co2e = None
+        r.scope2_consolidated_co2e = None
+    db.commit()
+    c = summary(db, organisation_id=org.id, run_id=run.id)["consolidation"]
+    assert c["disaggregation_scope_split_available"] is False
+    assert c["disaggregation_basis"] == "all_scopes_only_run_predates_per_scope_freeze"
+    inv = c["disaggregation_by_accounting_group"]["other_investee"]
+    assert inv["consolidated_all_scopes_co2e_kg"] == pytest.approx(200.0)
+    assert "scope1_co2e_kg" not in inv                     # not a silent zero

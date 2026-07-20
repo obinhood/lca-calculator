@@ -492,7 +492,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             co2e = co2e_gross * _w
             total_non_consolidated += (co2e_gross - co2e)
             _b = per_entity.setdefault(_key, {
-                "gross": 0.0, "consolidated": 0.0, "n": 0,
+                "gross": 0.0, "consolidated": 0.0, "scope1": 0.0, "scope2": 0.0, "n": 0,
                 "weight": _w, "basis": _basis, "resolved": _resolved, "entity": _ent})
             _b["gross"] += co2e_gross
             _b["consolidated"] += co2e
@@ -561,6 +561,15 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 scope, scope_source = "3", "assumed_scope3"
             a.scope = scope
             detail["scope_source"] = scope_source
+            # IFRS S2 ¶29(a)(iv) per-entity Scope 1 / Scope 2 split. Uses the same
+            # WEIGHTED (consolidated) co2e that feeds `total` — the location basis, to
+            # match the headline `scope2_location_based`. Accumulated once per activity,
+            # BEFORE the market-based line is built, so a Scope 2 activity is never
+            # double-counted into scope2 here.
+            if scope == "1":
+                _b["scope1"] += co2e
+            elif scope == "2":
+                _b["scope2"] += co2e
 
             # --- GHGP Scope 3 category (frozen; never written back to the activity) ---
             ghgp_cat, ghgp_src, cands = derive_ghgp_category(scope, a.category, a.ghgp_category)
@@ -688,6 +697,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 group_class=group_class(e),
                 gross_co2e=agg.get("gross", 0.0),
                 consolidated_co2e=agg.get("consolidated", 0.0),
+                scope1_consolidated_co2e=agg.get("scope1", 0.0),
+                scope2_consolidated_co2e=agg.get("scope2", 0.0),
                 line_count=agg.get("n", 0),
                 boundary_version=BOUNDARY_VERSION, frozen_at=frozen_at_b,
             ))
@@ -704,6 +715,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 approach=approach, share_factor=agg["weight"], share_basis=agg["basis"],
                 resolved=False, group_class="unclassified",
                 gross_co2e=agg["gross"], consolidated_co2e=agg["consolidated"],
+                scope1_consolidated_co2e=agg.get("scope1", 0.0),
+                scope2_consolidated_co2e=agg.get("scope2", 0.0),
                 line_count=agg["n"],
                 boundary_version=BOUNDARY_VERSION, frozen_at=frozen_at_b,
             ))
