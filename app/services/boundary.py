@@ -132,6 +132,54 @@ def consolidation_fingerprint(approach: Optional[str], reason: Optional[str], en
     return "cons-v1:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def run_entity_boundary_fingerprint(db: Session, run) -> str:
+    """Hash of a run's FROZEN entity DETERMINANTS — the structural shape of its
+    boundary, read from RunEntityBoundary.
+
+    Deliberately excludes 'self', the consolidation REASON, and every emission amount
+    (gross_co2e / consolidated_co2e / line_count): those reflect ORGANIC GROWTH, not a
+    structural change. It captures exactly what GHGP Ch.5 treats as a base-year
+    recalculation trigger — entities acquired/divested and ownership/control restated.
+    """
+    from ..models import RunEntityBoundary
+    rows = db.query(RunEntityBoundary).filter(
+        RunEntityBoundary.run_id == run.id,
+        RunEntityBoundary.entity_key != "self").all()
+    parts = sorted(
+        f"{r.entity_id}:{r.accounting_category}:{r.equity_share_pct}:{r.financial_control}:"
+        f"{r.joint_financial_control}:{r.operational_control}:"
+        f"{r.in_consolidated_accounting_group}:{r.effective_from}:{r.effective_to}"
+        for r in rows)
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def base_year_recalculation(db: Session, base_run, current_run) -> Optional[str]:
+    """A reason the target must be RE-BASED (GHG Protocol Ch.5), or None if the base
+    and current runs sit on a COMPARABLE organisational boundary.
+
+    Organic growth (same entities, more activity) is comparable and returns None. A
+    structural change — a change of consolidation approach, or an entity acquired,
+    divested or restated — is NOT comparable: the base year must be recalculated, and
+    a trajectory measured across it is meaningless (the same failure mode as comparing
+    across GWP vintages). Detection only: a filed run is never restated.
+    """
+    if not base_run.boundary_version or not current_run.boundary_version:
+        return ("the base run or the current run predates the GHGP organisational-boundary "
+                "dimension — recompute both so the trajectory is measured on the same boundary")
+    if base_run.consolidation_approach != current_run.consolidation_approach:
+        return (f"the consolidation approach changed from {base_run.consolidation_approach} "
+                f"(base year) to {current_run.consolidation_approach} (now) — a change to the "
+                f"inventory boundary. GHG Protocol Ch.5: re-base the target; a trajectory is "
+                f"not comparable across consolidation approaches")
+    if (run_entity_boundary_fingerprint(db, base_run)
+            != run_entity_boundary_fingerprint(db, current_run)):
+        return ("the organisational boundary changed between the base year and now — an entity "
+                "was acquired, divested, or its ownership/control restated. GHG Protocol Ch.5: "
+                "this structural change triggers a base-year recalculation; re-base the target "
+                "rather than comparing a trajectory across boundaries (organic growth would not)")
+    return None
+
+
 def boundary_completeness(db: Session, run) -> dict:
     """Blockers + warnings for one run's organisational boundary, from FROZEN state."""
     from ..models import RunEntityBoundary, ReportingEntity, Organisation
