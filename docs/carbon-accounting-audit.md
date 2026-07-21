@@ -172,6 +172,24 @@ paths emitted a materially wrong number while stamping the report
   LOWs on un-versioned token normalisation (loaders strip at ingest; the replay guarantee is
   stated as token-set identity); and integrity proofs moved off `assert` (stripped by `python -O`).
 
+- **PR #21** — _DEFRA Scope-1/2 boundaries restored + the ISO 14083 wheel-side split fixed._
+  Completes the factor-boundary backfill: PR #17 had to withhold `combustion` (Scope 1 fuels)
+  and `generation` (Scope 2 grid) because the then-current vocabulary false-blocked them; the
+  s3bnd-v2 policy removed that block, so they are derived again. Cat 1/2/3 still reject them —
+  a TRUE block (a combustion factor is not a cradle-to-gate goods or upstream-WTT figure).
+  The pre-merge review then confirmed a MEDIUM defect in a SECOND consumer of the same tokens:
+  `lca.py` summed the ISO 14083 tank-to-wheel figure from `combustion` + `tank_to_wheel` only,
+  never `ttw` — the exact token the DEFRA adapter returns for every travel/freight table. The
+  omission was pre-existing, but this change would have made it far worse: a DEFRA-sourced
+  chain used to report `tank_to_wheel: 0.0` (loudly wrong) and would now report a plausible
+  own-fleet-only figure while a whole third-party freight leg vanished, with the well-to-wheel
+  TOTAL still correct — a detectable zero becoming an undetectable partial. Fixed at the token
+  list AND structurally: named `_TTW_BOUNDARIES`/`_WTT_BOUNDARIES` constants so the spellings
+  the codebase emits cannot drift from the split consuming them, and the split now RECONCILES
+  (anything unclassified is surfaced with a `reconciles` flag, so WTT + TTW + unclassified ==
+  the total). `generation`/`td_loss` sit in neither half by design — energy supply, not a
+  wheel-side emission — now visible rather than dropped.
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
