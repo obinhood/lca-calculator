@@ -19,6 +19,7 @@ Governing rules:
   4. A NULL IS NOT A ZERO. Five states, never three.
 """
 import json
+import math
 from typing import Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -256,6 +257,96 @@ BOUNDARY_VERDICT_BASES = ("accepted", "below_minimum", "no_boundary_on_factor",
                           "not_assessable_by_category")
 
 
+# --- Temporal basis for the sale-year / acquisition-year categories (2, 11, 12) -------
+#
+# The engine computes activity x factor FOR THE REPORTING PERIOD. Three categories require
+# a different temporal basis, and the platform CANNOT compute it — it does not know units
+# sold, expected lifetime or use-phase intensity. So it stops treating this as arithmetic
+# and makes it a DECLARATION: a closed, category-scoped enum saying what the reported
+# figure DENOMINATES. Exactly one denominator is conformant per category, so this
+# enumerates a closed set rather than an open method space.
+#
+# Category-scoped on purpose — the three fail in different directions:
+#  * Cat 2's conformant basis STRUCTURALLY FITS the period model (goods acquired in the
+#    period x cradle-to-gate IS activity x factor); there is no lifetime multiplier in a
+#    conformant Cat 2 figure at all, so offering lifetime vocabulary there would be
+#    nonsense a preparer could pick. Its only failure is deliberate amortisation.
+#  * Cat 11 is the ONLY category where the period model genuinely does not fit — and only
+#    for durables, which is why it carries the sole entailment rule.
+#  * Cat 12 has no per-year rate: end-of-life is one-shot. Its failure is a COHORT error
+#    (this period's take-back instead of everything sold), not a lifetime error.
+TEMPORAL_BASIS_VERSION = "s3tmp-v1"
+
+# Pinned under s3tmp-v1. ASYMMETRIC by doctrine: understatement is the failure to prevent,
+# so only a shortfall blocks. A coarse 2x band, never a symmetric tolerance — a real
+# multi-SKU portfolio's weighted averages drift well over 10% from a family-level sum and
+# must not be blocked for it, while no honest averaging error produces a 2x shortfall.
+UNDERSTATEMENT_BLOCK_RATIO = 0.5
+OVERSTATEMENT_WARN_RATIO = 2.0
+SIGNATURE_BAND = 0.05
+SIGNATURE_MIN_LIFETIME_Y = 1.15
+
+# APPEND-ONLY. {category: {token: (conforming, entails_lifetime, why)}}
+TEMPORAL_BASES = {
+    2: {
+        "acquisition_year_full": (
+            True, False,
+            "full cradle-to-gate of capital goods ACQUIRED in the period"),
+        "depreciated_or_amortised": (
+            False, False,
+            "spread over the asset's useful life — understates by roughly 1/life"),
+        "other": (False, False, "a basis this platform's vocabulary does not name"),
+    },
+    11: {
+        "sold_units_full_lifetime": (
+            True, True,
+            "units sold in the period x expected lifetime x per-unit-per-year use"),
+        # DO NOT DROP: a fuel / feedstock / chemical seller's Cat 11 is dissipative — the
+        # product is consumed in a single use, so quantity sold IS quantity used and there
+        # is no lifetime at all. Without this token they would be false-blocked.
+        "sold_quantity_consumed_in_use": (
+            True, False,
+            "the product is consumed in a single use (fuels, feedstocks, chemicals) — "
+            "quantity sold IS quantity used"),
+        "single_period_of_use": (
+            False, False,
+            "one reporting year of use-phase activity — understates by roughly the "
+            "product lifetime"),
+        "installed_base_single_period": (
+            False, False,
+            "one year of the whole installed base — a different metric, not the "
+            "Standard's Cat 11 basis"),
+        "other": (False, False, "a basis this platform's vocabulary does not name"),
+    },
+    12: {
+        "sold_cohort_expected_eol": (
+            True, False,
+            "total expected end-of-life treatment of ALL products SOLD in the period"),
+        "period_actual_eol_processed": (
+            False, False,
+            "only products that actually reached end-of-life this period — understates "
+            "for any growing or steady-state seller"),
+        "other": (False, False, "a basis this platform's vocabulary does not name"),
+    },
+}
+
+# The entailed numbers are demanded by exactly ONE token platform-wide. Proven here so a
+# future append cannot quietly create a second entailing token without updating the
+# entailment CHECK constraint that mirrors it in the database.
+_ENTAILING = tuple(sorted(
+    (c, tok) for c, toks in TEMPORAL_BASES.items()
+    for tok, (_conf, entails, _why) in toks.items() if entails))
+if _ENTAILING != ((11, "sold_units_full_lifetime"),):
+    raise RuntimeError(
+        "temporal basis integrity violated — exactly one token may entail the lifetime "
+        f"numbers (the DB CHECK mirrors it); found {_ENTAILING}")
+
+
+def temporal_bases_for(cat: int) -> dict:
+    """The accepted basis vocabulary for a category; {} when the category has none."""
+    return TEMPORAL_BASES.get(cat, {})
+
+
 def boundary_accepts(cat: int, policy_version: Optional[str] = None,
                      version: Optional[str] = None):
     """Accepted token set for `cat`; None = not assessable from a factor boundary."""
@@ -375,16 +466,60 @@ def is_boilerplate(justification: Optional[str]) -> bool:
     return j.lower() in BOILERPLATE_JUSTIFICATIONS or len(j) < MIN_JUSTIFICATION_CHARS
 
 
-def declarations_fingerprint(decls) -> str:
-    """Hash of the live declaration set, so a run can detect that the screen it
-    froze has since been edited (an exclusion statement must not be forgeable
-    after the fact)."""
+def _fingerprint_v1(decls) -> str:
+    """The ORIGINAL part-string, preserved byte-for-byte.
+
+    Never edit this: every run filed before s3decl-v2 stored a digest produced by exactly
+    this string, and B10 re-derives under the version the run itself recorded. A single
+    character here turns every filed run into a false forgery accusation.
+    """
     import hashlib
     parts = sorted(
         f"{d.category}:{d.status}:{(d.justification or '').strip()}:"
         f"{d.screening_estimate_tco2e}:{d.materiality_threshold_pct}:{d.screened_at}"
         for d in decls)
     return "s3decl-v1:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _fingerprint_v2(decls) -> str:
+    """v1 plus the asserted TEMPORAL BASIS fields.
+
+    Without these in the hash the basis is forgeable-by-edit: a preparer could file a
+    conforming `sold_units_full_lifetime` assertion and then halve the declared lifetime,
+    and B10 would not notice.
+    """
+    import hashlib
+    parts = sorted(
+        f"{d.category}:{d.status}:{(d.justification or '').strip()}:"
+        f"{d.screening_estimate_tco2e}:{d.materiality_threshold_pct}:{d.screened_at}:"
+        f"{getattr(d, 'temporal_basis', None)}:{getattr(d, 'basis_units_sold', None)}:"
+        f"{getattr(d, 'basis_lifetime_years', None)}:"
+        f"{getattr(d, 'basis_per_unit_annual_co2e_kg', None)}"
+        for d in decls)
+    return "s3decl-v2:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+DECLARATION_FINGERPRINT_VERSION = "s3decl-v2"
+_FINGERPRINT_SCHEMES = {"s3decl-v1": _fingerprint_v1, "s3decl-v2": _fingerprint_v2}
+
+
+def declarations_fingerprint(decls, version: Optional[str] = None) -> str:
+    """Hash of the live declaration set, so a run can detect that the screen it froze has
+    since been edited (an exclusion statement must not be forgeable after the fact).
+
+    `version` selects the scheme — B10 passes the version the RUN recorded, so a run filed
+    under s3decl-v1 is still compared against a v1 digest and never falsely accused.
+    """
+    return _FINGERPRINT_SCHEMES[version or DECLARATION_FINGERPRINT_VERSION](decls)
+
+
+def fingerprint_scheme_of(stored: Optional[str]) -> str:
+    """The scheme a stored digest was produced under, read from its own prefix.
+
+    Defaults to v1: every digest written before versions were selectable is a v1 digest.
+    """
+    prefix = (stored or "").split(":", 1)[0]
+    return prefix if prefix in _FINGERPRINT_SCHEMES else "s3decl-v1"
 
 
 # --- The completeness gate ----------------------------------------------------
@@ -416,6 +551,11 @@ def scope3_completeness(db: Session, run) -> dict:
 
     decls = {d.category: d for d in db.query(RunScope3Declaration)
              .filter(RunScope3Declaration.run_id == run.id).all()}
+    # Resolve the taxonomy the RUN was filed under, never the current one — a second
+    # taxonomy cut must not retroactively change what a filed run is judged against.
+    _tax = taxonomy(run.ghgp_standard_version)
+    # NULL => the run predates the temporal-basis requirement (anti-cliff).
+    _basis_version = getattr(run, "scope3_temporal_basis_version", None)
 
     # Frozen Scope 3 lines, grouped by category / source.
     lines_by_cat: dict = {}
@@ -501,7 +641,7 @@ def scope3_completeness(db: Session, run) -> dict:
         if d.status == "included" and boundary_fail.get(c):
             blockers.append(f"category {c} has {boundary_fail[c]} line(s) whose factor does not "
                             f"meet the category's minimum boundary "
-                            f"({taxonomy()[c]['min_boundary']}) — a PARTIAL category, not a "
+                            f"({_tax[c]['min_boundary']}) — a PARTIAL category, not a "
                             f"compliant Cat-{c} figure (GHGP Table 5.4)")
         # W1 — can't assess the boundary. Split by WHY: a factor that carries no
         # lca_boundary is a data gap the org can FIX; a category that is not assessable
@@ -526,12 +666,109 @@ def scope3_completeness(db: Session, run) -> dict:
                                 f"factor boundary for this category ({by_category} line(s)) — it "
                                 f"rests on your declaration and method_description, not on the "
                                 f"factor catalogue")
-        # W2 — the engine's period model does not fit these categories.
-        if d.status == "included" and taxonomy()[c]["sale_year_lifetime"]:
-            warnings.append(f"category {c} is a lifetime/acquisition-year category, but the engine "
-                            f"computes activity x factor for the PERIOD. If the uploaded quantity "
-                            f"is not already the lifetime/acquisition quantity, this figure is "
-                            f"UNDERSTATED — state the treatment in method_description")
+        # --- Temporal basis (Cats 2/11/12) ------------------------------------------
+        # The engine computes activity x factor for the PERIOD; these categories require an
+        # acquisition-year / sale-year-lifetime basis. A run computed BEFORE the assertion
+        # was required carries a NULL version and is only warned — blocking it would gate
+        # every already-filed statement behind a question nobody was asked. This branch is
+        # load-bearing: the gate is re-evaluated at RENDER time on filed runs.
+        if _tax[c]["sale_year_lifetime"] and d.status in ("included", "not_material"):
+            vocab = temporal_bases_for(c)
+            tok = getattr(d, "temporal_basis", None)
+            if _basis_version is None:
+                if d.status == "included":
+                    warnings.append(
+                        f"category {c} is a lifetime/acquisition-year category, but this run "
+                        f"predates the temporal-basis requirement and computes activity x "
+                        f"factor for the PERIOD. If the uploaded quantity is not already the "
+                        f"lifetime/acquisition quantity this figure is UNDERSTATED — recompute "
+                        f"to declare the basis explicitly")
+            elif tok is None:
+                # B15 — unstated basis.
+                blockers.append(
+                    f"category {c} does not state its TEMPORAL BASIS — the engine computes "
+                    f"activity x factor for the PERIOD, which is not this category's basis. "
+                    f"Declare one of {sorted(vocab)}")
+            elif tok not in vocab:
+                # B16 — a token from another category (defence-in-depth behind the API).
+                blockers.append(
+                    f"category {c} declares temporal_basis '{tok}', which is not part of this "
+                    f"category's vocabulary {sorted(vocab)}")
+            elif not vocab[tok][0]:
+                # B17 — an ADMITTED non-conforming basis. Name both exits.
+                blockers.append(
+                    f"category {c} is reported on a NON-CONFORMING temporal basis '{tok}' "
+                    f"({vocab[tok][2]}). The GHG Protocol requires one of "
+                    f"{sorted(k for k, v in vocab.items() if v[0])} — recompute on a "
+                    f"conforming basis, or declare the category not_measured and disclose "
+                    f"the gap honestly")
+            elif vocab[tok][1] and d.status == "included":
+                # B18/B19 apply to `included` only: a not_material screen is an
+                # order-of-magnitude estimate already gated by the seven criteria (B6).
+                nums = {
+                    "basis_units_sold": getattr(d, "basis_units_sold", None),
+                    "basis_per_unit_annual_co2e_kg": getattr(
+                        d, "basis_per_unit_annual_co2e_kg", None),
+                    "basis_lifetime_years": getattr(d, "basis_lifetime_years", None),
+                }
+                missing = [k for k, v in nums.items()
+                           if v is None or not math.isfinite(v) or v <= 0]
+                if missing:
+                    # B18 — the one token that is a claim about numbers must carry them.
+                    blockers.append(
+                        f"category {c} declares '{tok}', which is an arithmetic claim, but "
+                        f"{missing} {'is' if len(missing) == 1 else 'are'} missing — without "
+                        f"them the basis cannot be checked against the filed figure")
+                elif n_lines:
+                    # Guarded on LINE COUNT, never on kg: B8 already blocks
+                    # included-with-no-lines, but a category whose lines SUM TO ZERO under a
+                    # positive lifetime claim is the maximum possible understatement (100%)
+                    # and must still be checked — the old `if filed_kg > 0` guard made that
+                    # the one case the arithmetic never saw.
+                    # LIKE FOR LIKE. The assertion is a PHYSICAL claim about units sold and
+                    # per-unit use — it carries no organisational-boundary share. But every
+                    # EmissionLineItem.co2e is stored CONSOLIDATED (co2e_gross * share, so
+                    # that sum(lines) == total_co2e), so dividing the weighted figure by the
+                    # unweighted product yields implied == share * declared and falsely
+                    # accuses any org selling through a fractionally-held entity. Compare
+                    # against the frozen GROSS instead, falling back to the stored kg for
+                    # pre-boundary lines that carry no consolidation block.
+                    gross_kg = sum(
+                        (dd.get("consolidation") or {}).get("gross_co2e", kg)
+                        for dd, kg in lines_by_cat.get(c, []))
+                    denom = (nums["basis_units_sold"]
+                             * nums["basis_per_unit_annual_co2e_kg"])
+                    declared = nums["basis_lifetime_years"]
+                    if not math.isfinite(denom) or denom <= 0:
+                        # Each operand is validated alone, but their PRODUCT can still
+                        # underflow to 0.0 or overflow to inf. Dividing would raise at
+                        # RENDER time on a filed run — a 500 is worse than any blocker.
+                        blockers.append(
+                            f"category {c}: basis_units_sold x "
+                            f"basis_per_unit_annual_co2e_kg is not a usable number "
+                            f"({denom!r}) — the declared basis cannot be checked against "
+                            f"the filed figure")
+                    else:
+                        implied = gross_kg / denom
+                        if implied < UNDERSTATEMENT_BLOCK_RATIO * declared:
+                            if (abs(implied - 1.0) <= SIGNATURE_BAND
+                                    and declared >= SIGNATURE_MIN_LIFETIME_Y):
+                                blockers.append(
+                                    f"category {c}: the filed figure equals precisely ONE YEAR "
+                                    f"of the {declared}-year lifetime you declared — understated "
+                                    f"by about {declared:g}x. Cat {c} is the FULL expected "
+                                    f"lifetime of products sold in the period")
+                            else:
+                                blockers.append(
+                                    f"category {c}: the filed figure implies a lifetime of "
+                                    f"{implied:.2f} years against the {declared:g} years "
+                                    f"declared — an UNDERSTATEMENT of more than 2x. Either the "
+                                    f"figure is not on the declared basis or the basis is wrong")
+                        elif implied > OVERSTATEMENT_WARN_RATIO * declared:
+                            warnings.append(
+                                f"category {c}: the filed figure implies a lifetime of "
+                                f"{implied:.2f} years against the {declared:g} years declared "
+                                f"— check for double counting (overstatement, so not blocked)")
 
     # B9 — anti-gaming: a category cannot be "not applicable" when the run's own
     # content proves the activity occurs.
@@ -551,7 +788,8 @@ def scope3_completeness(db: Session, run) -> dict:
         live = db.query(Scope3CategoryDeclaration).filter(
             Scope3CategoryDeclaration.organisation_id == run.organisation_id,
             Scope3CategoryDeclaration.reporting_period_id == run.reporting_period_id).all()
-        if declarations_fingerprint(live) != run.scope3_declaration_fingerprint:
+        _scheme = fingerprint_scheme_of(run.scope3_declaration_fingerprint)
+        if declarations_fingerprint(live, _scheme) != run.scope3_declaration_fingerprint:
             blockers.append("the Scope 3 screen has been EDITED since this run froze it — the "
                             "run's exclusion statement no longer matches the live declarations; "
                             "recompute so the filed statement is the one you screened")

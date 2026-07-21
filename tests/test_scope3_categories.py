@@ -483,3 +483,41 @@ def test_policy_integrity_proofs_survive_python_O():
            "g._policy_check(False, 'canary')\n")
     r = subprocess.run([sys.executable, "-O", "-c", src], capture_output=True, text=True)
     assert r.returncode != 0 and "boundary policy integrity violated" in r.stderr
+
+
+def test_temporal_basis_is_validated_at_the_api_boundary(client):
+    """The vocabulary is category-scoped and the entailed numbers mean nothing without the
+    one token that claims them — both enforced before anything is stored."""
+    c, hdr, _ = client
+    pid = c.post("/reporting_periods", params={"label": "FY25", "start_date": "2025-01-01",
+                                               "end_date": "2025-12-31"}, headers=hdr).json()["id"]
+    just = "The entity does not sell products with a use phase in this period."
+    cat11 = {"reporting_period_id": pid, "category": 11,
+             "status": "not_applicable", "justification": just}
+    cat2 = {"reporting_period_id": pid, "category": 2,
+            "status": "not_applicable", "justification": just}
+
+    # A Cat 11 lifetime token is not offerable on Cat 2 — a conforming Cat 2 figure has
+    # no lifetime at all.
+    r = c.post("/scope3/declarations",
+               params={**cat2, "temporal_basis": "sold_units_full_lifetime"}, headers=hdr)
+    assert r.status_code == 400 and "category 2" in r.json()["detail"]
+    # An unknown token is rejected rather than stored as free text.
+    assert c.post("/scope3/declarations",
+                  params={**cat11, "temporal_basis": "whatever"},
+                  headers=hdr).status_code == 400
+    # The entailed numbers are only meaningful with the token that claims them.
+    r = c.post("/scope3/declarations",
+               params={**cat11, "temporal_basis": "sold_quantity_consumed_in_use",
+                       "basis_units_sold": 100.0}, headers=hdr)
+    assert r.status_code == 400 and "sold_units_full_lifetime" in r.json()["detail"]
+    # Non-positive entailed numbers are rejected.
+    assert c.post("/scope3/declarations",
+                  params={**cat11, "temporal_basis": "sold_units_full_lifetime",
+                          "basis_units_sold": 0.0}, headers=hdr).status_code == 400
+    # A well-formed assertion is accepted.
+    assert c.post("/scope3/declarations",
+                  params={**cat11, "temporal_basis": "sold_units_full_lifetime",
+                          "basis_units_sold": 100.0, "basis_lifetime_years": 12.0,
+                          "basis_per_unit_annual_co2e_kg": 1.0},
+                  headers=hdr).status_code == 200

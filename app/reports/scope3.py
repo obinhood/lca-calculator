@@ -139,6 +139,13 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
             "materiality_threshold_pct": d.materiality_threshold_pct if d else None,
             "criteria": json.loads(d.criteria) if (d and d.criteria) else None,
             "method_description": d.method_description if d else None,
+            # Temporal basis (Cats 2/11/12) as FROZEN onto the run.
+            "temporal_basis": (d.temporal_basis if d else None),
+            "temporal_basis_entails": {
+                "units_sold": (d.basis_units_sold if d else None),
+                "lifetime_years": (d.basis_lifetime_years if d else None),
+                "per_unit_annual_co2e_kg": (d.basis_per_unit_annual_co2e_kg if d else None),
+            } if (d and d.temporal_basis) else None,
             "calculation_tools": d.calculation_tools if d else None,
             "method_mix_kg": {k: round(v, 6) for k, v in b["method_mix_kg"].items()},
             # AR 46(g): primary-data share, derived per category from frozen method_type.
@@ -179,6 +186,7 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
         # Which Table 5.4 token vocabulary produced this run's boundary verdicts.
         # `inferred` marks a run computed before the policy was versioned — derivable,
         # but never written back into history.
+        "temporal_basis_version": run.scope3_temporal_basis_version,
         "boundary_policy_version": _bpol[0],
         "boundary_policy_version_inferred": _bpol[1],
         "categories": out,
