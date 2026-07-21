@@ -126,18 +126,190 @@ def category_name(cat: int, version: Optional[str] = None) -> str:
     return taxonomy(version)[cat]["name"]
 
 
-def boundary_meets_minimum(cat: int, lca_boundary: Optional[str]) -> Optional[bool]:
-    """True | False | None(not assessable).
+# --- Factor-boundary acceptance vocabulary (OUR interpretation, versioned apart) ---
+#
+# `accepts_boundary` above is NOT normative GHG Protocol content. The Protocol gives the
+# 15 names, directions and Table 5.4 minimum boundaries as PROSE ("the supplier's scope 1
+# and scope 2"); the mapping from that prose onto OUR `EmissionFactor.lca_boundary` token
+# vocabulary is a platform artifact — exactly the kind of thing CATEGORY_MAP_VERSION
+# already versions separately from the standard it interprets.
+#
+# GHGP_STANDARD_VERSION is deliberately NOT bumped for a vocabulary correction. Bumping it
+# would tell an assurer the GHG Protocol re-cut its categories (it did not), would restamp
+# every Scope3CategoryDeclaration.standard_version via main.py, splitting the declaration
+# ledger across two versions, and would force duplicating all 15 taxonomy entries to change
+# ten token sets. The taxonomy's own `accepts_boundary` keys stay in place, untouched, as
+# the frozen historical mirror that "s3bnd-v1" is asserted equal to at import.
+#
+# What the accepted set MEANS (restated so the next editor does not re-narrow it): tokens
+# that are NOT BELOW the category's minimum boundary FOR THE SOURCE THIS LINE MEASURES. It
+# is a per-line floor check, not a claim that one line covers the whole counterparty's
+# scope 1 + scope 2 — category-wide coverage is asserted by the declaration
+# (`included` + method_description, ESRS AR 46(h)) and policed by B3-B9, not by Table 5.4.
+BOUNDARY_POLICY_VERSION = "s3bnd-v2"
 
-    None when the factor carries no lca_boundary (the DEFRA loader writes None) or
-    the category's minimum boundary isn't checkable from a factor boundary. NEVER
-    silently True — a machine assertion of "minimum boundary met" from absent data
-    would be a lie, and nothing would be checked on day one.
+# The party's own OPERATIONAL emissions for the source the line measures. `ttw` (mobile
+# tailpipe) and `combustion` (stationary burning) are the same semantic tier — scope 1 for
+# that source; `generation` is the scope-2 counterpart. `tank_to_wheel` is an orthographic
+# synonym of `ttw` that lca.py already sums together with `combustion` as one TTW quantity.
+_DIRECT_OPERATIONAL = frozenset({"ttw", "tank_to_wheel", "combustion", "generation"})
+_COMBINED_SCOPE12 = frozenset({"wtw", "scope1_2"})
+_SCOPE12_FAMILY = _DIRECT_OPERATIONAL | _COMBINED_SCOPE12
+# Upstream-ONLY tokens. These may never be admitted to a scope1_2-family category: doing so
+# would let an org claim conformance having measured no operational emissions at all.
+_UPSTREAM_FUEL = frozenset({"well_to_tank", "wtt", "td_loss"})
+
+# Categories whose Table 5.4 minimum is a "<party> scope 1 and 2" bar. These are the ones
+# whose token sets were inconsistent (Cat 4/6/7/9 had `combustion` but not `generation`;
+# Cat 8/13/14 the reverse; Cat 10 neither) even though the bar is identical in kind.
+_SCOPE12_FAMILY_CATS = (4, 5, 6, 7, 8, 9, 10, 12, 13, 14)
+_POLICY_EXTRAS = {5: frozenset({"waste_treatment"}), 12: frozenset({"waste_treatment"})}
+
+
+# Each policy version declares the taxonomy CUT it was authored against. Pinned to the
+# LITERAL, never to GHGP_STANDARD_VERSION: composing a frozen policy from a live pointer
+# would let a future taxonomy version silently rewrite an already-filed policy (or hard-fail
+# import) — precisely the append-only violation this structure exists to prevent. A future
+# policy authored against a new cut adds its own entry here.
+BOUNDARY_POLICY_TAXONOMY = {
+    "s3bnd-v1": "ghgp-scope3-2011",
+    "s3bnd-v2": "ghgp-scope3-2011",
+}
+
+
+def _opset(cat: int, tax_version: str) -> frozenset:
+    """Accepted tokens for a scope1_2-family category, COMPOSED rather than hand-typed.
+
+    Folding in the category's own declared `min_boundary` makes "a factor labelled with the
+    exact Table 5.4 minimum passes" tautologically true, and composing from the shared tier
+    makes the historical asymmetry structurally impossible to re-introduce by hand.
+    `tax_version` is the pinned cut this policy was authored against, never the live one.
     """
-    accepts = taxonomy()[cat]["accepts_boundary"]
-    if accepts is None or not lca_boundary:
+    t = GHGP_TAXONOMIES[tax_version][cat]
+    return frozenset(_SCOPE12_FAMILY | {t["min_boundary"]} | _POLICY_EXTRAS.get(cat, frozenset()))
+
+
+# APPEND-ONLY, same doctrine as GHGP_TAXONOMIES: ADD a version key, never edit one.
+# s3bnd-v1 is written out LITERALLY (not by reference) so the historical vocabulary stays
+# legible forever, and is machine-checked equal to the frozen taxonomy at import.
+BOUNDARY_POLICIES = {
+    "s3bnd-v1": {
+        1: frozenset({"cradle_to_gate", "cradle_to_grave"}),
+        2: frozenset({"cradle_to_gate", "cradle_to_grave"}),
+        3: frozenset({"well_to_tank", "wtt", "td_loss"}),
+        4: frozenset({"ttw", "wtw", "combustion", "scope1_2"}),
+        5: frozenset({"waste_treatment", "ttw", "wtw", "scope1_2"}),
+        6: frozenset({"ttw", "wtw", "combustion", "scope1_2"}),
+        7: frozenset({"ttw", "wtw", "combustion", "scope1_2"}),
+        8: frozenset({"ttw", "wtw", "generation", "scope1_2"}),
+        9: frozenset({"ttw", "wtw", "combustion", "scope1_2"}),
+        10: frozenset({"ttw", "wtw", "scope1_2"}),
+        11: None,
+        12: frozenset({"waste_treatment", "ttw", "wtw", "scope1_2"}),
+        13: frozenset({"generation", "ttw", "wtw", "scope1_2"}),
+        14: frozenset({"generation", "ttw", "wtw", "scope1_2"}),
+        15: None,
+    },
+}
+# v2 corrects ONLY the scope1_2 family; every other category is inherited from v1 VERBATIM.
+# Cat 1/2 (cradle_to_gate bar), Cat 3 (upstream-only bar) and Cat 11/15 (not assessable) are
+# untouched — broadening Cat 3 in particular would be a genuine understatement, since
+# `cradle_to_gate` is the catalogue's most common token and Cat 3's minimum explicitly
+# excludes the combustion the reporter already carries in Scope 1/2.
+BOUNDARY_POLICIES["s3bnd-v2"] = {
+    c: (_opset(c, BOUNDARY_POLICY_TAXONOMY["s3bnd-v2"]) if c in _SCOPE12_FAMILY_CATS
+        else BOUNDARY_POLICIES["s3bnd-v1"][c])
+    for c in CATEGORIES
+}
+
+
+def _policy_check(ok: bool, msg: str) -> None:
+    """Integrity proof. Deliberately NOT `assert`: these guarantees are load-bearing and
+    `python -O` strips assert statements, which would silently remove the drift proofs."""
+    if not ok:
+        raise RuntimeError(f"boundary policy integrity violated — {msg}")
+
+
+# --- Import-time self-proofs. A silent in-place edit of a "frozen" policy fails loudly at
+#     process start rather than quietly at render time. Compared against the PINNED cut each
+#     policy was authored against, so adding a taxonomy version can neither rewrite a filed
+#     policy nor break startup. ---
+for _c in CATEGORIES:
+    _tax = GHGP_TAXONOMIES[BOUNDARY_POLICY_TAXONOMY["s3bnd-v1"]][_c]["accepts_boundary"]
+    _v1 = BOUNDARY_POLICIES["s3bnd-v1"][_c]
+    _policy_check((_tax is None) == (_v1 is None), f"s3bnd-v1 cat {_c} disagrees with the taxonomy")
+    _policy_check(_tax is None or set(_tax) == set(_v1),
+                  f"s3bnd-v1 cat {_c} drifted from the taxonomy it mirrors")
+for _c in _SCOPE12_FAMILY_CATS:
+    _v1, _v2 = BOUNDARY_POLICIES["s3bnd-v1"][_c], BOUNDARY_POLICIES["s3bnd-v2"][_c]
+    # Monotone broadening: no already-compliant line can acquire a NEW blocker.
+    _policy_check(set(_v1) <= set(_v2), f"s3bnd-v2 cat {_c} removed a token — not monotone")
+    # The machine-checkable form of the false-pass argument.
+    _policy_check(not (set(_v2) & _UPSTREAM_FUEL),
+                  f"s3bnd-v2 cat {_c} admits an upstream-only token")
+
+# Why a verdict is what it is. Splits the previously undifferentiated None into a
+# data gap the org can FIX and a limit inherent to the category.
+BOUNDARY_VERDICT_BASES = ("accepted", "below_minimum", "no_boundary_on_factor",
+                          "not_assessable_by_category")
+
+
+def boundary_accepts(cat: int, policy_version: Optional[str] = None,
+                     version: Optional[str] = None):
+    """Accepted token set for `cat`; None = not assessable from a factor boundary."""
+    pv = policy_version or BOUNDARY_POLICY_VERSION
+    # A policy is authored against ONE taxonomy cut. Resolving it against a different cut
+    # would be an unverified claim, so fail closed to "not assessable" (W1), never True.
+    if version is not None and version != BOUNDARY_POLICY_TAXONOMY[pv]:
         return None
-    return lca_boundary.strip().lower() in accepts
+    return BOUNDARY_POLICIES[pv][cat]
+
+
+def boundary_verdict(cat: int, lca_boundary: Optional[str],
+                     policy_version: Optional[str] = None,
+                     version: Optional[str] = None):
+    """(met: bool|None, basis: str, token: str|None) — NEVER silently True.
+
+    `accepts is None` is tested BEFORE `token is None` so a Cat 11/15 line reports the
+    INHERENT `not_assessable_by_category` rather than the fixable `no_boundary_on_factor`.
+    """
+    accepts = boundary_accepts(cat, policy_version, version)
+    token = (lca_boundary or "").strip().lower() or None
+    if accepts is None:
+        return None, "not_assessable_by_category", token
+    if token is None:
+        return None, "no_boundary_on_factor", None
+    met = token in accepts
+    return met, ("accepted" if met else "below_minimum"), token
+
+
+def boundary_meets_minimum(cat: int, lca_boundary: Optional[str],
+                           policy_version: Optional[str] = None,
+                           version: Optional[str] = None) -> Optional[bool]:
+    """True | False | None(not assessable). Thin wrapper over boundary_verdict."""
+    return boundary_verdict(cat, lca_boundary, policy_version, version)[0]
+
+
+def boundary_policy_for_run(run) -> Tuple[Optional[str], bool]:
+    """(policy_version, inferred) for a run.
+
+    A run computed before the policy was versioned carries NULL. That path used exactly one
+    ACCEPTED-TOKEN SET and the import proof pins s3bnd-v1 to it, so the version is derivable —
+    but it is labelled `inferred` at render time and never written back into history.
+
+    Precisely: s3bnd-v1 reproduces the shipped TOKEN-SET membership, not every byte of the
+    old code path. Blank-ish boundary strings are the one divergence — they used to compare
+    as a token matching nothing (verdict False) and now normalise to absent (verdict None,
+    basis `no_boundary_on_factor`). That correction is deliberate and sits OUTSIDE the
+    policy, so it is not carried by the policy version; it only ever loosens a blocker to a
+    warning (never a false pass), and the loaders now strip such values at ingest.
+    """
+    v = getattr(run, "ghgp_boundary_policy_version", None)
+    if v:
+        return v, False
+    if getattr(run, "ghgp_standard_version", None):
+        return "s3bnd-v1", True
+    return None, False          # legacy pre-category run: already has no statement (B1)
 
 
 # --- Derivation ---------------------------------------------------------------
@@ -329,14 +501,29 @@ def scope3_completeness(db: Session, run) -> dict:
                             f"meet the category's minimum boundary "
                             f"({taxonomy()[c]['min_boundary']}) — a PARTIAL category, not a "
                             f"compliant Cat-{c} figure (GHGP Table 5.4)")
-        # W1 — can't assess the boundary at all (factor carries none).
+        # W1 — can't assess the boundary. Split by WHY: a factor that carries no
+        # lca_boundary is a data gap the org can FIX; a category that is not assessable
+        # from a factor boundary at all (Cat 11/15) is inherent, and telling that filer to
+        # "add an lca_boundary" would be advice they cannot act on. Lines frozen before the
+        # basis existed carry no key and fall back to the original (data-gap) reading.
         if d.status == "included" and n_lines:
-            not_assessable = sum(1 for dd, _ in lines_by_cat[c]
-                                 if dd.get("ghgp_min_boundary_met") is None)
-            if not_assessable:
+            no_factor_boundary = sum(
+                1 for dd, _ in lines_by_cat[c]
+                if dd.get("ghgp_min_boundary_met") is None
+                and dd.get("ghgp_boundary_verdict_basis",
+                           "no_boundary_on_factor") == "no_boundary_on_factor")
+            by_category = sum(
+                1 for dd, _ in lines_by_cat[c]
+                if dd.get("ghgp_boundary_verdict_basis") == "not_assessable_by_category")
+            if no_factor_boundary:
                 warnings.append(f"category {c}: minimum boundary NOT ASSESSABLE for "
-                                f"{not_assessable} line(s) — their factors carry no "
+                                f"{no_factor_boundary} line(s) — their factors carry no "
                                 f"lca_boundary; Table 5.4 conformance rests on your declaration")
+            if by_category:
+                warnings.append(f"category {c}: Table 5.4 conformance is NOT ASSESSABLE from a "
+                                f"factor boundary for this category ({by_category} line(s)) — it "
+                                f"rests on your declaration and method_description, not on the "
+                                f"factor catalogue")
         # W2 — the engine's period model does not fit these categories.
         if d.status == "included" and taxonomy()[c]["sale_year_lifetime"]:
             warnings.append(f"category {c} is a lifetime/acquisition-year category, but the engine "
