@@ -136,3 +136,44 @@ def test_lca_is_org_scoped(db):
     r = compute_assessment(db, a)
     assert r["total_co2e_kg"] == pytest.approx(100.0)
     assert db.query(LcaAssessment).filter(LcaAssessment.organisation_id == org_a.id).count() == 0
+
+
+def test_wtw_split_counts_third_party_ttw_legs_and_reconciles(db):
+    """Regression (adversarial review): the ISO 14083 split summed only
+    `combustion` + `tank_to_wheel`, never `ttw` — the very token the DEFRA adapter returns
+    for every travel/freight table. A 3PL freight leg therefore vanished from tank-to-wheel
+    while the well-to-wheel TOTAL stayed correct: a silent understatement of the disclosure."""
+    org = _org(db)
+    f_3pl = _factor(db, "freight", "tkm", 0.55, subcategory="vans", boundary="ttw")
+    f_fleet = _factor(db, "diesel", "L", 2.66155, subcategory="own", boundary="combustion")
+    f_wtt = _factor(db, "diesel", "L", 0.6, subcategory="upstream", boundary="well_to_tank")
+    a = _assess(db, org.id, "iso_14083", fu="1 t.km", fu_qty=1.0)
+    _item(db, a.id, "leg_3pl", 1000, "tkm", f_3pl.id)     # 550.0 — third-party, ttw
+    _item(db, a.id, "leg_fleet", 100, "L", f_fleet.id)    # 266.155 — own fleet, combustion
+    _item(db, a.id, "leg_upstream", 100, "L", f_wtt.id)   # 60.0 — upstream fuel
+    r = compute_assessment(db, a)
+    wtw = r["well_to_wheel_kg"]
+    # BOTH wheel-side legs are counted, not just the own-fleet one.
+    assert wtw["tank_to_wheel"] == pytest.approx(550.0 + 266.155)
+    assert wtw["well_to_tank"] == pytest.approx(60.0)
+    assert wtw["well_to_wheel_total"] == pytest.approx(876.155)
+    # ...and the split ACCOUNTS for the whole total.
+    assert wtw["unclassified"] == pytest.approx(0.0)
+    assert wtw["reconciles"] is True
+
+
+def test_wtw_split_surfaces_unclassified_boundaries_instead_of_dropping_them(db):
+    """The structural fix: a boundary the split does not classify (e.g. grid `generation`
+    on an electric leg) must be VISIBLE, not silently absent from both halves."""
+    org = _org(db)
+    f_ev = _factor(db, "electricity", "kWh", 0.2, boundary="generation")
+    f_fleet = _factor(db, "diesel", "L", 2.0, subcategory="own", boundary="combustion")
+    a = _assess(db, org.id, "iso_14083", fu="1 t.km", fu_qty=1.0)
+    _item(db, a.id, "leg_ev", 100, "kWh", f_ev.id)        # 20.0 — energy supply, not wheel-side
+    _item(db, a.id, "leg_fleet", 10, "L", f_fleet.id)     # 20.0
+    wtw = compute_assessment(db, a)["well_to_wheel_kg"]
+    assert wtw["tank_to_wheel"] == pytest.approx(20.0)
+    assert wtw["well_to_tank"] == pytest.approx(0.0)
+    assert wtw["unclassified"] == pytest.approx(20.0)     # surfaced, not dropped
+    assert wtw["reconciles"] is True
+    assert wtw["well_to_wheel_total"] == pytest.approx(40.0)
