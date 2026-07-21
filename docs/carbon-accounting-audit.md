@@ -131,6 +131,24 @@ paths emitted a materially wrong number while stamping the report
   disclosure, reproduction contract preserved. Migration additive/nullable/reversible;
   single head, zero drift. A pre-merge 3-lens adversarial review returned zero findings.
 
+- **PR #17** — _DEFRA factor `lca_boundary` backfill: Table 5.4 gets teeth._ The DEFRA
+  loader hardcoded `lca_boundary=None` on every row, so every DEFRA-derived factor was
+  "boundary not assessable": the Scope 3 gate could only warn (W1) and the Table 5.4
+  minimum-boundary check (B12) had nothing to compare against. The boundary is now
+  derived from DEFRA's published (Scope, Level 1) structure for the Scope 3 tables —
+  `WTT-*`/T&D → `well_to_tank`/`td_loss` (Cat 3), waste → `waste_treatment` (Cat 5/12),
+  business travel/freighting → `ttw` (Cat 4/6/7/9…), material use → `cradle_to_gate`
+  (Cat 1/2) — and left `None` (honest W1) wherever the structure is ambiguous, mirroring
+  `boundary_meets_minimum`'s "never silently True" doctrine. No taxonomy edit (it is
+  append-only/frozen) and no gate-semantics change. A pre-merge 3-lens adversarial review
+  CONFIRMED a false-block regression in an earlier draft: a factor is scope-AGNOSTIC, so
+  deriving `combustion`/`generation` for Scope-1 fuel and Scope-2 grid factors would be
+  rejected by the other scope1_2-family categories (Cat 8/13/14 reject `combustion`;
+  Cat 4/6/7/9 reject `generation`) whenever such a factor is legitimately used on a
+  Scope-3 leased-asset/franchise/EV line — turning a safe W1 into a false B12 block of a
+  COMPLIANT disclosure. Fixed by leaving those factors boundaryless; captured as a
+  regression test. The false-pass and faithfulness lenses returned zero findings.
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
