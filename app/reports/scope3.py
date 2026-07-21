@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ..models import EmissionLineItem, RunScope3Declaration, RunFinancedLine
 from ..services.ghgp import (
     CATEGORIES, GHGP_TAXONOMIES, UNASSIGNED_SOURCES, scope3_completeness,
+    boundary_policy_for_run,
 )
 
 
@@ -170,10 +171,16 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
     cat15_double_count = financed_kg > 0 and cats[15]["co2e_kg"] > 0
     scope3_gross_kg = (None if cat15_double_count
                        else round(assigned_kg + unassigned["co2e_kg"] + financed_kg, 6))
+    _bpol = boundary_policy_for_run(run)
     return {
         "assessable": True,
         "standard_version": run.ghgp_standard_version,
         "map_version": run.ghgp_map_version,
+        # Which Table 5.4 token vocabulary produced this run's boundary verdicts.
+        # `inferred` marks a run computed before the policy was versioned — derivable,
+        # but never written back into history.
+        "boundary_policy_version": _bpol[0],
+        "boundary_policy_version_inferred": _bpol[1],
         "categories": out,
         "unassigned": unassigned,
         "totals": {

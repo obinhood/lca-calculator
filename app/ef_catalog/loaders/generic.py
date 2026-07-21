@@ -33,10 +33,14 @@ def parse_generic_csv(data: bytes) -> List[FactorRow]:
             year=_i(r.get("year")),
             gwp_set=(r.get("gwp_set") or "AR6").strip(),
             kg_co2=_f(r.get("kg_co2")), kg_ch4=_f(r.get("kg_ch4")), kg_n2o=_f(r.get("kg_n2o")),
-            ch4_origin=(r.get("ch4_origin") or None),
+            # These three are TOKENS compared downstream (ch4_origin routes the GWP
+            # variant; lca_boundary is matched against the Table 5.4 acceptance vocabulary;
+            # price_basis selects the EEIO basis), so they are stripped here — a CSV cell
+            # holding only whitespace is an ABSENT value, not a token that matches nothing.
+            ch4_origin=((r.get("ch4_origin") or "").strip() or None),
             method_type=(r.get("method_type") or "average_data").strip(),
-            lca_boundary=(r.get("lca_boundary") or None),
+            lca_boundary=((r.get("lca_boundary") or "").strip() or None),
             base_year=(_i(r.get("base_year")) or None) if r.get("base_year") else None,
-            price_basis=(r.get("price_basis") or None),
+            price_basis=((r.get("price_basis") or "").strip() or None),
         ))
     return rows

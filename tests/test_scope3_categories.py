@@ -312,3 +312,174 @@ def test_bulk_assign_and_inventory_endpoint(client):
     assert inv["scope3"]["categories"]["5"]["line_count"] == 1
     # still not disclosure_ready — the other 14 categories are undeclared
     assert inv["disclosure_ready"] is False
+
+
+# --- Table 5.4 acceptance vocabulary, versioned apart from the standard (s3bnd-v2) ---
+
+def test_boundary_policy_v1_is_the_frozen_taxonomy_verbatim():
+    """s3bnd-v1 must BE the token sets that shipped — it is the historical record, so
+    replaying a pre-change run under it reproduces the same TOKEN-SET membership.
+    (Blank-ish boundary strings are a deliberate, documented normalisation correction that
+    sits outside the policy; see boundary_policy_for_run.) Proven at import, re-proven here
+    against the PINNED cut, not the live standard version."""
+    from app.services.ghgp import (BOUNDARY_POLICIES, GHGP_TAXONOMIES,
+                                   BOUNDARY_POLICY_TAXONOMY)
+    tax = GHGP_TAXONOMIES[BOUNDARY_POLICY_TAXONOMY["s3bnd-v1"]]
+    for c in range(1, 16):
+        t, v1 = tax[c]["accepts_boundary"], BOUNDARY_POLICIES["s3bnd-v1"][c]
+        assert (t is None) == (v1 is None)
+        assert t is None or set(t) == set(v1)
+
+
+def test_v2_is_a_monotone_broadening_so_no_filed_line_gains_a_blocker():
+    from app.services.ghgp import BOUNDARY_POLICIES
+    for c in range(1, 16):
+        v1, v2 = BOUNDARY_POLICIES["s3bnd-v1"][c], BOUNDARY_POLICIES["s3bnd-v2"][c]
+        assert (v1 is None) == (v2 is None)
+        assert v1 is None or set(v1) <= set(v2)
+
+
+def test_v2_fixes_the_scope12_family_asymmetry():
+    """The defect: identical '<party> scope 1 and 2' bars accepted different direct-emission
+    tokens, so a scope-agnostic factor false-blocked on the 'other' family."""
+    from app.services.ghgp import boundary_meets_minimum as m
+    # A stationary combustion factor on a leased asset / franchise (was False under v1).
+    for cat in (8, 13, 14, 10):
+        assert m(cat, "combustion") is True
+    # A grid-electricity factor on travel/commuting/freight (was False under v1).
+    for cat in (4, 6, 7, 9, 10):
+        assert m(cat, "generation") is True
+    # Every scope1_2-family category now accepts the same direct-operational tier.
+    for cat in (4, 5, 6, 7, 8, 9, 10, 12, 13, 14):
+        for tok in ("ttw", "tank_to_wheel", "combustion", "generation", "wtw", "scope1_2"):
+            assert m(cat, tok) is True, (cat, tok)
+    # ...and a factor labelled with the category's own declared minimum passes tautologically.
+    from app.services.ghgp import taxonomy
+    for cat in (4, 5, 6, 7, 8, 9, 10, 12, 13, 14):
+        assert m(cat, taxonomy()[cat]["min_boundary"]) is True
+
+
+def test_v2_never_admits_an_upstream_only_token_the_false_pass_guard():
+    """The understatement direction. An upstream-only factor must NEVER satisfy a
+    scope1_2-family category, and Cat 3's upstream bar must never accept operational
+    tokens or the catalogue's most common token (cradle_to_gate)."""
+    from app.services.ghgp import boundary_meets_minimum as m
+    for cat in (4, 5, 6, 7, 8, 9, 10, 12, 13, 14):
+        for tok in ("well_to_tank", "wtt", "td_loss", "cradle_to_gate"):
+            assert m(cat, tok) is False, (cat, tok)
+    for tok in ("combustion", "generation", "ttw", "scope1_2", "cradle_to_gate"):
+        assert m(3, tok) is False, tok
+    # Cat 1/2 keep the higher cradle bar.
+    for tok in ("combustion", "generation", "ttw", "waste_treatment"):
+        assert m(1, tok) is False and m(2, tok) is False
+
+
+def test_verdict_basis_separates_a_fixable_gap_from_an_inherent_one():
+    from app.services.ghgp import boundary_verdict
+    assert boundary_verdict(6, "ttw")[1] == "accepted"
+    assert boundary_verdict(6, "wtt")[1] == "below_minimum"
+    assert boundary_verdict(6, None)[1] == "no_boundary_on_factor"
+    # Cat 11/15 are not assessable from a factor boundary AT ALL — reported as the
+    # inherent limit even when the factor does carry a boundary (ordering matters).
+    assert boundary_verdict(11, "combustion")[1] == "not_assessable_by_category"
+    assert boundary_verdict(15, None)[1] == "not_assessable_by_category"
+    # The normalised token is returned for the record.
+    assert boundary_verdict(6, "  TTW ")[2] == "ttw"
+    assert boundary_verdict(6, "  ")[2] is None
+
+
+def test_policy_resolved_against_another_taxonomy_cut_fails_closed():
+    """A policy is written against ONE category cut; resolving it against a different one
+    is an unverified claim -> not assessable (W1), never True."""
+    from app.services.ghgp import boundary_meets_minimum
+    assert boundary_meets_minimum(6, "ttw", None, "ghgp-scope3-2099") is None
+
+
+def test_run_freezes_the_policy_version_and_the_token_it_judged(db):
+    """The verdict was already frozen; its INPUT was not, so an assurer could not
+    re-derive it without joining the live factor table (which the contract forbids)."""
+    org = _org(db)
+    _act(db, org.id, _factor(db, "waste", "kg", 0.5, lca_boundary="waste_treatment").id,
+         "waste", 100, "kg", ghgp_category=5)
+    run, _p = ready_run(db, org.id)
+    assert run.ghgp_boundary_policy_version == "s3bnd-v2"
+    from app.models import EmissionLineItem
+    d = json.loads(db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id, EmissionLineItem.scope == "3").first().details)
+    assert d["ghgp_boundary_policy_version"] == "s3bnd-v2"
+    assert d["ghgp_boundary_token"] == "waste_treatment"
+    assert d["ghgp_boundary_verdict_basis"] == "accepted"
+    assert d["ghgp_min_boundary_met"] is True
+    # Surfaced on the frozen artifact, not inferred.
+    inv = scope3_by_ghgp_category(db, run)
+    assert inv["boundary_policy_version"] == "s3bnd-v2"
+    assert inv["boundary_policy_version_inferred"] is False
+
+
+def test_legacy_run_infers_v1_without_rewriting_history(db):
+    from app.services.ghgp import boundary_policy_for_run
+    org = _org(db)
+    _act(db, org.id, _factor(db, "electricity").id, "electricity", 1000)
+    run, _p = ready_run(db, org.id)
+    run.ghgp_boundary_policy_version = None          # a run frozen before the policy existed
+    db.commit()
+    version, inferred = boundary_policy_for_run(run)
+    assert (version, inferred) == ("s3bnd-v1", True)
+    assert run.ghgp_boundary_policy_version is None  # never back-filled into history
+
+
+def test_adding_a_taxonomy_version_cannot_rewrite_a_filed_policy(monkeypatch):
+    """Regression (adversarial review, MEDIUM): the policy composed its token sets from the
+    LIVE GHGP_STANDARD_VERSION, so performing the append-only extension the module itself
+    prescribes — adding a taxonomy cut and bumping the standard version — silently rewrote
+    the already-filed s3bnd-v2 (or hard-failed import). Policies are now pinned to the cut
+    they were authored against, so a new cut cannot touch them."""
+    import importlib
+    import app.services.ghgp as g
+    before = {c: g.BOUNDARY_POLICIES["s3bnd-v2"][c] for c in range(1, 16)}
+
+    # Append a new taxonomy cut that relabels a min_boundary, and bump the live pointer —
+    # exactly the extension the append-only doctrine invites.
+    new_cut = {c: dict(v) for c, v in g.GHGP_TAXONOMIES["ghgp-scope3-2011"].items()}
+    new_cut[8] = dict(new_cut[8], min_boundary="lessor_scope_1_and_2")
+    monkeypatch.setitem(g.GHGP_TAXONOMIES, "ghgp-scope3-2099", new_cut)
+    monkeypatch.setattr(g, "GHGP_STANDARD_VERSION", "ghgp-scope3-2099")
+
+    # Re-composing under the bumped pointer must leave the filed policy untouched...
+    rebuilt = {c: (g._opset(c, g.BOUNDARY_POLICY_TAXONOMY["s3bnd-v2"])
+                   if c in g._SCOPE12_FAMILY_CATS else g.BOUNDARY_POLICIES["s3bnd-v1"][c])
+               for c in range(1, 16)}
+    assert rebuilt == before
+    # ...and Cat 8 must not have silently LOST the minimum it accepted at filing time.
+    assert "lessor_scope1_2" in g.BOUNDARY_POLICIES["s3bnd-v2"][8]
+    assert g.boundary_meets_minimum(8, "lessor_scope1_2", "s3bnd-v2") is True
+    # The module still imports cleanly under the new cut (the v1 proof is pinned too).
+    importlib.reload(g)
+
+
+def test_blank_boundary_is_absent_not_a_token_that_matches_nothing():
+    """Regression (adversarial review, LOW): a whitespace-only lca_boundary used to compare
+    as a token matching nothing (verdict False -> B12 blocker). It now normalises to absent
+    (None -> W1), which is the correct reading and only ever loosens — never a false pass."""
+    from app.services.ghgp import boundary_verdict
+    for blank in ("", "   ", "\t", None):
+        met, basis, token = boundary_verdict(6, blank)
+        assert met is None and basis == "no_boundary_on_factor" and token is None
+
+
+def test_generic_loader_strips_token_fields_so_blanks_never_reach_the_gate():
+    from app.ef_catalog.loaders.generic import parse_generic_csv
+    csv = (b"category,subcategory,unit,value,lca_boundary,ch4_origin,price_basis\n"
+           b"electricity,,kWh,0.17,   ,  ,  \n")
+    row = parse_generic_csv(csv)[0]
+    assert row.lca_boundary is None and row.ch4_origin is None and row.price_basis is None
+
+
+def test_policy_integrity_proofs_survive_python_O():
+    """The drift/monotonicity/false-pass proofs must not be `assert` — `python -O` strips
+    assert statements, which would silently remove them in an optimised deployment."""
+    import subprocess, sys
+    src = ("import app.services.ghgp as g\n"
+           "g._policy_check(False, 'canary')\n")
+    r = subprocess.run([sys.executable, "-O", "-c", src], capture_output=True, text=True)
+    assert r.returncode != 0 and "boundary policy integrity violated" in r.stderr

@@ -11,7 +11,8 @@ from ..models import (
 )
 from .ghgp import (
     GHGP_STANDARD_VERSION, CATEGORY_MAP_VERSION, CATEGORIES, taxonomy,
-    derive_ghgp_category, boundary_meets_minimum, declarations_fingerprint,
+    derive_ghgp_category, boundary_verdict, declarations_fingerprint,
+    BOUNDARY_POLICY_VERSION,
 )
 from .boundary import (
     BOUNDARY_VERSION, entity_weight, group_class, consolidation_fingerprint,
@@ -591,8 +592,15 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 # Freeze the VERDICT, not the input: factor.lca_boundary is a live
                 # catalog field, and correcting it later must not retroactively change
                 # what a filed run claimed.
-                detail["ghgp_min_boundary_met"] = boundary_meets_minimum(
-                    ghgp_cat, a.factor.lca_boundary)
+                _met, _basis, _token = boundary_verdict(ghgp_cat, a.factor.lca_boundary)
+                detail["ghgp_min_boundary_met"] = _met
+                # Which acceptance vocabulary produced that verdict, and the NORMALISED
+                # token it was computed on. Freezing the INPUT beside the verdict is what
+                # lets an assurer re-derive the verdict from the run's own record instead
+                # of joining back to the live (and possibly since-corrected) factor row.
+                detail["ghgp_boundary_policy_version"] = BOUNDARY_POLICY_VERSION
+                detail["ghgp_boundary_token"] = _token
+                detail["ghgp_boundary_verdict_basis"] = _basis
                 detail["ghgp_sale_year_lifetime"] = t["sale_year_lifetime"]
             line_items.append(EmissionLineItem(
                 run_id=run.id, activity_id=a.id, scope=scope, method="location", co2e=co2e,
@@ -756,6 +764,9 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             ))
         run.ghgp_standard_version = GHGP_STANDARD_VERSION
         run.ghgp_map_version = CATEGORY_MAP_VERSION
+        # Stated at run level too: a run with zero Scope 3 lines must still say which
+        # acceptance vocabulary it was computed under.
+        run.ghgp_boundary_policy_version = BOUNDARY_POLICY_VERSION
         # Detects the screen being EDITED after the run that filed it.
         run.scope3_declaration_fingerprint = declarations_fingerprint(live_decls)
 

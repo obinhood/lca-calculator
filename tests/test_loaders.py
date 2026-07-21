@@ -65,24 +65,29 @@ def test_defra_boundary_derivation_is_conservative():
     assert boundary_meets_minimum(6, None) is None
 
 
-def test_scope1_fuel_and_scope2_grid_factors_stay_boundaryless_to_avoid_false_blocks():
-    """Regression (adversarial review): a factor is scope-agnostic, so a Scope-1 gas
-    'combustion' factor is legitimately usable on a Scope-3 line (e.g. a leased
-    building's gas heating → Cat 8). The frozen taxonomy accepts 'combustion' for
-    Cat 4/6/7/9 but NOT Cat 8/13/14 (and 'generation' vice-versa). Deriving those
-    tokens would flip a safe W1 into a FALSE B12 BLOCK of a compliant leased-asset /
-    franchise / EV line, so Scope-1 fuel and Scope-2 grid factors are left None."""
+def test_scope1_fuel_and_scope2_grid_factors_stay_boundaryless():
+    """A factor is scope-agnostic, so a Scope-1 gas 'combustion' factor is legitimately
+    usable on a Scope-3 line (e.g. a leased building's gas heating → Cat 8).
+
+    HISTORY: under the original token vocabulary (s3bnd-v1) Cat 8/13/14 rejected
+    `combustion` and Cat 4/6/7/9 rejected `generation`, so deriving those tokens flipped a
+    safe W1 into a FALSE B12 BLOCK of a compliant line — which is why the derivation leaves
+    Scope-1 fuel and Scope-2 grid factors None. The s3bnd-v2 policy has since fixed that
+    asymmetry at its source, so restoring the derivation is unblocked follow-up work; this
+    test pins the CURRENT derivation behaviour and the vocabulary fix behind it."""
     d = _derive_boundary
     assert d("Scope 1", "Fuels", "Liquid fuels") is None
     assert d("Scope 1", "Bioenergy", "") is None
     assert d("Scope 1", "Refrigerant & other", "") is None
     assert d("Scope 2", "UK electricity", "") is None
     assert d("Scope 2", "Heat and steam", "") is None
-    # The failure this prevents: had we derived 'combustion'/'generation', these would
-    # have (wrongly) been rejected by exactly the categories such a factor can serve.
-    assert boundary_meets_minimum(8, "combustion") is False    # Cat 8 rejects combustion
-    assert boundary_meets_minimum(7, "generation") is False    # Cat 7 rejects generation
-    # None instead yields the honest 'not assessable' (W1), never a false block.
+    # The false block as it existed under v1 — the reason the derivation was narrowed...
+    assert boundary_meets_minimum(8, "combustion", "s3bnd-v1") is False
+    assert boundary_meets_minimum(7, "generation", "s3bnd-v1") is False
+    # ...and its fix under the current policy.
+    assert boundary_meets_minimum(8, "combustion") is True
+    assert boundary_meets_minimum(7, "generation") is True
+    # None still yields the honest 'not assessable' (W1) either way.
     assert boundary_meets_minimum(8, None) is None
     assert boundary_meets_minimum(7, None) is None
 

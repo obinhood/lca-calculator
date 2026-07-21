@@ -495,6 +495,12 @@ class CalculationRun(Base):
     # completeness statement and must never be rendered as a clean 15x0.0 table.
     ghgp_standard_version = Column(String, nullable=True)
     ghgp_map_version = Column(String, nullable=True)
+    # Which factor-boundary ACCEPTANCE VOCABULARY (Table 5.4 token policy) produced this
+    # run's per-line minimum-boundary verdicts. Versioned apart from the GHGP standard
+    # because the token set is OUR interpretation, not Protocol content. NULL = computed
+    # before the policy was versioned; boundary_policy_for_run() reports that as
+    # "s3bnd-v1 (inferred)" at render time and never back-fills it into history.
+    ghgp_boundary_policy_version = Column(String, nullable=True)
     # Hash of the declaration set frozen onto this run — detects an exclusion
     # statement being edited AFTER the run that filed it.
     scope3_declaration_fingerprint = Column(String, nullable=True)
