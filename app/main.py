@@ -859,6 +859,10 @@ def upsert_scope3_declaration(
         gross_exposure_total: Optional[float] = None,
         gross_exposure_currency: Optional[str] = None,
         screened_at: Optional[str] = None, declared_by: Optional[str] = None,
+        temporal_basis: Optional[str] = None,
+        basis_units_sold: Optional[float] = None,
+        basis_lifetime_years: Optional[float] = None,
+        basis_per_unit_annual_co2e_kg: Optional[float] = None,
         org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     """Declare one Scope 3 category for a reporting period.
 
@@ -869,6 +873,7 @@ def upsert_scope3_declaration(
     from .models import Scope3CategoryDeclaration
     from .services.ghgp import (
         STORABLE_STATUSES, SEVEN_CRITERIA, is_boilerplate, GHGP_STANDARD_VERSION,
+        temporal_bases_for, TEMPORAL_BASES,
         MIN_JUSTIFICATION_CHARS,
     )
     from .services.calc import _utcnow_iso
@@ -932,6 +937,43 @@ def upsert_scope3_declaration(
             not math.isfinite(gross_exposure_total) or gross_exposure_total <= 0):
         raise HTTPException(status_code=400,
                             detail="gross_exposure_total must be a finite number > 0")
+    # --- Temporal basis (Cats 2/11/12) ---------------------------------------------
+    # Validated at the boundary against the CATEGORY'S OWN vocabulary: a Cat 11 lifetime
+    # token is not offerable on Cat 2, where a conforming figure has no lifetime at all.
+    _vocab = temporal_bases_for(category)
+    if temporal_basis is not None:
+        if not _vocab:
+            raise HTTPException(
+                status_code=400,
+                detail=f"category {category} has no temporal_basis vocabulary — the field "
+                       f"applies only to categories {sorted(TEMPORAL_BASES)}")
+        if temporal_basis not in _vocab:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown temporal_basis '{temporal_basis}' for category {category}; "
+                       f"expected one of {sorted(_vocab)}")
+    _entails = bool(temporal_basis and _vocab.get(temporal_basis, (0, 0, 0))[1])
+    _nums = {"basis_units_sold": basis_units_sold,
+             "basis_lifetime_years": basis_lifetime_years,
+             "basis_per_unit_annual_co2e_kg": basis_per_unit_annual_co2e_kg}
+    for _k, _v in _nums.items():
+        if _v is None:
+            continue
+        if not math.isfinite(_v) or _v <= 0:
+            raise HTTPException(status_code=400,
+                                detail=f"{_k} must be a finite number > 0")
+        if not _entails:
+            # Mirrors ck_s3decl_basis_entailment: these numbers mean nothing except as
+            # the arithmetic claim `sold_units_full_lifetime` makes, so accepting them
+            # elsewhere would store an unverifiable, unused assertion.
+            raise HTTPException(
+                status_code=400,
+                detail=f"{_k} is only meaningful with temporal_basis "
+                       f"'sold_units_full_lifetime'")
+    d.temporal_basis = temporal_basis
+    d.basis_units_sold = basis_units_sold
+    d.basis_lifetime_years = basis_lifetime_years
+    d.basis_per_unit_annual_co2e_kg = basis_per_unit_annual_co2e_kg
     d.gross_exposure_total = gross_exposure_total
     d.gross_exposure_currency = gross_exposure_currency
     d.screened_at = screened_at or now[:10]

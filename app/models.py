@@ -501,6 +501,10 @@ class CalculationRun(Base):
     # before the policy was versioned; boundary_policy_for_run() reports that as
     # "s3bnd-v1 (inferred)" at render time and never back-fills it into history.
     ghgp_boundary_policy_version = Column(String, nullable=True)
+    # Which temporal-basis requirement this run was computed under. NULL = the run
+    # PREDATES the requirement, and the gate then only warns (never blocks) — that NULL
+    # is the entire anti-cliff mechanism, so it must NEVER be back-filled.
+    scope3_temporal_basis_version = Column(String, nullable=True)
     # Hash of the declaration set frozen onto this run — detects an exclusion
     # statement being edited AFTER the run that filed it.
     scope3_declaration_fingerprint = Column(String, nullable=True)
@@ -749,6 +753,16 @@ class Scope3CategoryDeclaration(Base):
         CheckConstraint("materiality_threshold_pct IS NULL OR "
                         "(materiality_threshold_pct >= 0 AND materiality_threshold_pct <= 100)",
                         name="ck_s3decl_thresh"),
+        CheckConstraint(
+            "(temporal_basis IS NOT NULL AND temporal_basis = 'sold_units_full_lifetime') "
+            "OR (basis_units_sold IS NULL "
+            "AND basis_lifetime_years IS NULL AND basis_per_unit_annual_co2e_kg IS NULL)",
+            name="ck_s3decl_basis_entailment"),
+        CheckConstraint(
+            "(basis_units_sold IS NULL OR basis_units_sold > 0) AND "
+            "(basis_lifetime_years IS NULL OR basis_lifetime_years > 0) AND "
+            "(basis_per_unit_annual_co2e_kg IS NULL OR basis_per_unit_annual_co2e_kg > 0)",
+            name="ck_s3decl_basis_positive"),
     )
     id = Column(Integer, primary_key=True)
     organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
@@ -768,6 +782,16 @@ class Scope3CategoryDeclaration(Base):
     # the % of exposure covered by the reported financed emissions can be disclosed.
     gross_exposure_total = Column(Float, nullable=True)
     gross_exposure_currency = Column(String, nullable=True)
+    # --- Temporal basis (GHGP Cats 2/11/12): what the reported figure DENOMINATES ---
+    # NULL is the UNSTATED state — deliberately no 'not_stated' sentinel, which would make
+    # an absence look like an answer. The three entailed numbers are demanded by exactly
+    # one token (`sold_units_full_lifetime`), mirrored by ck_s3decl_basis_entailment.
+    # basis_lifetime_years is stored, frozen, rendered and DIVIDED — never multiplied into
+    # any emissions figure. No declaration field ever enters the inventory arithmetic.
+    temporal_basis = Column(String, nullable=True)
+    basis_units_sold = Column(Float, nullable=True)
+    basis_lifetime_years = Column(Float, nullable=True)
+    basis_per_unit_annual_co2e_kg = Column(Float, nullable=True)
     screened_at = Column(String, nullable=False)        # ISO date — drives the 3-year clock
     declared_by = Column(String, nullable=True)
     standard_version = Column(String, nullable=False, default="ghgp-scope3-2011")
@@ -790,6 +814,16 @@ class RunScope3Declaration(Base):
         CheckConstraint(
             "status IN ('included','not_applicable','not_material','not_measured','undeclared')",
             name="ck_run_s3decl_status"),
+        CheckConstraint(
+            "(temporal_basis IS NOT NULL AND temporal_basis = 'sold_units_full_lifetime') "
+            "OR (basis_units_sold IS NULL "
+            "AND basis_lifetime_years IS NULL AND basis_per_unit_annual_co2e_kg IS NULL)",
+            name="ck_runs3decl_basis_entailment"),
+        CheckConstraint(
+            "(basis_units_sold IS NULL OR basis_units_sold > 0) AND "
+            "(basis_lifetime_years IS NULL OR basis_lifetime_years > 0) AND "
+            "(basis_per_unit_annual_co2e_kg IS NULL OR basis_per_unit_annual_co2e_kg > 0)",
+            name="ck_runs3decl_basis_positive"),
     )
     id = Column(Integer, primary_key=True)
     run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
@@ -808,6 +842,11 @@ class RunScope3Declaration(Base):
     gross_exposure_total = Column(Float, nullable=True)
     gross_exposure_currency = Column(String, nullable=True)
     screened_at = Column(String, nullable=True)
+    # --- Temporal basis, FROZEN copy (see Scope3CategoryDeclaration for the doctrine) ---
+    temporal_basis = Column(String, nullable=True)
+    basis_units_sold = Column(Float, nullable=True)
+    basis_lifetime_years = Column(Float, nullable=True)
+    basis_per_unit_annual_co2e_kg = Column(Float, nullable=True)
     ghgp_standard_version = Column(String, nullable=False)
     frozen_at = Column(String, nullable=False)
 

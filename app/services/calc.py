@@ -12,7 +12,7 @@ from ..models import (
 from .ghgp import (
     GHGP_STANDARD_VERSION, CATEGORY_MAP_VERSION, CATEGORIES, taxonomy,
     derive_ghgp_category, boundary_verdict, declarations_fingerprint,
-    BOUNDARY_POLICY_VERSION,
+    BOUNDARY_POLICY_VERSION, TEMPORAL_BASIS_VERSION,
 )
 from .boundary import (
     BOUNDARY_VERSION, entity_weight, group_class, consolidation_fingerprint,
@@ -753,6 +753,11 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 materiality_threshold_pct=d.materiality_threshold_pct if d else None,
                 criteria=d.criteria if d else None,
                 minimum_boundary_met=d.minimum_boundary_met if d else None,
+                temporal_basis=d.temporal_basis if d else None,
+                basis_units_sold=d.basis_units_sold if d else None,
+                basis_lifetime_years=d.basis_lifetime_years if d else None,
+                basis_per_unit_annual_co2e_kg=(
+                    d.basis_per_unit_annual_co2e_kg if d else None),
                 method_description=d.method_description if d else None,
                 calculation_tools=d.calculation_tools if d else None,
                 primary_data_pct=d.primary_data_pct if d else None,
@@ -767,6 +772,9 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         # Stated at run level too: a run with zero Scope 3 lines must still say which
         # acceptance vocabulary it was computed under.
         run.ghgp_boundary_policy_version = BOUNDARY_POLICY_VERSION
+        # Stamps this run as computed UNDER the temporal-basis requirement. Runs frozen
+        # before this keep NULL and are only warned, never blocked (the anti-cliff rule).
+        run.scope3_temporal_basis_version = TEMPORAL_BASIS_VERSION
         # Detects the screen being EDITED after the run that filed it.
         run.scope3_declaration_fingerprint = declarations_fingerprint(live_decls)
 
