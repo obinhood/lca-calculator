@@ -175,6 +175,45 @@ def test_unassigned_scope3_line_blocks(db):
     assert gate["unassigned_sources"].get("ambiguous_unassigned") == 1
 
 
+# --- Table 5.4 minimum-boundary check (B12/W1) now has teeth (factor boundary backfill) ---
+
+def test_boundaryless_factor_warns_not_assessable_w1(db):
+    """Baseline: a Cat 5 line whose factor carries NO lca_boundary can't be checked
+    against Table 5.4 — the gate warns (W1), it must never silently pass."""
+    org = _org(db)
+    _act(db, org.id, _factor(db, "waste", "kg", 0.5, lca_boundary=None).id,
+         "waste", 100, "kg", ghgp_category=5)
+    run, _p = ready_run(db, org.id)
+    gate = scope3_completeness(db, run)
+    assert gate["blockers"] == []
+    assert any("NOT ASSESSABLE" in w and "category 5" in w for w in gate["warnings"])
+
+
+def test_backfilled_boundary_clears_the_w1_warning(db):
+    """The point of the DEFRA boundary backfill: a Cat 5 waste line whose factor now
+    carries the derived `waste_treatment` boundary MEETS Table 5.4 — no W1, no B12."""
+    org = _org(db)
+    _act(db, org.id, _factor(db, "waste", "kg", 0.5, lca_boundary="waste_treatment").id,
+         "waste", 100, "kg", ghgp_category=5)
+    run, _p = ready_run(db, org.id)
+    gate = scope3_completeness(db, run)
+    assert gate["blockers"] == []
+    assert not any("category 5" in w and "NOT ASSESSABLE" in w for w in gate["warnings"])
+
+
+def test_below_minimum_boundary_blocks_b12(db):
+    """A factor whose boundary is BELOW the category minimum is a partial figure, not a
+    compliant Cat-5 number — B12 must block. (cradle_to_gate is not a waste-treatment
+    boundary; teeth cut both ways.)"""
+    org = _org(db)
+    _act(db, org.id, _factor(db, "waste", "kg", 0.5, lca_boundary="cradle_to_gate").id,
+         "waste", 100, "kg", ghgp_category=5)
+    run, _p = ready_run(db, org.id)
+    gate = scope3_completeness(db, run)
+    assert any("category 5" in b and "minimum boundary" in b and "Table 5.4" in b
+               for b in gate["blockers"])
+
+
 def test_anti_gaming_cat3_cannot_be_not_applicable_with_energy(db):
     org = _org(db)
     p = make_period(db, org.id)
