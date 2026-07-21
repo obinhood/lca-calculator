@@ -190,6 +190,30 @@ paths emitted a materially wrong number while stamping the report
   the total). `generation`/`td_loss` sit in neither half by design — energy supply, not a
   wheel-side emission — now visible rather than dropped.
 
+- **PR #23** — _GHGP Cat 2/11/12 temporal basis (the sale-year / acquisition-year assertion)._
+  The largest remaining accuracy gap: the engine computes activity x factor FOR THE PERIOD,
+  but Cat 2 needs the full cradle-to-gate of goods ACQUIRED in the year and Cats 11/12 the
+  full expected lifetime / end-of-life of products SOLD in the year. A Cat 11 figure covering
+  one year instead of a 12-year product life is understated ~12x, and Cat 11 is frequently a
+  manufacturer's largest Scope 3 category — previously only WARNED, asking for free text
+  nothing could verify. The platform cannot compute the lifetime, so it now demands a closed,
+  CATEGORY-SCOPED, frozen, fingerprinted assertion of what the figure DENOMINATES (Cat 2 has
+  no lifetime vocabulary at all — its conforming basis structurally fits the period model;
+  `sold_quantity_consumed_in_use` keeps dissipative fuel/chemical sellers from being
+  false-blocked). B15-B19 gate it, with an ASYMMETRIC 0.5x block / 2.0x warn band so a
+  multi-SKU portfolio's averaging drift never blocks while a one-year filing always does.
+  The anti-cliff mechanism is a NULL run-stamp: every pre-existing run only warns, which is
+  load-bearing because the gate is re-evaluated at RENDER time on filed runs. Designed by a
+  3-way panel + judge. A 3-lens adversarial review raised 13 and confirmed 8, collapsing to
+  four defects, all fixed: **HIGH** — B19 divided the CONSOLIDATED line total by an UNWEIGHTED
+  physical assertion, so implied == share x declared and any org selling through a sub-50%
+  entity was falsely accused of a >2x understatement with NO honest exit (at a share near
+  1/lifetime it produced the maximally specific false accusation, "equals precisely ONE
+  YEAR"); **HIGH** — the `filed_kg > 0` guard skipped the check exactly at zero, making the
+  maximum possible understatement the one case it never saw; **LOW** — the divide could
+  underflow at RENDER time on a filed run (an HTTP 500, worse than a blocker); **LOW** — the
+  entailment CHECK did not enforce what it documented (SQL three-valued logic).
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
