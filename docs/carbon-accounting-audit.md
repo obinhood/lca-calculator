@@ -149,6 +149,29 @@ paths emitted a materially wrong number while stamping the report
   COMPLIANT disclosure. Fixed by leaving those factors boundaryless; captured as a
   regression test. The false-pass and faithfulness lenses returned zero findings.
 
+- **PR #19** — _Table 5.4 acceptance vocabulary versioned apart from the standard._ The
+  per-category accepted factor-boundary tokens were ASYMMETRIC across categories sharing the
+  same `<party>_scope1_2` minimum (Cat 4/6/7/9 took `combustion` not `generation`; Cat 8/13/14
+  the reverse; Cat 10 neither). Since a factor is scope-AGNOSTIC, that false-blocked compliant
+  lines — the defect PR #17's review surfaced. `accepts_boundary` is OUR reading of the
+  Protocol's prose minimum, not Protocol content, so it is lifted into an append-only,
+  separately versioned `BOUNDARY_POLICIES` (`s3bnd-v2`), leaving `GHGP_TAXONOMIES` byte-identical
+  and `GHGP_STANDARD_VERSION` unbumped (bumping it would claim the Protocol re-cut its
+  categories and would restamp every declaration). v1 is the taxonomy verbatim, proven at
+  import; v2 gives the whole scope1_2 family one direct-operational tier COMPOSED from each
+  category's own `min_boundary`, so the asymmetry cannot be re-typed. Cat 1/2, Cat 3 and Cat
+  11/15 inherit unchanged. Import-time proofs pin v1==taxonomy, v1 subset-of v2 (monotone: no
+  filed line gains a blocker) and no upstream-only token in any scope1_2 set (the false-pass
+  guard). The verdict's INPUT is now frozen beside it (policy version, normalised token,
+  verdict basis) so a verdict is re-derivable without joining the live factor table. Designed
+  by a 3-way panel + judge (which REJECTED a rival design for adding `cradle_to_gate` to Cat 3
+  — the catalogue's most common token asserting conformance on an upstream-only bar). A 3-lens
+  adversarial review raised 10, confirmed 3 (zero false-pass), all fixed: a MEDIUM where the
+  policy composed from the LIVE standard version, so the append-only extension the module
+  prescribes would silently rewrite a filed policy (now pinned per-version to its cut); two
+  LOWs on un-versioned token normalisation (loaders strip at ingest; the replay guarantee is
+  stated as token-set identity); and integrity proofs moved off `assert` (stripped by `python -O`).
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
