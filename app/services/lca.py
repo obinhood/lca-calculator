@@ -29,6 +29,22 @@ EN_MODULES = {
 EN_GROUP_NOTE = {"A": "Product & construction (A1-A5)", "B": "Use (B1-B7)",
                  "C": "End of life (C1-C4)", "D": "Beyond the system boundary (D)"}
 
+# ISO 14083 / GLEC well-to-wheel split, keyed on the factor's lca_boundary token.
+#
+# TANK-TO-WHEEL is the vehicle's own combustion of the fuel in its tank. All three spellings
+# below denote that same physical quantity and all three are emitted by this codebase:
+# `ttw` is what the DEFRA adapter returns for travel/freight tables, `combustion` for
+# stationary and own-fleet fuel, and `tank_to_wheel` is the long form a normalised CSV may
+# carry. Omitting `ttw` here silently dropped every third-party freight leg from the
+# disclosure while the well-to-wheel TOTAL stayed correct.
+#
+# WELL-TO-TANK is the upstream fuel supply. `generation` and `td_loss` are deliberately in
+# NEITHER set: on an electric leg they are the energy-supply side rather than a wheel-side
+# emission, and assigning them is a standards call this module should make explicitly
+# rather than by omission — until then they surface in `unclassified`, never dropped.
+_TTW_BOUNDARIES = ("ttw", "tank_to_wheel", "combustion")
+_WTT_BOUNDARIES = ("well_to_tank", "wtt")
+
 
 def en_module_group(module: str) -> str:
     m = (module or "").strip().upper()
@@ -132,12 +148,25 @@ def compute_assessment(db: Session, assessment: LcaAssessment) -> dict:
             "/ EN 15978 and is never netted into the total or the per-functional-unit "
             "figure. Biogenic CO2 is separate too.")
     if assessment.standard == "iso_14083":
-        wtt = boundary_split.get("well_to_tank", 0.0)
-        ttw = boundary_split.get("combustion", 0.0) + boundary_split.get("tank_to_wheel", 0.0)
+        wtt = sum(boundary_split.get(b, 0.0) for b in _WTT_BOUNDARIES)
+        ttw = sum(boundary_split.get(b, 0.0) for b in _TTW_BOUNDARIES)
+        # RECONCILIATION. Anything the split does not classify is surfaced EXPLICITLY, so
+        # WTT + TTW + unclassified == the well-to-wheel total by construction. Without this
+        # a boundary token the split happens not to know vanishes silently while the total
+        # stays right — which is exactly how every third-party `ttw` freight leg was being
+        # dropped from the tank-to-wheel disclosure with no visible cause.
+        _classified = set(_WTT_BOUNDARIES) | set(_TTW_BOUNDARIES)
+        unclassified = sum(v for k, v in boundary_split.items() if k not in _classified)
         result["well_to_wheel_kg"] = {
             "well_to_tank": round(wtt, 6), "tank_to_wheel": round(ttw, 6),
+            "unclassified": round(unclassified, 6),
             "well_to_wheel_total": round(total, 6),
-            "note": "WTT+TTW split from factor boundaries; unspecified boundaries "
-                    "are in the total but not the split.",
+            # A real check, not a tautology: it verifies the per-boundary split accounts
+            # for the whole declared total.
+            "reconciles": abs(wtt + ttw + unclassified - total) < 1e-9,
+            "note": "WTT+TTW split from factor boundaries. Boundaries the split does not "
+                    "classify as a fuel-supply or wheel-side quantity (e.g. electricity "
+                    "generation / T&D losses on an electric leg) are reported as "
+                    "`unclassified` — they are in the total and are never dropped.",
         }
     return result

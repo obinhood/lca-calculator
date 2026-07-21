@@ -150,8 +150,10 @@ BOUNDARY_POLICY_VERSION = "s3bnd-v2"
 
 # The party's own OPERATIONAL emissions for the source the line measures. `ttw` (mobile
 # tailpipe) and `combustion` (stationary burning) are the same semantic tier — scope 1 for
-# that source; `generation` is the scope-2 counterpart. `tank_to_wheel` is an orthographic
-# synonym of `ttw` that lca.py already sums together with `combustion` as one TTW quantity.
+# that source; `generation` is the scope-2 counterpart. `tank_to_wheel` is the long-form
+# spelling of `ttw`. (lca.py keeps its OWN wheel-side set for the ISO 14083 split — it is a
+# different question, and notably excludes `generation`, which is energy supply rather than
+# a wheel-side emission. The two sets are deliberately separate, not a shared constant.)
 _DIRECT_OPERATIONAL = frozenset({"ttw", "tank_to_wheel", "combustion", "generation"})
 _COMBINED_SCOPE12 = frozenset({"wtw", "scope1_2"})
 _SCOPE12_FAMILY = _DIRECT_OPERATIONAL | _COMBINED_SCOPE12

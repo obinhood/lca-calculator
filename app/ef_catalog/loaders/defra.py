@@ -46,22 +46,23 @@ def _derive_boundary(scope: str, level1: str, level2: str = "") -> Optional[str]
     * FALSE BLOCK — a boundary that B12 rejects for a *compliant* line. A factor is
       scope-agnostic (EmissionFactor carries no scope), so a Scope-1 gas-combustion
       factor is legitimately usable on a Scope-3 activity (e.g. a leased building's gas
-      heating → Cat 8). The frozen taxonomy's `accepts_boundary` sets are token-
-      asymmetric — `combustion` is accepted by Cat 4/6/7/9 but NOT Cat 8/13/14, and
-      `generation` vice-versa — so deriving `combustion`/`generation` for Scope-1/2 fuel
-      and electricity factors would flip a safe W1 into a false B12 block of a compliant
-      leased-asset / franchise / EV line. (Confirmed by adversarial review.)
+      heating → Cat 8). Under the ORIGINAL token vocabulary the accepted sets were
+      asymmetric — `combustion` accepted by Cat 4/6/7/9 but not Cat 8/13/14, `generation`
+      vice-versa — so deriving those tokens flipped a safe W1 into a false block. The
+      s3bnd-v2 boundary policy fixed that asymmetry at its source, so they are derived
+      again here.
 
-    So we assign boundaries ONLY for the DEFRA tables that map to Scope 3 categories —
-    where the completeness gate actually operates — using tokens each target category
-    accepts. `ttw` is accepted across the whole scope1/2-family (Cat 4-10,12-14), and
-    the upstream/waste/material tokens are factor-type-specific to their categories.
-    Scope-1 combustion and Scope-2 generation factors are left None: they need no S3
-    boundary on their primary (Scope 1/2) use, and cross-application to Scope 3 gets an
-    honest W1 (not assessable) rather than a false block. DEFRA separates the direct
-    in-use factor from its upstream "WTT-" counterpart in distinct tables, so the table
-    name disambiguates without guessing.
+    Tokens are assigned where the DEFRA table structure is unambiguous: the Scope 3
+    tables (upstream WTT/T&D, waste, travel/freight, materials) and the direct energy
+    tables (Scope 1 fuel combustion, Scope 2 generation). `ttw` and, under s3bnd-v2,
+    `combustion`/`generation` are accepted across the whole scope1/2-family (Cat 4-10,
+    12-14); the upstream/waste/material tokens are factor-type-specific to their
+    categories, so applying one outside its category is a TRUE block, not a false one.
+    DEFRA separates the direct in-use factor from its upstream "WTT-" counterpart in
+    distinct tables, so the table name disambiguates without guessing. Anything not
+    clearly determined stays None and the gate honestly reports "not assessable" (W1).
     """
+    s = (scope or "").strip().lower()
     l1 = (level1 or "").strip().lower()
     ctx = f"{l1} {(level2 or '').strip().lower()}"
 
@@ -87,6 +88,26 @@ def _derive_boundary(scope: str, level1: str, level2: str = "") -> Optional[str]
     # Purchased materials -> Category 1 (accepts cradle_to_gate).
     if l1.startswith("material use"):
         return "cradle_to_gate"
+
+    # Direct energy. These are Scope 1/2 factors, so on their PRIMARY use the Scope 3
+    # boundary check never runs (a Scope 1/2 line has no ghgp_category). They matter
+    # because a factor is scope-AGNOSTIC: the same gas-combustion factor is legitimately
+    # used on a Scope 3 line (a leased building's heating, Cat 8). Under the ORIGINAL
+    # token vocabulary that false-blocked, which is why these were left None; the
+    # s3bnd-v2 policy accepts `combustion` and `generation` across the whole
+    # scope1/2-family, so deriving them is now both faithful and safe. Where they are
+    # genuinely wrong — a combustion factor on Cat 3 (upstream fuel) or Cat 1/2
+    # (cradle-to-gate goods) — the gate now BLOCKS, which is the check working.
+    if s == "scope 1":
+        # Direct combustion of fuels/bioenergy. Refrigerants / fugitive / process are
+        # NOT a combustion boundary -> None.
+        if l1.startswith("fuel") or "bioenergy" in l1:
+            return "combustion"
+        return None
+    if s == "scope 2":
+        if any(t in l1 for t in ("electricity", "heat", "steam", "cooling", "district")):
+            return "generation"
+        return None
     return None
 
 
