@@ -234,3 +234,42 @@ def test_e1_7_as_of_freezes_credits_section(db):
     # without a cutoff, both count (live ledger)
     live = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=1.0)
     assert live["e1_7_removals_and_credits"]["credit_count"] == 2
+
+
+def test_neutrality_tolerance_scales_with_the_inventory(db):
+    """A fixed 1e-9 tCO2e (one microgram) decided the claim on FLOAT NOISE rather than on
+    the accounting: gross_tco2e is the sum of thousands of float line items, so its
+    representation error scales with the inventory and, for a large one, exceeds a fixed
+    microgram — an org that had retired precisely enough could be told it was NOT neutral,
+    and the error grew with the org."""
+    org = _org(db)
+    # ~1,840 tCO2e — 1e-9 relative is ~1.8 micrograms, still far below any real residual.
+    _activity(db, org.id, _factor(db, "gas", "kWh", 0.184).id, "gas", 10_000_000, "kWh")
+    run = compute_co2e(db, org.id)
+    n0 = neutrality_assessment(db, org.id, run)
+    assert n0["neutrality_tolerance_tco2e"] > 1e-9          # scaled, not the fixed floor
+    # Retire exactly the gross: neutral, and the tolerance is disclosed beside it.
+    _credit(db, org.id, n0["gross_tco2e"], retired=True, run_id=run.id)
+    n = neutrality_assessment(db, org.id, run)
+    assert n["neutral"] is True
+    assert abs(n["residual_tco2e"]) <= n["neutrality_tolerance_tco2e"]
+
+
+def test_the_tolerance_can_never_forgive_a_real_residual(db):
+    """It may only absorb rounding: 1e-9 relative on a megatonne is a single kilogram."""
+    org = _org(db)
+    _activity(db, org.id, _factor(db, "gas", "kWh", 0.184).id, "gas", 10_000_000, "kWh")
+    run = compute_co2e(db, org.id)
+    gross = neutrality_assessment(db, org.id, run)["gross_tco2e"]
+    _credit(db, org.id, gross - 0.001, retired=True, run_id=run.id)   # 1 kg short
+    n = neutrality_assessment(db, org.id, run)
+    assert n["neutral"] is False
+    assert any("NOT neutral" in w for w in n["claim_warnings"])
+
+
+def test_a_claim_resting_on_the_tolerance_says_so(db):
+    org, run = _mixed_run(db)                                # gross 1.84 t
+    _credit(db, org.id, 1.84 - 1e-12, retired=True, run_id=run.id)
+    n = neutrality_assessment(db, org.id, run)
+    assert n["neutral"] is True and n["neutral_within_tolerance_only"] is True
+    assert any("WITHIN TOLERANCE" in w for w in n["claim_warnings"])
