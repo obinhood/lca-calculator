@@ -521,3 +521,87 @@ def test_temporal_basis_is_validated_at_the_api_boundary(client):
                           "basis_units_sold": 100.0, "basis_lifetime_years": 12.0,
                           "basis_per_unit_annual_co2e_kg": 1.0},
                   headers=hdr).status_code == 200
+
+
+# --- Table 5.4 policy drift (W3) -----------------------------------------------------
+
+def _drift_run(db, boundary, cat=5):
+    """A run with one included Scope 3 line carrying `boundary` as its frozen token."""
+    org = _org(db)
+    _act(db, org.id, _factor(db, "waste", "kg", 0.5, lca_boundary=boundary).id,
+         "waste", 100, "kg", ghgp_category=cat)
+    run, _p = ready_run(db, org.id)
+    return org, run
+
+
+def test_no_drift_when_the_policy_has_not_moved(db):
+    from app.services.ghgp import boundary_policy_drift
+    _o, run = _drift_run(db, "waste_treatment")
+    d = boundary_policy_drift(db, run)
+    assert d["direction"] == "none"
+    assert d["by_kind"]["unchanged"] == 1 and d["undeterminable_lines"] == 0
+    assert d["policy_frozen"] == d["policy_current"]
+    assert not any("policy DRIFT" in w or "policy drift" in w
+                   for w in scope3_completeness(db, run)["warnings"])
+
+
+def test_a_filing_that_would_now_be_REJECTED_is_flagged_as_understating(db, monkeypatch):
+    """The direction that matters: the run ACCEPTED a boundary the current vocabulary
+    rejects, so that category may be a PARTIAL figure filed as compliant."""
+    import app.services.ghgp as g
+    _o, run = _drift_run(db, "waste_treatment")          # accepted at filing (Cat 5)
+    # Simulate the vocabulary tightening after the fact.
+    tightened = {**g.BOUNDARY_POLICIES, "s3bnd-v2": {
+        **g.BOUNDARY_POLICIES["s3bnd-v2"],
+        5: frozenset(g.BOUNDARY_POLICIES["s3bnd-v2"][5] - {"waste_treatment"})}}
+    monkeypatch.setattr(g, "BOUNDARY_POLICIES", tightened)
+    d = g.boundary_policy_drift(db, run)
+    assert d["direction"] == "understating"
+    assert d["by_kind"]["newly_rejected"] == 1
+    assert d["newly_rejected_by_category"] == {"5": 1}
+    w = " ".join(scope3_completeness(db, run)["warnings"])
+    assert "policy DRIFT" in w and "PARTIAL figures" in w
+    # ...and it is a WARNING, never a blocker: a filed verdict is not restated.
+    assert not any("DRIFT" in b for b in scope3_completeness(db, run)["blockers"])
+
+
+def test_a_filing_that_would_now_be_ACCEPTED_is_flagged_as_conservative(db, monkeypatch):
+    """The over-strict direction: nothing is understated, so it must not read as a problem."""
+    import app.services.ghgp as g
+    _o, run = _drift_run(db, "cradle_to_gate")           # REJECTED at filing for Cat 5
+    loosened = {**g.BOUNDARY_POLICIES, "s3bnd-v2": {
+        **g.BOUNDARY_POLICIES["s3bnd-v2"],
+        5: frozenset(g.BOUNDARY_POLICIES["s3bnd-v2"][5] | {"cradle_to_gate"})}}
+    monkeypatch.setattr(g, "BOUNDARY_POLICIES", loosened)
+    d = g.boundary_policy_drift(db, run)
+    assert d["direction"] == "conservative"
+    assert d["by_kind"]["newly_accepted"] == 1
+    w = " ".join(scope3_completeness(db, run)["warnings"])
+    assert "over-strict" in w and "nothing is understated" in w
+
+
+def test_drift_is_not_assessable_for_lines_frozen_before_the_token(db):
+    """Never back-filled from live data: a line frozen before the token was recorded is
+    reported as undeterminable, not silently re-derived from the current factor."""
+    import json as _json
+    from app.models import EmissionLineItem
+    from app.services.ghgp import boundary_policy_drift
+    _o, run = _drift_run(db, "waste_treatment")
+    li = db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id, EmissionLineItem.scope == "3").first()
+    d = _json.loads(li.details)
+    d.pop("ghgp_boundary_token")                  # a pre-token run
+    li.details = _json.dumps(d)
+    db.commit()
+    got = boundary_policy_drift(db, run)
+    assert got["undeterminable_lines"] == 1 and got["drift_assessable_lines"] == 0
+    assert got["direction"] == "none"
+    assert any("NOT ASSESSABLE" in w and "back-filled" in w
+               for w in scope3_completeness(db, run)["warnings"])
+
+
+def test_drift_is_surfaced_on_the_frozen_scope3_artifact(db):
+    _o, run = _drift_run(db, "waste_treatment")
+    inv = scope3_by_ghgp_category(db, run)
+    assert inv["boundary_policy_drift"]["direction"] == "none"
+    assert inv["boundary_policy_drift"]["policy_current"] == "s3bnd-v2"

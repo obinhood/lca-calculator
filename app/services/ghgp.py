@@ -522,6 +522,89 @@ def fingerprint_scheme_of(stored: Optional[str]) -> str:
     return prefix if prefix in _FINGERPRINT_SCHEMES else "s3decl-v1"
 
 
+
+
+# Why a frozen verdict differs from what the CURRENT policy would say.
+BOUNDARY_DRIFT_KINDS = ("unchanged", "newly_accepted", "newly_rejected",
+                        "newly_assessable", "newly_unassessable")
+
+
+def boundary_policy_drift(db: Session, run) -> dict:
+    """Would this filed run's Table 5.4 verdicts differ under the CURRENT policy?
+
+    The run's verdicts are FROZEN and are never restated — that is the reproduction
+    contract. But an assurer still needs to know which way a filed figure leans relative
+    to today's methodology, and the per-line `ghgp_boundary_token` was frozen precisely so
+    that question can be answered from the run's own record, without joining the live
+    factor catalogue (which may since have been corrected).
+
+    DIRECTION is the load-bearing output:
+      * `conservative`  — lines the filed run REJECTED that the current policy accepts.
+        The filing was over-strict; nothing is understated.
+      * `understating`  — lines the filed run ACCEPTED that the current policy REJECTS.
+        Those categories may be PARTIAL figures filed as compliant. This is the direction
+        that matters, and it is why the check exists.
+
+    Lines frozen before the token existed are counted as `undeterminable` and reported as
+    such — never back-filled from live data, which would invent evidence the run does not
+    carry.
+    """
+    from ..models import EmissionLineItem
+    frozen_version, inferred = boundary_policy_for_run(run)
+    out = {
+        "assessable": bool(frozen_version),
+        "policy_frozen": frozen_version,
+        "policy_frozen_inferred": inferred,
+        "policy_current": BOUNDARY_POLICY_VERSION,
+        "drift_assessable_lines": 0,
+        "undeterminable_lines": 0,
+        "by_kind": {k: 0 for k in BOUNDARY_DRIFT_KINDS},
+        "newly_rejected_by_category": {},
+        "newly_accepted_by_category": {},
+        "direction": "none",
+    }
+    if not frozen_version:
+        return out
+
+    for (details,) in db.query(EmissionLineItem.details).filter(
+            EmissionLineItem.run_id == run.id,
+            EmissionLineItem.method == "location",
+            EmissionLineItem.scope == "3").all():
+        d = json.loads(details or "{}")
+        cat = d.get("ghgp_category")
+        if cat is None:
+            continue
+        if "ghgp_boundary_token" not in d:
+            out["undeterminable_lines"] += 1     # predates the frozen input
+            continue
+        was = d.get("ghgp_min_boundary_met")
+        now = boundary_meets_minimum(cat, d.get("ghgp_boundary_token"))
+        out["drift_assessable_lines"] += 1
+        if was == now:
+            kind = "unchanged"
+        elif was is None:
+            kind = "newly_assessable"
+        elif now is None:
+            kind = "newly_unassessable"
+        elif now is True:
+            kind = "newly_accepted"
+        else:
+            kind = "newly_rejected"
+        out["by_kind"][kind] += 1
+        if kind == "newly_rejected":
+            out["newly_rejected_by_category"][str(cat)] = \
+                out["newly_rejected_by_category"].get(str(cat), 0) + 1
+        elif kind == "newly_accepted":
+            out["newly_accepted_by_category"][str(cat)] = \
+                out["newly_accepted_by_category"].get(str(cat), 0) + 1
+
+    if out["by_kind"]["newly_rejected"] or out["by_kind"]["newly_unassessable"]:
+        out["direction"] = "understating"
+    elif out["by_kind"]["newly_accepted"] or out["by_kind"]["newly_assessable"]:
+        out["direction"] = "conservative"
+    return out
+
+
 # --- The completeness gate ----------------------------------------------------
 
 def scope3_completeness(db: Session, run) -> dict:
@@ -769,6 +852,31 @@ def scope3_completeness(db: Session, run) -> dict:
                                 f"category {c}: the filed figure implies a lifetime of "
                                 f"{implied:.2f} years against the {declared:g} years declared "
                                 f"— check for double counting (overstatement, so not blocked)")
+
+    # W3 — the acceptance vocabulary has moved since this run was filed. NEVER a blocker:
+    # the run's verdicts are frozen and are not restated, which is the whole reproduction
+    # contract. But which WAY the filing leans relative to today's methodology is a real
+    # assurance question, and the frozen per-line token exists to answer it.
+    _drift = boundary_policy_drift(db, run)
+    if _drift["direction"] == "understating":
+        warnings.append(
+            f"Table 5.4 policy DRIFT ({_drift['policy_frozen']} -> "
+            f"{_drift['policy_current']}): {_drift['by_kind']['newly_rejected']} line(s) "
+            f"this run accepted would be REJECTED under the current vocabulary "
+            f"{_drift['newly_rejected_by_category'] or ''} — those categories may be "
+            f"PARTIAL figures filed as compliant. The filed verdicts are NOT restated; "
+            f"recompute if you intend to file on the current methodology")
+    elif _drift["direction"] == "conservative":
+        warnings.append(
+            f"Table 5.4 policy drift ({_drift['policy_frozen']} -> "
+            f"{_drift['policy_current']}): {_drift['by_kind']['newly_accepted']} line(s) "
+            f"this run rejected are ACCEPTED under the current vocabulary — the filing was "
+            f"over-strict, nothing is understated. The filed verdicts are NOT restated")
+    if _drift["undeterminable_lines"]:
+        warnings.append(
+            f"Table 5.4 policy drift is NOT ASSESSABLE for "
+            f"{_drift['undeterminable_lines']} line(s) — they were frozen before the "
+            f"boundary token was recorded, and it is never back-filled from live data")
 
     # B9 — anti-gaming: a category cannot be "not applicable" when the run's own
     # content proves the activity occurs.

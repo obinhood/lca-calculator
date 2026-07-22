@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..models import EmissionLineItem, RunScope3Declaration, RunFinancedLine
 from ..services.ghgp import (
     CATEGORIES, GHGP_TAXONOMIES, UNASSIGNED_SOURCES, scope3_completeness,
-    boundary_policy_for_run,
+    boundary_policy_for_run, boundary_policy_drift,
 )
 
 
@@ -188,6 +188,10 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
         # but never written back into history.
         "temporal_basis_version": run.scope3_temporal_basis_version,
         "boundary_policy_version": _bpol[0],
+        # Which way this filing leans against TODAY's acceptance vocabulary. The frozen
+        # verdicts are never restated; this only says whether recomputing would tighten
+        # (understating) or loosen (conservative) them.
+        "boundary_policy_drift": boundary_policy_drift(db, run),
         "boundary_policy_version_inferred": _bpol[1],
         "categories": out,
         "unassigned": unassigned,
