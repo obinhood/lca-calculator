@@ -47,7 +47,8 @@ paths emitted a materially wrong number while stamping the report
 | A. Scope 3 never structured into the 15 GHG-Protocol categories | ✅ Fixed (PR #7) |
 | B. Financed emissions (PCAF = Cat 15) never roll into the entity total | ✅ Fixed (PR #9) |
 | C. No inventory line for removals (DAC, biochar, afforestation) | ✅ Fixed (PR #14) |
-| Temporal straddle proration; float accumulation vs neutrality threshold; GLEC not truly modelled | ⬜ Open |
+| Float accumulation vs neutrality threshold | ✅ Fixed (PR #27) |
+| Temporal straddle proration; GLEC not truly modelled | ⬜ Open |
 
 ## Remediation log
 
@@ -238,6 +239,19 @@ paths emitted a materially wrong number while stamping the report
   conditions were not complementary, so the strongest double-count case was the silent one);
   and `residual_mix_comparable` blocking GRI 305-5 for EVERY org on the version stamp alone,
   since nothing is back-filled so every base run is NULL.
+
+- **PR #27** — _Last residual-mix defect + a neutrality tolerance that scales._ (a) An
+  org-supplied `residual_mix` instrument is that org's own residual RATE, not a contractual
+  attribute claim, but summary counted it as contractual — disclosing 100% contractual
+  coverage for an org holding ZERO contractual instruments, contradicting the run's own
+  frozen statement. Fixed with a NEW `kwh_contractual_rank0` key so the established
+  `kwh_contractual` is not re-scoped for filed runs. (b) ISO 14068 neutrality judged
+  `residual <= 1e-9 tCO2e` — one microgram, ABSOLUTE — but `gross_tco2e` is the sum of
+  thousands of float line items, so its representation error scales with the inventory and
+  for a large one exceeds a fixed microgram: the claim was decided on float noise, and the
+  error grew with the org. The tolerance is now relative and DISCLOSED beside the residual;
+  it can only forgive a rounding-scale residual (1e-9 relative on a megatonne is one
+  kilogram), and a claim resting on it is flagged `neutral_within_tolerance_only`.
 
 ## Strengths worth preserving
 
