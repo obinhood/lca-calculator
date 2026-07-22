@@ -25,6 +25,20 @@ def _resolve_run(db: Session, organisation_id: Optional[int], run_id: Optional[i
     return q.order_by(CalculationRun.id.desc()).first()
 
 
+def _residual_mix_block(db: Session, run) -> dict:
+    """The run's frozen Scope 2 residual-mix statement, read only from frozen state."""
+    from ..services.residual_mix import scope2_residual_mix_completeness
+    g = scope2_residual_mix_completeness(db, run)
+    return {
+        "assessable": g["assessable"], "legacy": g.get("legacy", False),
+        "version": g.get("version"),
+        "statements": g.get("statements", []),
+        "understatement_remaining_consolidated_kg":
+            g.get("understatement_remaining_consolidated_kg"),
+        "blockers": g.get("blockers", []), "warnings": g.get("warnings", []),
+    }
+
+
 def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional[int] = None):
     """Summary of a single immutable calculation run (latest for the org by default)."""
     run = _resolve_run(db, organisation_id, run_id)
@@ -74,6 +88,7 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
     bases = {}
     kwh_contractual = 0.0
     kwh_grid_fallback = 0.0
+    kwh_residual_mix = 0.0          # priced at the residual mix (neither contractual nor grid)
     kwh_market_unverified = 0.0     # covered by an instrument whose market couldn't be checked
     skipped_market = set()          # instruments excluded by a declared market mismatch
     for (details,) in market_lines:
@@ -81,6 +96,7 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         bases[d.get("method_basis", "?")] = bases.get(d.get("method_basis", "?"), 0) + 1
         kwh_contractual += d.get("kwh_contractual", 0.0) or 0.0
         kwh_grid_fallback += d.get("kwh_grid_fallback", 0.0) or 0.0
+        kwh_residual_mix += d.get("kwh_residual_mix", 0.0) or 0.0
         kwh_market_unverified += d.get("kwh_market_unverified", 0.0) or 0.0
         skipped_market.update(d.get("instruments_skipped_market", []) or [])
 
@@ -138,9 +154,19 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             "market_bases": bases,
             "kwh_contractual": kwh_contractual,
             "kwh_grid_fallback": kwh_grid_fallback,
+            # Pricing the remainder at the residual mix moved it OUT of kwh_grid_fallback
+            # without adding it to kwh_contractual, so the disclosed pair stopped
+            # accounting for the run's electricity — a reader computing contractual
+            # coverage from those two alone saw 100% for an org that covered 60%.
+            "kwh_residual_mix": kwh_residual_mix,
+            "kwh_electricity_accounted": round(
+                kwh_contractual + kwh_residual_mix + kwh_grid_fallback, 6),
             # Contractual kWh applied without a verified market match (instrument or
             # consumption had no declared market) — a Scope 2 Guidance quality caveat.
             "kwh_market_unverified": kwh_market_unverified,
+            # Scope 2 Guidance: uncovered load must be priced at the RESIDUAL MIX, not the
+            # location grid average. This is the frozen per-(market, year) statement.
+            "residual_mix": _residual_mix_block(db, run),
             "instruments_excluded_by_market": sorted(skipped_market),
         },
         "method_split": {

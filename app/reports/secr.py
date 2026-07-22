@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from ..models import ActivityRecord, CalculationRun, EmissionLineItem
 from ..services.units import convert, UnitConversionError
 from ..services.boundary import boundary_completeness
+from ..services.residual_mix import scope2_residual_mix_completeness
 from .summary import summary, run_factor_sources
 
 # Energy content used to express transport fuel as kWh for the SECR energy
@@ -119,6 +120,7 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
     # unresolved boundary blocks. Its ENERGY figure stays gross physical energy
     # (UK energy use at operated sites), which is labelled via energy["basis"].
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
 
     energy = _energy_kwh(db, run)
 

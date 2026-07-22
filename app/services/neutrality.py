@@ -18,6 +18,15 @@ def neutrality_assessment(db: Session, organisation_id: int, run: CalculationRun
     gross_kg = run.total_co2e if basis == "location" else run.total_co2e_market
     gross_t = (gross_kg or 0.0) / 1000.0
 
+    # A market-basis neutrality claim rests on total_co2e_market, which is exactly the
+    # figure the Scope 2 residual-mix gate polices. Without this, an ISO 14068 claim could
+    # be made on a market figure every OTHER framework hard-blocks — and understated
+    # uncovered load makes neutrality easier to reach, so the omission cut the wrong way.
+    residual_blockers = []
+    if basis == "market":
+        from .residual_mix import scope2_residual_mix_completeness
+        residual_blockers = scope2_residual_mix_completeness(db, run).get("blockers", [])
+
     applied = db.query(CarbonCredit).filter(
         CarbonCredit.organisation_id == organisation_id,
         CarbonCredit.retired.is_(True),
@@ -57,6 +66,8 @@ def neutrality_assessment(db: Session, organisation_id: int, run: CalculationRun
         and removals_total + 1e-9 >= max(0.0, gross_t))
 
     return {
+        "scope2_residual_mix_blockers": residual_blockers,
+        "claim_supportable": not residual_blockers,
         "framework": "ISO 14068-1 carbon neutrality",
         "basis": basis,
         "gross_tco2e": round(gross_t, 6),

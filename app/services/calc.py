@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from ..models import (
     ActivityRecord, EmissionFactor, CalculationRun, EmissionLineItem, ReportingPeriod,
     MarketInstrument, Scope3CategoryDeclaration, RunScope3Declaration,
-    Organisation, ReportingEntity, RunEntityBoundary,
+    Organisation, ReportingEntity, RunEntityBoundary, RunResidualMixStatement,
 )
 from .ghgp import (
     GHGP_STANDARD_VERSION, CATEGORY_MAP_VERSION, CATEGORIES, taxonomy,
@@ -16,6 +16,10 @@ from .ghgp import (
 )
 from .boundary import (
     BOUNDARY_VERSION, entity_weight, group_class, consolidation_fingerprint,
+)
+from .residual_mix import (
+    RESIDUAL_MIX_VERSION, MARKET_UNKNOWN, YEAR_UNKNOWN, market_key,
+    resolve_reference_rate,
 )
 from .units import convert, UnitConversionError, QuantityError
 from .gwp import co2e_from_gases, gwp
@@ -228,8 +232,18 @@ class _InstrumentPool:
         return True
 
     def allocate(self, kwh: float, activity_date: Optional[str],
-                 activity_market: Optional[str], grid_rate_per_kwh: float) -> dict:
-        """Cover ``kwh`` from the pool; residual is priced at the grid rate."""
+                 activity_market: Optional[str], grid_rate_per_kwh: float,
+                 residual: Optional[dict] = None,
+                 line_co2e_gross: float = 0.0) -> dict:
+        """Cover ``kwh`` from the pool; price whatever is left at the RESIDUAL MIX.
+
+        Scope 2 Guidance: uncovered load takes the residual mix — the grid average with
+        the attributes other purchasers already claimed removed — NOT the plain grid
+        average, which double counts those attributes and understates the market figure.
+        When no residual mix resolves, the previous grid-average arithmetic is kept
+        verbatim (fail-open on the number) and the gate reports it (fail-closed on the
+        disclosure). A rate is never invented and never raised to meet the grid rate.
+        """
         allocations = []
         needed = kwh
         co2e = 0.0
@@ -267,13 +281,39 @@ class _InstrumentPool:
                 "kwh_covered": take,
                 "undated_instrument": not (inst.start_date or inst.end_date),
             })
-        if needed > 0:
-            co2e += needed * grid_rate_per_kwh
+        # `covered` keeps its established meaning (everything the instrument pool took),
+        # so the frozen `kwh_contractual` key is NOT re-scoped — summary.py and issb_s2.py
+        # read it off already-filed runs, and re-scoping a frozen key rewrites history.
         covered = kwh - needed
-        basis = ("contractual_instrument" if needed <= 0 and allocations
+        kwh_residual = 0.0
+        rate = (residual or {}).get("rate")
+        if needed > 0 and rate is not None:
+            co2e += needed * rate
+            kwh_residual = needed
+            # Close the per-line ledger: sum(kwh_covered) + kwh_grid_fallback == kwh.
+            allocations.append({
+                "instrument_id": None,
+                "instrument_type": "residual_mix",
+                "source": "reference",
+                "reference_rate_id": (residual or {}).get("reference_rate_id"),
+                "kg_co2e_per_kwh": rate,
+                "kwh_covered": needed,
+                "market_match": "matched" if activity_market else "unverified",
+            })
+            needed = 0.0
+        elif needed > 0:
+            # EXACT PASSTHROUGH when the pool took nothing: kwh * (co2e_gross / kwh) is not
+            # bit-identical to co2e_gross in float, and a zero-instrument org's market total
+            # must not drift by a ULP purely because it now walks this path.
+            co2e += (line_co2e_gross if (not allocations and needed == kwh)
+                     else needed * grid_rate_per_kwh)
+        basis = ("contractual_instrument" if covered >= kwh and allocations
+                 else "residual_mix" if kwh_residual > 0 and covered <= 0
+                 else "partial_contractual_residual_mix" if kwh_residual > 0
                  else "partial_contractual" if allocations
                  else "grid_average_fallback")
         return {"co2e": co2e, "kwh": kwh, "kwh_contractual": covered,
+                "kwh_residual_mix": kwh_residual,
                 "kwh_grid_fallback": needed, "method_basis": basis,
                 "activity_market": activity_market,
                 "kwh_market_unverified": market_unverified_kwh,
@@ -363,6 +403,15 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
     instruments = db.query(MarketInstrument).filter(
         MarketInstrument.organisation_id == organisation_id).all()
     pool = _InstrumentPool(instruments, gwp_set)
+    # Residual mix resolved ONCE per distinct (market, year) the run touches, then reused.
+    _rm_cache: dict = {}
+    _rm_rollup: dict = {}      # (market_key, year_key) -> frozen statement accumulator
+
+    def _residual_for(mkey, yr):
+        k = (mkey, yr)
+        if k not in _rm_cache:
+            _rm_cache[k] = resolve_reference_rate(db, mkey, yr, gwp_set)
+        return _rm_cache[k]
 
     # --- GHG Protocol Ch.3 organisational boundary -----------------------------
     org = db.get(Organisation, organisation_id)
@@ -627,13 +676,32 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 market_detail.pop("biogenic_co2e", None)
                 market_detail.pop("biogenic_co2e_gross", None)
                 is_electricity = (a.category or "").lower() == "electricity"
-                if is_electricity and instruments:
+                # NOT `and instruments`: an org holding ZERO contractual instruments is
+                # exactly the population whose ENTIRE market figure was the location
+                # figure, and the residual mix has to reach them or the fix is dead code
+                # for the majority. With no instruments the pool covers nothing and the
+                # exact-passthrough in allocate() keeps their number bit-identical.
+                if is_electricity:
+                    # Resolved BEFORE the conversion attempt: an electricity line whose
+                    # unit cannot be converted still TOUCHED this market, and the statement
+                    # artifact is complete-by-construction only if it says so.
+                    _adate = _parse_iso_date(a.date)
+                    _mk = market_key(a.geo)
+                    _yr = _adate.year if _adate else None
+                    _res = _residual_for(_mk, _yr)
+                    _k = (_mk or MARKET_UNKNOWN, _yr or YEAR_UNKNOWN)
+                    _b = _rm_rollup.setdefault(_k, {
+                        "kwh_contractual": 0.0, "kwh_residual": 0.0, "kwh_grid": 0.0,
+                        "grid_num": 0.0, "co2e_residual": 0.0, "co2e_grid": 0.0,
+                        "gap": 0.0, "res": _res, "instrument_id": None,
+                        "org_kwh": 0.0, "ref_kwh": 0.0, "unpriceable_lines": 0})
                     try:
                         kwh = convert(a.quantity, a.unit, "kWh")
                         grid_rate = (co2e_gross / kwh) if kwh else 0.0   # GROSS on GROSS
                         # a.geo is the consumption's grid/market — instruments only
                         # cover matching-market load (a US REC can't zero DE consumption).
-                        alloc = pool.allocate(kwh, a.date, a.geo, grid_rate)
+                        alloc = pool.allocate(kwh, a.date, a.geo, grid_rate,
+                                              residual=_res, line_co2e_gross=co2e_gross)
                         market_co2e_gross = alloc.pop("co2e")
                         # MERGE, don't replace: a wholesale replace discarded factor_id,
                         # method_type, data_quality, scope_source and every ghgp_* key
@@ -641,9 +709,64 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                         market_detail = {**detail, **alloc}
                         market_detail.pop("biogenic_co2e", None)
                         market_detail.pop("biogenic_co2e_gross", None)
+                        # The grid rate is frozen for the FIRST time here: it was derived
+                        # and thrown away before, which is exactly why the understatement
+                        # a legacy run carries cannot be quantified after the fact.
+                        market_detail.update({
+                            "residual_mix_version": RESIDUAL_MIX_VERSION,
+                            "residual_mix_market_key": _mk,
+                            "residual_mix_year_key": _yr,
+                            "residual_mix_status": _res["status"],
+                            "residual_mix_rate_kg_per_kwh": _res.get("rate"),
+                            "residual_mix_reference_rate_id": _res.get("reference_rate_id"),
+                            "residual_mix_reference_rate_kg_per_kwh":
+                                _res.get("reference_rate_kg_per_kwh"),
+                            "residual_mix_gwp_match": _res.get("gwp_match"),
+                            "grid_rate_kg_per_kwh": grid_rate,
+                            "location_factor_geography": a.factor.geography,
+                        })
+                        # Every leg is bucketed EXACTLY once. Taking only the first org
+                        # residual leg (and excluding all residual-typed legs from the
+                        # contractual sum) dropped legs 2..n from every bucket: the frozen
+                        # ledger stopped summing to consumption, grid_rate_avg inflated,
+                        # and RM-B3 fired a FALSE inversion blocker on a correct run.
+                        _line_org_kwh = 0.0
+                        for _leg in alloc.get("allocations", []):
+                            _lk = _leg.get("kwh_covered", 0.0)
+                            if _leg.get("instrument_type") != "residual_mix":
+                                _b["kwh_contractual"] += _lk
+                            elif _leg.get("instrument_id") is not None:
+                                _b["org_kwh"] += _lk
+                                _line_org_kwh += _lk
+                                _b["co2e_org"] = _b.get("co2e_org", 0.0) + _lk * _leg["kg_co2e_per_kwh"]
+                                _b["co2e_residual"] += _lk * _leg["kg_co2e_per_kwh"]
+                                _b["instrument_id"] = _leg["instrument_id"]
+                                _ref = _res.get("reference_rate_kg_per_kwh")
+                                if _ref is not None:
+                                    # PROVABLE understatement only, and CONSOLIDATED: the
+                                    # disclosed market total is share-weighted, so an
+                                    # unweighted gap beside it is the like-for-like error.
+                                    _b["gap"] += max(
+                                        0.0, _ref - _leg["kg_co2e_per_kwh"]) * _lk * _w
+                            else:
+                                _b["ref_kwh"] += _lk
+                                _b["co2e_residual"] += _lk * _leg["kg_co2e_per_kwh"]
+                        _b["kwh_residual"] = _b["org_kwh"] + _b["ref_kwh"]
+                        _b["kwh_grid"] += alloc.get("kwh_grid_fallback", 0.0)
+                        # Weighted over the UNCOVERED remainder only. Averaging over all
+                        # electricity (including contractually covered load on a dirtier
+                        # factor) produced a "grid average" the residual mix was compared
+                        # against but never drawn from — a false RM-B3 inversion on a
+                        # correct run.
+                        _unc = (alloc.get("kwh_residual_mix", 0.0) + _line_org_kwh
+                                + alloc.get("kwh_grid_fallback", 0.0))
+                        _b["grid_num"] += grid_rate * _unc
+                        _b["grid_den"] = _b.get("grid_den", 0.0) + _unc
+                        _b["co2e_grid"] += alloc.get("kwh_grid_fallback", 0.0) * grid_rate
                     except UnitConversionError as exc:
                         market_detail["method_basis"] = "grid_average_fallback"
                         market_detail["fallback_reason"] = str(exc)
+                        _b["unpriceable_lines"] += 1
                 else:
                     market_detail["method_basis"] = "grid_average_fallback"
                     if not is_electricity:
@@ -728,6 +851,67 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 line_count=agg["n"],
                 boundary_version=BOUNDARY_VERSION, frozen_at=frozen_at_b,
             ))
+
+        # --- Freeze the Scope 2 residual-mix statement onto the run ---
+        # ONE ROW PER (market, year) the run's electricity touched, INCLUDING markets fully
+        # covered by contractual instruments (status 'fully_contractual', zeros). Complete
+        # by construction, the same doctrine as RunEntityBoundary and RunScope3Declaration:
+        # an assurer sees the whole market population rather than having to notice an absence.
+        _rm_frozen_at = _utcnow_iso()
+        for (_mk, _yk), _b in sorted(_rm_rollup.items()):
+            _res = _b["res"]
+            _kwh_res, _kwh_grid = _b["kwh_residual"], _b["kwh_grid"]
+            _kwh_all = _b["kwh_contractual"] + _kwh_res + _kwh_grid
+            _rate = (_b["co2e_residual"] / _kwh_res) if _kwh_res > 0 else None
+            # Status names the bucket's DOMINANT outcome, but a bucket can be MIXED
+            # (part priced at residual, part still at grid). The gate therefore keys its
+            # grid-priced rules on kwh_priced_at_grid, never on status equality — keying
+            # them on status made every rule unreachable for a market that had any org
+            # residual leg at all, however much load still fell through to the grid.
+            if _b.get("unpriceable_lines"):
+                # An electricity line whose unit will not convert to kWh contributes no
+                # quantity, so a zeroed bucket would otherwise read as a clean
+                # 'fully_contractual' market — a FALSE completeness claim about load that
+                # was in fact priced at the location grid average.
+                _status, _rate = "unpriceable", None
+            elif _kwh_res <= 0 and _kwh_grid <= 0:
+                _status, _rate = "fully_contractual", None
+            elif _kwh_grid > 0 and _kwh_res <= 0:
+                # Nothing was priced at a residual: name WHY, so the right rule fires.
+                _rate = None
+                if _mk == MARKET_UNKNOWN:
+                    _status = "market_unknown"
+                elif _yk == YEAR_UNKNOWN:
+                    _status = "year_unknown"
+                elif _res["status"] == "not_published":
+                    _status = "not_published"
+                else:
+                    _status = "unresolved_no_reference_data"
+            elif _b["org_kwh"] >= _b["ref_kwh"]:
+                _status = "org_instrument"
+            else:
+                _status = "reference_rate"
+            db.add(RunResidualMixStatement(
+                run_id=run.id, market_key=_mk, year_key=_yk, status=_status,
+                rate_kg_co2e_per_kwh=_rate,
+                reference_rate_id=_res.get("reference_rate_id"),
+                reference_rate_kg_co2e_per_kwh=_res.get("reference_rate_kg_per_kwh"),
+                instrument_id=_b["instrument_id"],
+                gwp_match=_res.get("gwp_match"), gas_basis=_res.get("gas_basis"),
+                publisher=_res.get("publisher"), publication=_res.get("publication"),
+                kwh_contractual=_b["kwh_contractual"],
+                kwh_priced_at_residual=_kwh_res, kwh_priced_at_grid=_kwh_grid,
+                grid_rate_avg_kg_per_kwh=((_b["grid_num"] / _b["grid_den"])
+                                          if _b.get("grid_den") else None),
+                co2e_at_residual_kg=_b["co2e_residual"], co2e_at_grid_kg=_b["co2e_grid"],
+                gap_consolidated_co2e_kg=_b["gap"],
+                org_rate_kg_co2e_per_kwh=((_b.get("co2e_org", 0.0) / _b["org_kwh"])
+                                          if _b["org_kwh"] > 0 else None),
+                gwp_vintage_mismatch=bool(_res.get("gwp_vintage_mismatch")),
+                unpriceable_lines=_b.get("unpriceable_lines", 0),
+                residual_mix_version=RESIDUAL_MIX_VERSION, frozen_at=_rm_frozen_at,
+            ))
+        run.scope2_residual_mix_version = RESIDUAL_MIX_VERSION
 
         # --- Freeze the Scope 3 completeness statement onto the run ---
         # EXACTLY 15 rows, ALWAYS. A category the org never screened is frozen as
