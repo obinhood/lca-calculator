@@ -214,6 +214,31 @@ paths emitted a materially wrong number while stamping the report
   underflow at RENDER time on a filed run (an HTTP 500, worse than a blocker); **LOW** — the
   entailment CHECK did not enforce what it documented (SQL three-valued logic).
 
+- **PR #25** — _GHGP Scope 2 residual mix for uncovered market-based load._ Scope 2 Guidance
+  requires consumption NOT covered by a contractual instrument to be priced at the RESIDUAL
+  MIX (the grid average with attributes other purchasers already claimed removed). The engine
+  priced it at the plain location grid average, double counting those attributes and
+  UNDERSTATING the market figure — one-directional, since residual mix is always >= the grid
+  average. THE KEY FINDING (from the design judge): the market branch was guarded by
+  `if is_electricity and instruments:`, so an org holding ZERO instruments never entered the
+  allocator and its ENTIRE market figure was the location figure — the population where the
+  understatement is 100%, and where a residual leg placed inside the allocator would have been
+  dead code. Adds `residual_mix_rates` (append-only published reference data, with
+  `not_published` as an ATTESTED absence) and `run_residual_mix_statements` (one frozen row per
+  (market, year) touched, including fully-contractual markets — complete by construction).
+  `market_key()` is extracted from the instrument matcher so both can never use two different
+  notions of "market"; resolution is exact, two-pass on GWP vintage, never broadened. Blockers
+  are calibrated on WHO OWNS THE MISSING FACT — absence never blocks (publishers release year Y
+  in mid-Y+1), org-fixable or provably-wrong cases do. `total_co2e` and sum(location lines) are
+  untouched; only `total_co2e_market` moves, and only upward. TWO review rounds — 16 raised/15
+  confirmed, then 7 more on the fixes — all fixed with regression tests. The most damaging:
+  `grid_rate_avg` weighted over ALL electricity (including covered load) then compared against
+  the uncovered remainder's rate, producing a FALSE inversion blocker on a correct run; an
+  attested absence plus a contractual claim producing NEITHER blocker nor warning (the
+  conditions were not complementary, so the strongest double-count case was the silent one);
+  and `residual_mix_comparable` blocking GRI 305-5 for EVERY org on the version stamp alone,
+  since nothing is back-filled so every base run is NULL.
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
