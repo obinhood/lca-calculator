@@ -166,6 +166,10 @@ async def upload_activities(file: UploadFile = File(...),
             geo=(r["geo"] or "GB").strip(),
             source_file=r["source_file"],
             upload_hash=upload_hash,
+            # Optional consumption window. Absent (the normal case) leaves both NULL and
+            # the record is attributed wholly by `date`, exactly as before.
+            coverage_start=_coverage_cell(r, "coverage_start"),
+            coverage_end=_coverage_cell(r, "coverage_end"),
             provenance="process",
         ))
     db.add_all(recs); db.commit()
@@ -910,6 +914,61 @@ def create_entity(name: str = Query(...), accounting_category: str = Query(...),
     db.add(e); db.commit(); db.refresh(e)
     return {"id": e.id, "name": e.name, "accounting_category": e.accounting_category,
             "note": "Attribute activities to it via POST /activities/entity, then recompute."}
+
+
+def _coverage_cell(row, key):
+    """An optional ISO date from an upload row; None when absent or unparseable.
+
+    Never guesses: a malformed window is dropped to None so the record is attributed by
+    `date` as before, rather than silently prorated on a date nobody can verify.
+    """
+    from .services.calc import _parse_iso_date
+    try:
+        v = row.get(key)
+    except Exception:
+        return None
+    if v is None or (isinstance(v, float) and v != v):      # NaN
+        return None
+    v = str(v).strip()
+    return v if (v and _parse_iso_date(v)) else None
+
+
+@app.post("/activities/coverage_window")
+def set_activity_coverage_window(
+        coverage_start: str = Query(...), coverage_end: str = Query(...),
+        category: Optional[str] = Query(None), source_file: Optional[str] = Query(None),
+        org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Declare the CONSUMPTION WINDOW a set of activities covers.
+
+    A record carries a single `date`, so an invoice spanning 15 Dec - 15 Jan was
+    attributed WHOLLY to whichever fiscal year that date fell in. With a window declared,
+    a period-scoped run prorates the quantity by the overlapping share (inclusive calendar
+    days, frozen onto the line) so the emissions land in the year they occurred.
+
+    Recompute afterwards: the window is part of the activity fingerprint, so an existing
+    run becomes STALE rather than silently changing.
+    """
+    from .services.calc import _parse_iso_date
+    cs, ce = _parse_iso_date(coverage_start), _parse_iso_date(coverage_end)
+    if cs is None or ce is None:
+        raise HTTPException(status_code=400,
+                            detail="coverage_start and coverage_end must be ISO dates")
+    if ce < cs:
+        raise HTTPException(status_code=400,
+                            detail="coverage_end must not precede coverage_start")
+    q = db.query(ActivityRecord).filter(ActivityRecord.organisation_id == org.id)
+    if category:
+        q = q.filter(ActivityRecord.category == category.strip().lower())
+    if source_file:
+        q = q.filter(ActivityRecord.source_file == source_file)
+    rows = q.all()
+    for a in rows:
+        a.coverage_start, a.coverage_end = cs.isoformat(), ce.isoformat()
+    db.commit()
+    return {"updated": len(rows), "coverage_start": cs.isoformat(),
+            "coverage_end": ce.isoformat(),
+            "note": "Recompute the run: the window is part of the activity fingerprint, "
+                    "so existing runs are now STALE rather than silently changed."}
 
 
 @app.post("/activities/entity")

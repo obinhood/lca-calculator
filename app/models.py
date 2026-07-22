@@ -28,7 +28,15 @@ class ActivityRecord(Base):
     __tablename__ = "activities"
     id = Column(Integer, primary_key=True)
     organisation_id = Column(Integer, ForeignKey("organisations.id"))
-    date = Column(String)  # ISO date
+    date = Column(String)  # ISO date — the single point the record is attributed by
+    # The CONSUMPTION WINDOW this record covers, when it is a period rather than a point
+    # (a supply invoice spanning a month, a meter read between two dates). Both NULL =
+    # attribute wholly by `date`, exactly as before — so every pre-existing activity and
+    # every filed run is unchanged. When declared and the window straddles a reporting
+    # period boundary, the quantity is PRORATED by the overlap so the emissions land in
+    # the year they occurred instead of wholly in whichever year `date` happens to fall.
+    coverage_start = Column(String, nullable=True)   # ISO
+    coverage_end = Column(String, nullable=True)     # ISO, inclusive
     category = Column(String)  # electricity, gas, diesel, flight, train, car, waste, spend
     subcategory = Column(String)  # economy/short-haul, etc.
     description = Column(Text)
