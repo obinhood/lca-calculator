@@ -272,6 +272,20 @@ paths emitted a materially wrong number while stamping the report
   and the share being priced on the record's `date` rather than the period it landed in, so the
   FY24 slice took FY25's residual mix and no FY24 instrument could cover it.
 
+- **PR #31** — _Table 5.4 policy drift detection (W3)._ Closes the loose end from PR #19,
+  which froze `ghgp_boundary_token` per Scope 3 line precisely so a later move in the
+  acceptance vocabulary could be detected on an already-filed run — and until now nothing
+  read it. `boundary_policy_drift()` re-evaluates each frozen token under the CURRENT policy
+  and reports which WAY the filing leans: `understating` (lines the run ACCEPTED that the
+  current vocabulary REJECTS — those categories may be PARTIAL figures filed as compliant,
+  and this is the direction that matters) or `conservative` (over-strict, nothing
+  understated, and the message says so rather than reading as a problem). A WARNING and
+  never a blocker: restating a filed verdict would break the reproduction contract, and a
+  vocabulary move must not retroactively invalidate every filing made under the previous
+  one. Lines frozen before the token existed are reported as `undeterminable`, never
+  back-filled from the live catalogue. Pure read over frozen state — no schema, migration
+  or engine change.
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
