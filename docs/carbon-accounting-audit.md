@@ -48,7 +48,8 @@ paths emitted a materially wrong number while stamping the report
 | B. Financed emissions (PCAF = Cat 15) never roll into the entity total | ✅ Fixed (PR #9) |
 | C. No inventory line for removals (DAC, biochar, afforestation) | ✅ Fixed (PR #14) |
 | Float accumulation vs neutrality threshold | ✅ Fixed (PR #27) |
-| Temporal straddle proration; GLEC not truly modelled | ⬜ Open |
+| Temporal straddle proration | ✅ Fixed (PR #29) |
+| GLEC not truly modelled | ⬜ Open |
 
 ## Remediation log
 
@@ -252,6 +253,24 @@ paths emitted a materially wrong number while stamping the report
   error grew with the org. The tolerance is now relative and DISCLOSED beside the residual;
   it can only forgive a rounding-scale residual (1e-9 relative on a megatonne is one
   kilogram), and a claim resting on it is flagged `neutral_within_tolerance_only`.
+
+- **PR #29** — _Temporal straddle proration._ An ActivityRecord carries a single `date`, so a
+  supply invoice covering 15 Dec - 15 Jan was attributed WHOLLY to whichever fiscal year that
+  date fell in. Declaring `coverage_start`/`coverage_end` lets a period-scoped run prorate the
+  quantity by the overlapping share (inclusive calendar days, frozen onto the line), so two
+  adjacent periods together account for exactly the whole record. Both columns nullable and
+  NEVER back-filled — with no window a record is attributed by `date` byte-identically to
+  before, because the platform cannot infer a window it was not told. Membership follows the
+  WINDOW when declared; the prorated quantity replaces the raw one at EVERY consumer
+  (emissions, biogenic pool, Scope 2 kWh); fingerprint v5 so declaring a window makes a run
+  STALE rather than silently changing a filed figure. Review raised 6 / confirmed 5 → three
+  causes: **HIGH** `coverage_overlap` bailed to a 1.0 fraction whenever EITHER period bound was
+  NULL while membership used only the bound that exists, so an open-bounded period booked 100%
+  ON TOP of its neighbour's share (1000 kg counted as 1468.75); **HIGH** `_energy_kwh` read the
+  LIVE quantity, putting SECR/ESOS/ESRS E1-5/GRI 302 energy on the GROSS basis beside prorated
+  emissions — a wrong implied intensity and 2000 kWh across two periods for a 1000 kWh invoice;
+  and the share being priced on the record's `date` rather than the period it landed in, so the
+  FY24 slice took FY25's residual mix and no FY24 instrument could cover it.
 
 ## Strengths worth preserving
 
