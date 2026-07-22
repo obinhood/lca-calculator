@@ -63,20 +63,26 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
     notes = []
     weighted_any = False
     for a, details in rows:
+        _d = json.loads(details or "{}")
         share = 1.0
         if consolidated:
-            share = ((json.loads(details or "{}").get("consolidation") or {})
-                     .get("share_factor", 1.0))
+            share = (_d.get("consolidation") or {}).get("share_factor", 1.0)
             if share != 1.0:
                 weighted_any = True
+        # The FROZEN quantity, which carries any temporal proration. Reading the live
+        # ActivityRecord.quantity put the energy figure on the GROSS basis beside emissions
+        # that were prorated — a wrong implied intensity, and 2000 kWh reported across two
+        # periods for a 1000 kWh invoice. Falls back for runs frozen before proration
+        # existed, whose details carry no `quantity` key, so those stay byte-identical.
+        _qty = _d["quantity"] if "quantity" in _d else a.quantity
         try:
             if a.category == "diesel":
-                litres = convert(a.quantity, a.unit, "L")
+                litres = convert(_qty, a.unit, "L")
                 out["diesel"] += litres * DIESEL_KWH_PER_LITRE_DEMO * share
                 notes.append(f"diesel converted at DEMO constant "
                              f"{DIESEL_KWH_PER_LITRE_DEMO} kWh/L")
             else:
-                out[a.category] += convert(a.quantity, a.unit, "kWh") * share
+                out[a.category] += convert(_qty, a.unit, "kWh") * share
         except UnitConversionError as exc:
             notes.append(f"activity {a.id} excluded from energy figure: {exc}")
     out["total_kwh"] = sum(v for k, v in out.items() if k in _ENERGY_CARRIERS)

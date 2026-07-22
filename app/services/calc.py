@@ -83,7 +83,9 @@ def _parse_iso_date(value: Optional[str]) -> Optional[date_cls]:
 
 # Bumped whenever the fingerprint's INPUTS change, so a run stamped under an older
 # scheme is reported as "staleness not assessable" rather than falsely STALE.
-FINGERPRINT_VERSION = "v4"   # v4: entity_id — re-attributing an activity to a
+FINGERPRINT_VERSION = "v5"   # v5: coverage_start/end — a declared consumption window
+                             # changes how much of the record falls in the period.
+                             # v4: entity_id — re-attributing an activity to a
                              # different entity changes its SHARE and thus the RESULT.
 
 
@@ -98,7 +100,7 @@ def activities_fingerprint(acts: List[ActivityRecord]) -> str:
     """
     parts = sorted(
         f"{a.id}:{a.factor_id}:{a.quantity}:{a.unit}:{a.date}:{a.category}:{a.ghgp_category}:"
-        f"{a.entity_id}" for a in acts)
+        f"{a.entity_id}:{a.coverage_start}:{a.coverage_end}" for a in acts)
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
     return f"{FINGERPRINT_VERSION}:{digest}"
 
@@ -126,6 +128,16 @@ def activities_in_scope(db: Session, organisation_id: int,
     p_end = _parse_iso_date(period.end_date)
     in_period = []
     for a in acts:
+        cs = _parse_iso_date(getattr(a, "coverage_start", None))
+        ce = _parse_iso_date(getattr(a, "coverage_end", None))
+        if cs is not None and ce is not None and ce >= cs:
+            # A declared WINDOW decides membership: a December-to-January invoice belongs
+            # to both fiscal years, prorated, rather than wholly to whichever one its
+            # single `date` lands in.
+            if (p_end and cs > p_end) or (p_start and ce < p_start):
+                continue
+            in_period.append(a)
+            continue
         adate = _parse_iso_date(a.date)
         if adate is None:
             in_period.append(a)      # undatable: kept, becomes a data_error
@@ -136,6 +148,40 @@ def activities_in_scope(db: Session, organisation_id: int,
             continue
         in_period.append(a)
     return in_period
+
+
+def coverage_overlap(a, p_start, p_end):
+    """(fraction, evidence) for a declared consumption window against the reporting period.
+
+    Returns ``(1.0, None)`` whenever there is no usable window or the run is not
+    period-scoped — byte-identical behaviour to before, which is what keeps every existing
+    activity and every filed run unchanged.
+
+    The basis is INCLUSIVE CALENDAR DAYS, frozen onto the line. It is deliberately not
+    inferred: a record with no declared window is attributed wholly by its `date`, exactly
+    as it always was, because the platform cannot know a window it was not told.
+    """
+    cs = _parse_iso_date(getattr(a, "coverage_start", None))
+    ce = _parse_iso_date(getattr(a, "coverage_end", None))
+    # Bail only when the WINDOW itself is unusable — never because a PERIOD bound is open.
+    # A reporting period may legitimately have one open bound, and activities_in_scope
+    # admits a record on the bound that exists; conflating the two facts here counted the
+    # record whole in the open-bounded period AND prorated in its neighbour.
+    if cs is None or ce is None or ce < cs:
+        return 1.0, None
+    total_days = (ce - cs).days + 1
+    o_start = max(cs, p_start) if p_start else cs
+    o_end = min(ce, p_end) if p_end else ce
+    overlap_days = max(0, (o_end - o_start).days + 1)
+    frac = overlap_days / total_days
+    if frac >= 1.0:
+        return 1.0, None            # wholly inside the period: nothing to prorate
+    return frac, {
+        "coverage_start": cs.isoformat(), "coverage_end": ce.isoformat(),
+        "coverage_days": total_days, "days_in_period": overlap_days,
+        "overlap_start": o_start.isoformat(), "overlap_end": o_end.isoformat(),
+        "proration_fraction": frac, "proration_basis": "inclusive_calendar_days",
+    }
 
 
 def factor_gases(factor: EmissionFactor) -> dict:
@@ -459,6 +505,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         total_market = 0.0   # dual reporting: Scope 2 swapped to market basis
         total_biogenic = 0.0 # ISO 14067: separate pool, never netted into totals
         dq_weighted_sum = 0.0  # emissions-weighted data-quality accumulator
+        _p_start = _parse_iso_date(period.start_date) if period else None
+        _p_end = _parse_iso_date(period.end_date) if period else None
         for a in acts:
             if a.id in undatable:
                 run.data_errors += 1
@@ -468,6 +516,17 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             if not a.factor:
                 run.unmapped += 1
                 continue
+            # Temporal straddle: a declared consumption window overlapping the period
+            # boundary contributes only its overlapping share. `_qty` replaces a.quantity
+            # everywhere below — the emissions figure, the biogenic pool and the Scope 2
+            # kWh must all be on the SAME prorated basis or the line contradicts itself.
+            _frac, _cov = coverage_overlap(a, _p_start, _p_end)
+            # The EFFECTIVE date for period-sensitive pricing. When a share was prorated
+            # into this period, that share is the consumption occurring inside the overlap,
+            # so it must be priced with the overlap's own vintage — residual-mix year,
+            # spend base year and contractual-instrument matching alike.
+            _eff_date = _cov["overlap_start"] if _cov else a.date
+            _qty = (a.quantity * _frac) if a.quantity is not None else None
             per_gas = a.factor.has_gas_breakdown
             # Aggregate factors bake a GWP vintage into `value`, so a vintage
             # mismatch is unresolvable at calc time. Per-gas factors are vintage-
@@ -483,14 +542,14 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 errors.append({"activity_id": a.id, "error": "negative quantity"})
                 continue
 
-            _pdate = _parse_iso_date(a.date)
+            _pdate = _parse_iso_date(_eff_date)
             spend_steps = None
             if (a.factor.method_type or "") == "spend_based":
                 # Spend-based EEIO: normalize the amount to the factor's currency
                 # and base year (inflation + base-year FX), fail-closed on missing
                 # reference data, then apply the per-currency factor.
                 try:
-                    amt = float(a.quantity)
+                    amt = float(_qty)
                     if not math.isfinite(amt):
                         raise ValueError("non-finite amount")
                 except (TypeError, ValueError):
@@ -513,7 +572,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 co2e = spend_steps["amount_in_factor_currency"] * a.factor.value
             else:
                 try:
-                    co2e = compute_activity_co2e(a.quantity, a.unit, a.factor, gwp_set=gwp_set)
+                    co2e = compute_activity_co2e(_qty, a.unit, a.factor, gwp_set=gwp_set)
                 except QuantityError as exc:          # None / non-finite / non-numeric quantity
                     run.data_errors += 1
                     errors.append({"activity_id": a.id, "error": str(exc)})
@@ -575,7 +634,9 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 "factor_id": a.factor_id,
                 "activity_unit": a.unit,
                 "factor_unit": a.factor.unit,
-                "quantity": a.quantity,
+                "quantity": _qty,
+                "quantity_as_recorded": a.quantity,
+                "temporal_proration": _cov,
                 "calc_method": "per_gas" if per_gas else "aggregate",
                 # GHG Protocol Scope 3 method hierarchy + LCA system boundary —
                 # the lineage an assurer needs to check for double counting and
@@ -600,7 +661,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             # convert() cannot fail here — the same args already succeeded in
             # compute_activity_co2e above — so no guard is needed.
             if a.factor.kg_co2_biogenic is not None and math.isfinite(a.factor.kg_co2_biogenic):
-                qty_fu = convert(a.quantity, a.unit, a.factor.unit)
+                qty_fu = convert(_qty, a.unit, a.factor.unit)
                 # Weighted too, or the ISO 14067 biogenic pool would sit on a different
                 # (gross) basis from the consolidated total reported beside it.
                 biogenic_gross = qty_fu * a.factor.kg_co2_biogenic
@@ -695,7 +756,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                     # Resolved BEFORE the conversion attempt: an electricity line whose
                     # unit cannot be converted still TOUCHED this market, and the statement
                     # artifact is complete-by-construction only if it says so.
-                    _adate = _parse_iso_date(a.date)
+                    _adate = _parse_iso_date(_eff_date)
                     _mk = market_key(a.geo)
                     _yr = _adate.year if _adate else None
                     _res = _residual_for(_mk, _yr)
@@ -706,11 +767,11 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                         "gap": 0.0, "res": _res, "instrument_id": None,
                         "org_kwh": 0.0, "ref_kwh": 0.0, "unpriceable_lines": 0})
                     try:
-                        kwh = convert(a.quantity, a.unit, "kWh")
+                        kwh = convert(_qty, a.unit, "kWh")
                         grid_rate = (co2e_gross / kwh) if kwh else 0.0   # GROSS on GROSS
                         # a.geo is the consumption's grid/market — instruments only
                         # cover matching-market load (a US REC can't zero DE consumption).
-                        alloc = pool.allocate(kwh, a.date, a.geo, grid_rate,
+                        alloc = pool.allocate(kwh, _eff_date, a.geo, grid_rate,
                                               residual=_res, line_co2e_gross=co2e_gross)
                         market_co2e_gross = alloc.pop("co2e")
                         # MERGE, don't replace: a wholesale replace discarded factor_id,
