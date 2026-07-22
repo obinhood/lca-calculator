@@ -524,3 +524,48 @@ def test_a_rate_under_another_gwp_vintage_is_named_not_reported_as_absent(db):
     assert run.total_co2e_market == pytest.approx(400.0)   # vintages never silently mixed
     assert any("only under a different GWP vintage" in w
                for w in scope2_residual_mix_completeness(db, run)["warnings"])
+
+
+def test_an_org_residual_instrument_is_not_reported_as_contractual_coverage(db):
+    """Regression (review 2): an org-supplied residual_mix instrument is that org's own
+    residual RATE, not a contractual attribute claim. Counting it as contractual made
+    summary report 100% contractual coverage for an org holding ZERO contractual
+    instruments — contradicting the run's own frozen statement."""
+    from app.reports.summary import summary
+    org = _org(db)
+    _elec(db, org.id, kwh=1000.0, rate=0.4)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="residual_mix",
+                            kg_co2e_per_kwh=0.50, coverage_kwh=1000.0, market="DE",
+                            rate_source="supplier letter", gwp_set="AR6",
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    db.commit()
+    run = compute_co2e(db, org.id)
+    s2 = summary(db, organisation_id=org.id, run_id=run.id)["scope2"]
+    st = _stmts(db, run)[0]
+    assert s2["kwh_contractual"] == pytest.approx(0.0)        # no contractual claim
+    assert s2["kwh_residual_mix"] == pytest.approx(1000.0)
+    assert s2["kwh_electricity_accounted"] == pytest.approx(1000.0)
+    # ...and the two disclosed artifacts now AGREE.
+    assert s2["kwh_contractual"] == pytest.approx(st.kwh_contractual)
+    assert s2["kwh_residual_mix"] == pytest.approx(st.kwh_priced_at_residual)
+
+
+def test_a_rec_plus_an_org_residual_instrument_splits_correctly(db):
+    from app.reports.summary import summary
+    org = _org(db)
+    _elec(db, org.id, kwh=1000.0, rate=0.4)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=600.0, market="DE",
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="residual_mix",
+                            kg_co2e_per_kwh=0.50, coverage_kwh=None, market="DE",
+                            rate_source="supplier letter", gwp_set="AR6",
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    db.commit()
+    run = compute_co2e(db, org.id)
+    s2 = summary(db, organisation_id=org.id, run_id=run.id)["scope2"]
+    st = _stmts(db, run)[0]
+    assert s2["kwh_contractual"] == pytest.approx(600.0)      # the REC only
+    assert s2["kwh_residual_mix"] == pytest.approx(400.0)
+    assert s2["kwh_contractual"] == pytest.approx(st.kwh_contractual)
+    assert s2["kwh_residual_mix"] == pytest.approx(st.kwh_priced_at_residual)

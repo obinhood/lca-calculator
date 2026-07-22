@@ -285,11 +285,20 @@ class _InstrumentPool:
         # so the frozen `kwh_contractual` key is NOT re-scoped — summary.py and issb_s2.py
         # read it off already-filed runs, and re-scoping a frozen key rewrites history.
         covered = kwh - needed
-        kwh_residual = 0.0
+        # An org-supplied residual_mix instrument is NOT a contractual attribute claim —
+        # it is that org's own residual rate. Counting it in the contractual figure made
+        # summary report 100% contractual coverage for an org holding ZERO contractual
+        # instruments, contradicting this run's own frozen statement. `kwh_contractual`
+        # keeps its established meaning (every pool leg) because filed runs read it; the
+        # rank-0-only figure is a NEW key, so no history is re-scoped.
+        rank0 = sum(x["kwh_covered"] for x in allocations
+                    if x.get("instrument_type") != "residual_mix")
+        kwh_residual = covered - rank0          # org residual legs
+
         rate = (residual or {}).get("rate")
         if needed > 0 and rate is not None:
             co2e += needed * rate
-            kwh_residual = needed
+            kwh_residual += needed
             # Close the per-line ledger: sum(kwh_covered) + kwh_grid_fallback == kwh.
             allocations.append({
                 "instrument_id": None,
@@ -307,12 +316,13 @@ class _InstrumentPool:
             # must not drift by a ULP purely because it now walks this path.
             co2e += (line_co2e_gross if (not allocations and needed == kwh)
                      else needed * grid_rate_per_kwh)
-        basis = ("contractual_instrument" if covered >= kwh and allocations
-                 else "residual_mix" if kwh_residual > 0 and covered <= 0
+        basis = ("contractual_instrument" if rank0 >= kwh and allocations
+                 else "residual_mix" if kwh_residual > 0 and rank0 <= 0
                  else "partial_contractual_residual_mix" if kwh_residual > 0
                  else "partial_contractual" if allocations
                  else "grid_average_fallback")
         return {"co2e": co2e, "kwh": kwh, "kwh_contractual": covered,
+                "kwh_contractual_rank0": rank0,
                 "kwh_residual_mix": kwh_residual,
                 "kwh_grid_fallback": needed, "method_basis": basis,
                 "activity_market": activity_market,

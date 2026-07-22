@@ -94,7 +94,10 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
     for (details,) in market_lines:
         d = json.loads(details or "{}")
         bases[d.get("method_basis", "?")] = bases.get(d.get("method_basis", "?"), 0) + 1
-        kwh_contractual += d.get("kwh_contractual", 0.0) or 0.0
+        # Prefer the rank-0-only figure; a run frozen before it existed has no such key
+        # and its `kwh_contractual` is the right value for it (it had no residual legs).
+        kwh_contractual += (d["kwh_contractual_rank0"] if "kwh_contractual_rank0" in d
+                            else (d.get("kwh_contractual", 0.0) or 0.0))
         kwh_grid_fallback += d.get("kwh_grid_fallback", 0.0) or 0.0
         kwh_residual_mix += d.get("kwh_residual_mix", 0.0) or 0.0
         kwh_market_unverified += d.get("kwh_market_unverified", 0.0) or 0.0
