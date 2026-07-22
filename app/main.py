@@ -460,6 +460,99 @@ def add_fx_rate(base_currency: str = Query(...), quote_currency: str = Query(...
             "quote_currency": row.quote_currency, "year": row.year, "rate": row.rate}
 
 
+@app.post("/reference/residual_mix_rates")
+def add_residual_mix_rate(market: str = Query(...), year: int = Query(...),
+                          status: str = Query("published"),
+                          kg_co2e_per_kwh: Optional[float] = Query(None),
+                          gas_basis: str = Query("co2e"),
+                          publisher: str = Query(...),
+                          gwp_set: Optional[str] = Query(None),
+                          publication: Optional[str] = Query(None),
+                          source_url: Optional[str] = Query(None),
+                          published_at: Optional[str] = Query(None),
+                          _: None = Depends(require_admin), db: Session = Depends(get_db)):
+    """A PUBLISHED residual-mix rate for one market and year (append-only).
+
+    Admin-guarded like every other reference table: this is GLOBAL data and every
+    tenant's market-based Scope 2 figure depends on it, so it needs the platform
+    credential rather than an org key. Corrections INSERT a new row — never edit in
+    place, which the run gate detects and blocks (RM-B5).
+
+    `status='not_published'` records an ATTESTED absence for a market where no residual
+    mix exists — a fact an assurer needs on file, not an empty query result.
+    """
+    from .services.calc import _utcnow_iso, _parse_iso_date
+    from .services.residual_mix import market_key
+    from .models import ResidualMixRate
+    mkey = market_key(market)
+    if not mkey:
+        raise HTTPException(status_code=400, detail="market must be a non-blank key")
+    if status not in ("published", "not_published"):
+        raise HTTPException(status_code=400,
+                            detail="status must be published | not_published")
+    if not (1990 <= year <= 2100):
+        raise HTTPException(status_code=400, detail="year must be between 1990 and 2100")
+    if gas_basis not in ("co2", "co2e"):
+        raise HTTPException(status_code=400, detail="gas_basis must be co2 | co2e")
+    if not (publisher or "").strip():
+        raise HTTPException(status_code=400,
+                            detail="publisher is required — a rate without a named "
+                                   "publisher is an assertion, not reference data; "
+                                   "record it as a MarketInstrument instead")
+    if status == "published":
+        if kg_co2e_per_kwh is None or not math.isfinite(kg_co2e_per_kwh) \
+                or kg_co2e_per_kwh <= 0:
+            raise HTTPException(status_code=400,
+                                detail="a published residual mix needs a finite "
+                                       "kg_co2e_per_kwh > 0")
+    else:
+        if kg_co2e_per_kwh is not None:
+            raise HTTPException(status_code=400,
+                                detail="status=not_published cannot carry a rate")
+        if len((publication or "").strip()) < 20:
+            raise HTTPException(status_code=400,
+                                detail="an asserted absence must carry its attestation "
+                                       "(min 20 chars in `publication`)")
+    if published_at and _parse_iso_date(published_at) is None:
+        raise HTTPException(status_code=400, detail="published_at must be an ISO date")
+    row = ResidualMixRate(
+        market=mkey, year=year, status=status, kg_co2e_per_kwh=kg_co2e_per_kwh,
+        gas_basis=gas_basis, publisher=publisher.strip(),
+        gwp_set=(gwp_set.strip().upper() if gwp_set else None),
+        publication=publication, source_url=source_url, published_at=published_at,
+        recorded_at=_utcnow_iso())
+    db.add(row); db.commit(); db.refresh(row)
+    return {"id": row.id, "market": row.market, "year": row.year, "status": row.status,
+            "kg_co2e_per_kwh": row.kg_co2e_per_kwh, "publisher": row.publisher}
+
+
+@app.get("/reference/residual_mix_rates")
+def list_residual_mix_rates(market: Optional[str] = Query(None),
+                            year: Optional[int] = Query(None),
+                            org: Organisation = Depends(current_org),
+                            db: Session = Depends(get_db)):
+    """Read the residual-mix series. Ships WITH the writer on purpose: without it the
+    gate's "no residual mix on file for DE 2025" is a dead end a preparer cannot verify
+    or act on."""
+    from .services.residual_mix import market_key
+    from .models import ResidualMixRate
+    q = db.query(ResidualMixRate)
+    if market:
+        q = q.filter(ResidualMixRate.market == market_key(market))
+    if year:
+        q = q.filter(ResidualMixRate.year == year)
+    rows = q.order_by(ResidualMixRate.market, ResidualMixRate.year,
+                      ResidualMixRate.id.desc()).all()
+    return {"count": len(rows), "rates": [{
+        "id": r.id, "market": r.market, "year": r.year, "status": r.status,
+        "kg_co2e_per_kwh": r.kg_co2e_per_kwh, "gas_basis": r.gas_basis,
+        "gwp_set": r.gwp_set, "publisher": r.publisher, "publication": r.publication,
+        "source_url": r.source_url, "published_at": r.published_at,
+        "recorded_at": r.recorded_at,
+    } for r in rows], "note": "Append-only: the newest row for a (market, year) wins; "
+                              "corrections are INSERTs, never edits."}
+
+
 @app.post("/reference/price_indices")
 def add_price_index(currency: str = Query(...), year: int = Query(...),
                     index_value: float = Query(...),

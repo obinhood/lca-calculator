@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..models import CalculationRun
 from .summary import summary, run_factor_sources
+from ..services.residual_mix import scope2_residual_mix_completeness
 
 _ASSURANCE_LEVELS = ("none", "limited", "reasonable")
 
@@ -41,6 +42,7 @@ def sb253_report(db: Session, organisation_id: int, run_id: Optional[int] = None
 
     blockers = []
     cov = s["coverage"]
+    blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
     if s.get("partial"):
         blockers.append(f"run is PARTIAL — excluded activities: {s['partial_reasons']}")
     if cov["stale"]:

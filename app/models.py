@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Boolean, Text, UniqueConstraint, CheckConstraint
+from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Boolean, Text, UniqueConstraint, CheckConstraint, Index
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -163,6 +163,133 @@ class PriceIndex(Base):
     recorded_at = Column(String, nullable=True)  # ISO timestamp of entry
 
 
+class ResidualMixRate(Base):
+    """A PUBLISHED residual-mix rate for one market and year — global reference data.
+
+    GHG Protocol Scope 2 Guidance: under the market-based method, consumption NOT covered
+    by a contractual instrument must be priced at the RESIDUAL MIX — the grid average with
+    the attributes other purchasers have already claimed removed. Residual mix is therefore
+    always >= the grid average, so pricing uncovered load at the plain grid average double
+    counts those attributes and UNDERSTATES the market-based figure.
+
+    Published per market/year by AIB (Europe) and Green-e (US) — reference data of exactly
+    the kind FxRate/PriceIndex already are: not per-org, admin-written, corrections
+    INSERTed rather than edited. Deliberately NO organisation_id and NO unique constraint:
+    the absent unique constraint IS the append-only mechanism (migration 083915258aeb
+    dropped uq_fx/uq_price_index for this reason — do not reintroduce it here).
+
+    `status='not_published'` is a first-class, ATTESTED absence: a market where no residual
+    mix exists is a fact an assurer needs recorded, not an empty query result.
+    """
+    __tablename__ = "residual_mix_rates"
+    __table_args__ = (
+        CheckConstraint("status IN ('published','not_published')", name="ck_rmr_status"),
+        # `status` is NOT NULL, so these comparisons are never NULL — no three-valued-logic
+        # hole of the kind c8d2e4f6a1b3 had to fix.
+        CheckConstraint(
+            "(status = 'published' AND kg_co2e_per_kwh IS NOT NULL AND kg_co2e_per_kwh > 0) "
+            "OR (status = 'not_published' AND kg_co2e_per_kwh IS NULL)",
+            name="ck_rmr_rate_entailment"),
+        CheckConstraint("gas_basis IN ('co2','co2e')", name="ck_rmr_gas_basis"),
+        CheckConstraint("year >= 1990 AND year <= 2100", name="ck_rmr_year"),
+        # An asserted absence must carry its attestation, mirroring the 20-char
+        # non-boilerplate floor the Scope 3 screen already applies to exclusions.
+        CheckConstraint(
+            "status = 'published' OR (publication IS NOT NULL "
+            "AND length(trim(publication)) >= 20)",
+            name="ck_rmr_absence_attested"),
+        Index("ix_residual_mix_market_year", "market", "year"),
+    )
+    id = Column(Integer, primary_key=True)
+    # Normalised UPPER market key. NOT NULL on purpose: a market-less residual mix would be
+    # a universal rate applied to every grid on earth. (MarketInstrument.market is nullable
+    # because an org's own contract may genuinely omit it; published data may not.)
+    market = Column(String, nullable=False)
+    year = Column(Integer, nullable=False)          # the year the mix is published FOR
+    gwp_set = Column(String, nullable=True)         # NULL = the source states none
+    status = Column(String, nullable=False)         # published | not_published
+    kg_co2e_per_kwh = Column(Float, nullable=True)  # NULL iff status='not_published'
+    gas_basis = Column(String, nullable=False, default="co2e")   # co2 | co2e
+    # NOT NULL: a rate without a named publisher is an assertion, not reference data —
+    # that belongs in MarketInstrument, which already admits instrument_type='residual_mix'.
+    publisher = Column(String, nullable=False)
+    publication = Column(Text, nullable=True)       # for not_published this IS the attestation
+    source_url = Column(Text, nullable=True)
+    published_at = Column(String, nullable=True)    # ISO: when the SOURCE published
+    recorded_at = Column(String, nullable=True)     # ISO: when WE entered it
+
+
+class RunResidualMixStatement(Base):
+    """The IMMUTABLE per-run Scope 2 residual-mix statement: one row per (market, year)
+    the run's electricity touched.
+
+    Complete by construction (the RunEntityBoundary / RunScope3Declaration doctrine):
+    markets fully covered by contractual instruments get a row too (status
+    'fully_contractual', zeros), so an assurer sees the whole market population rather
+    than having to notice an absence.
+    """
+    __tablename__ = "run_residual_mix_statements"
+    __table_args__ = (
+        # SQLite treats NULLs as DISTINCT in a unique index, so market_key/year_key use
+        # sentinels ('__unknown__' / 0) rather than NULL — a nullable pair would silently
+        # admit duplicate statement rows for the same run.
+        UniqueConstraint("run_id", "market_key", "year_key", name="uq_run_rm_statement"),
+        CheckConstraint(
+            "status IN ('fully_contractual','org_instrument','reference_rate',"
+            "'not_published','unresolved_no_reference_data','market_unknown',"
+            "'year_unknown','unpriceable')",
+            name="ck_rms_status"),
+        # NULL-SAFE two-branch form: a bare `status = 'x'` yields NULL when status is NULL
+        # and SQLite PASSES a NULL CHECK (the c8d2e4f6a1b3 lesson). status is NOT NULL here,
+        # and the form is written so it stays definite regardless.
+        CheckConstraint(
+            "(status IN ('org_instrument','reference_rate') "
+            "AND rate_kg_co2e_per_kwh IS NOT NULL) "
+            "OR (status NOT IN ('org_instrument','reference_rate') "
+            "AND rate_kg_co2e_per_kwh IS NULL)",
+            name="ck_rms_rate_entailment"),
+    )
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
+    market_key = Column(String, nullable=False)     # '__unknown__' when the geo is absent
+    year_key = Column(Integer, nullable=False)      # 0 when the date is unparseable
+    status = Column(String, nullable=False)
+    rate_kg_co2e_per_kwh = Column(Float, nullable=True)     # the rate ACTUALLY applied
+    # Provenance stamps: plain Integer, NO ForeignKey (the ActivityRecord.entity_id /
+    # RunScope3Declaration.declaration_id precedent) — they must survive whatever later
+    # happens to the source row, and are what RM-B5 re-checks against live data.
+    reference_rate_id = Column(Integer, nullable=True)
+    # Frozen EVEN WHEN NOT APPLIED, so an org rate that undercuts the published one is
+    # detectable frozen-vs-frozen without a live read at render time.
+    reference_rate_kg_co2e_per_kwh = Column(Float, nullable=True)
+    instrument_id = Column(Integer, nullable=True)
+    gwp_match = Column(String, nullable=True)       # matched | matched_gwp_unstated | unverified
+    gas_basis = Column(String, nullable=True)
+    publisher = Column(String, nullable=True)
+    publication = Column(Text, nullable=True)
+    kwh_contractual = Column(Float, nullable=False, default=0.0)
+    kwh_priced_at_residual = Column(Float, nullable=False, default=0.0)
+    kwh_priced_at_grid = Column(Float, nullable=False, default=0.0)
+    grid_rate_avg_kg_per_kwh = Column(Float, nullable=True)
+    co2e_at_residual_kg = Column(Float, nullable=False, default=0.0)
+    co2e_at_grid_kg = Column(Float, nullable=False, default=0.0)
+    # The CONSOLIDATED (boundary-share-weighted) understatement this market still carries.
+    # Weighted deliberately: every EmissionLineItem.co2e is share-weighted, so an unweighted
+    # gap beside a weighted total is the like-for-like error that bit the Cat 11 check.
+    gap_consolidated_co2e_kg = Column(Float, nullable=False, default=0.0)
+    # The ORG's own residual rate, unblended. RM-B4 must judge what the org asserted,
+    # not a bucket average diluted by reference-priced load sharing the same market.
+    org_rate_kg_co2e_per_kwh = Column(Float, nullable=True)
+    # A rate exists for this market/year but only under ANOTHER GWP vintage. Without this
+    # the preparer is told "no residual mix is on file" and sent to load one that is.
+    gwp_vintage_mismatch = Column(Boolean, nullable=False, default=False)
+    # Electricity lines whose unit would not convert to kWh: they contribute no quantity,
+    # so a zeroed bucket must not read as a clean 'fully_contractual' market.
+    unpriceable_lines = Column(Integer, nullable=False, default=0)
+    residual_mix_version = Column(String, nullable=False)
+    frozen_at = Column(String, nullable=False)
+
+
 class MarketInstrument(Base):
     """A contractual instrument for market-based Scope 2 (GHG Protocol Scope 2 Guidance).
 
@@ -190,6 +317,9 @@ class MarketInstrument(Base):
     # the consumption's geo (Scope 2 Guidance quality criteria). NULL = unspecified:
     # the instrument still applies but the allocation is flagged market_unverified.
     market = Column(String, nullable=True)
+    # Where an org-supplied residual_mix rate came from (a supplier letter, a national
+    # publication). Free text, no CHECK — its absence is a warning, never a blocker.
+    rate_source = Column(String, nullable=True)
     gwp_set = Column(String, nullable=True, default="AR6")
     start_date = Column(String, nullable=True)  # ISO; window the instrument covers
     end_date = Column(String, nullable=True)
@@ -505,6 +635,10 @@ class CalculationRun(Base):
     # PREDATES the requirement, and the gate then only warns (never blocks) — that NULL
     # is the entire anti-cliff mechanism, so it must NEVER be back-filled.
     scope3_temporal_basis_version = Column(String, nullable=True)
+    # Which Scope 2 residual-mix policy priced this run's uncovered market-based load.
+    # NULL = the run PREDATES the requirement and the gate only warns — the anti-cliff
+    # mechanism, so it must NEVER be back-filled.
+    scope2_residual_mix_version = Column(String, nullable=True)
     # Hash of the declaration set frozen onto this run — detects an exclusion
     # statement being edited AFTER the run that filed it.
     scope3_declaration_fingerprint = Column(String, nullable=True)

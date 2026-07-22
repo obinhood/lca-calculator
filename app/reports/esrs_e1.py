@@ -31,6 +31,7 @@ from .secr import _energy_kwh
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
 from ..services.removals import removals_completeness
+from ..services.residual_mix import scope2_residual_mix_completeness
 
 NOT_COVERED = [
     "E1-1 transition plan for climate change mitigation",
@@ -157,6 +158,7 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     # what stops "3 of 15 categories" reading as a complete inventory.
     s3gate = scope3_completeness(db, run)
     blockers.extend(s3gate.get("blockers", []))
+    blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
     # GHG Protocol Ch.3: the consolidation boundary determines what share of each
     # entity is in these figures — an unresolved boundary cannot be disclosed.
     blockers.extend(boundary_completeness(db, run).get("blockers", []))

@@ -26,6 +26,7 @@ from .scope3 import category_tco2e
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
 from ..services.removals import removals_completeness
+from ..services.residual_mix import scope2_residual_mix_completeness
 
 JURISDICTION_PROFILES = {
     "ISSB": {
@@ -107,6 +108,7 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     # IFRS S2 ¶29(a)(vi): disclose the Scope 3 categories included. Screen all 15.
     s3gate = scope3_completeness(db, run)
     blockers.extend(s3gate.get("blockers", []))
+    blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
     # GHG Protocol Ch.3 boundary (S2 29(a)(iv) disaggregation depends on it).
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
     blockers.extend(removals_completeness(db, run).get("blockers", []))
@@ -162,6 +164,8 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             "scope2_contractual_instruments": {
                 "kwh_contractual": s["scope2"]["kwh_contractual"],
                 "kwh_grid_fallback": s["scope2"]["kwh_grid_fallback"],
+                "kwh_residual_mix": s["scope2"]["kwh_residual_mix"],
+                "kwh_electricity_accounted": s["scope2"]["kwh_electricity_accounted"],
             },
             "scope3_gross_excl_financed": round(by_scope.get("3", 0.0) / 1000.0, 6),
             "scope3_gross": round(by_scope.get("3", 0.0) / 1000.0 + _financed_tco2e, 6),

@@ -23,6 +23,9 @@ from .summary import summary, run_factor_sources
 from .scope3 import category_tco2e
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
+from ..services.residual_mix import (
+    scope2_residual_mix_completeness, residual_mix_comparable,
+)
 from .secr import _energy_kwh
 
 
@@ -53,6 +56,7 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         blockers.append("intensity_denominator required (finite, > 0) for 305-4/302-3")
     # GRI 305-3 discloses Scope 3 by category — screen all 15.
     blockers.extend(scope3_completeness(db, run).get("blockers", []))
+    blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
 
     by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}
@@ -83,6 +87,13 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
                 blockers.append(f"305-5 base run used {base.gwp_set} but this run used "
                                 f"{run.gwp_set} — reductions across GWP vintages are not "
                                 f"comparable")
+            # Same class of trap as the GWP check above: the market-based total moves when
+            # uncovered Scope 2 load starts being priced at the residual mix instead of the
+            # grid average. A 'reduction' spanning that change is a methodology artefact,
+            # not abatement.
+            _rm = residual_mix_comparable(db, base, run)
+            if _rm:
+                blockers.append(f"305-5: {_rm}")
     energy = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
     energy_mwh = {c: round(energy[c] / 1000.0, 6) for c in ("electricity", "gas", "diesel")}
     total_mwh = round(energy["total_kwh"] / 1000.0, 6)
