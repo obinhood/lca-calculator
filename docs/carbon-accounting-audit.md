@@ -49,7 +49,7 @@ paths emitted a materially wrong number while stamping the report
 | C. No inventory line for removals (DAC, biochar, afforestation) | ✅ Fixed (PR #14) |
 | Float accumulation vs neutrality threshold | ✅ Fixed (PR #27) |
 | Temporal straddle proration | ✅ Fixed (PR #29) |
-| GLEC not truly modelled | ⬜ Open |
+| GLEC well-to-wheel electric-leg split | ✅ Fixed (PR #33) |
 
 ## Remediation log
 
@@ -285,6 +285,17 @@ paths emitted a materially wrong number while stamping the report
   one. Lines frozen before the token existed are reported as `undeterminable`, never
   back-filled from the live catalogue. Pure read over frozen state — no schema, migration
   or engine change.
+
+- **PR #33** — _ISO 14083 electric-leg well-to-tank (energy provision)._ Closes the standards
+  call deferred in PR #21. The GLEC well-to-wheel split left `generation` and `td_loss` in
+  `unclassified`, understating the disclosed well-to-tank of every electric transport leg.
+  ISO 14083:2023 / GLEC split transport into ENERGY PROVISION (well-to-tank) and VEHICLE
+  OPERATION (tank-to-wheel); a battery-electric vehicle has ZERO tank-to-wheel (no combustion
+  at the wheel), so grid generation + T&D losses ARE its well-to-tank. Now classified as WTT,
+  with a `well_to_tank_fuel_supply` / `well_to_tank_energy_provision` sub-split. Reconciliation
+  preserved (values moved from unclassified to WTT, nothing double-counted); gated on
+  `iso_14083` so non-transport assessments and the headline total are untouched; a genuinely
+  unknown boundary still surfaces as `unclassified`. No schema change.
 
 ## Strengths worth preserving
 
