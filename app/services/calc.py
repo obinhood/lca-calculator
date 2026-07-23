@@ -765,7 +765,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                         "kwh_contractual": 0.0, "kwh_residual": 0.0, "kwh_grid": 0.0,
                         "grid_num": 0.0, "co2e_residual": 0.0, "co2e_grid": 0.0,
                         "gap": 0.0, "res": _res, "instrument_id": None,
-                        "org_kwh": 0.0, "ref_kwh": 0.0, "unpriceable_lines": 0})
+                        "org_kwh": 0.0, "ref_kwh": 0.0, "unpriceable_lines": 0,
+                        "grid_min": None, "grid_max": None})
                     try:
                         kwh = convert(_qty, a.unit, "kWh")
                         grid_rate = (co2e_gross / kwh) if kwh else 0.0   # GROSS on GROSS
@@ -833,6 +834,17 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                                 + alloc.get("kwh_grid_fallback", 0.0))
                         _b["grid_num"] += grid_rate * _unc
                         _b["grid_den"] = _b.get("grid_den", 0.0) + _unc
+                        # Spread of the location grid rates in this market. When a
+                        # contractual instrument covers only PART of the market's load and
+                        # the remainder falls back to each line's OWN grid rate, WHICH line
+                        # the instrument happened to cover changes the market total — an
+                        # arbitrary, undisclosed choice. Frozen so the sensitivity can be
+                        # bounded and disclosed rather than silently resolved.
+                        if kwh > 0:
+                            _b["grid_min"] = (grid_rate if _b.get("grid_min") is None
+                                              else min(_b["grid_min"], grid_rate))
+                            _b["grid_max"] = (grid_rate if _b.get("grid_max") is None
+                                              else max(_b["grid_max"], grid_rate))
                         _b["co2e_grid"] += alloc.get("kwh_grid_fallback", 0.0) * grid_rate
                     except UnitConversionError as exc:
                         market_detail["method_basis"] = "grid_average_fallback"
@@ -974,6 +986,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 kwh_priced_at_residual=_kwh_res, kwh_priced_at_grid=_kwh_grid,
                 grid_rate_avg_kg_per_kwh=((_b["grid_num"] / _b["grid_den"])
                                           if _b.get("grid_den") else None),
+                grid_rate_min_kg_per_kwh=_b.get("grid_min"),
+                grid_rate_max_kg_per_kwh=_b.get("grid_max"),
                 co2e_at_residual_kg=_b["co2e_residual"], co2e_at_grid_kg=_b["co2e_grid"],
                 gap_consolidated_co2e_kg=_b["gap"],
                 org_rate_kg_co2e_per_kwh=((_b.get("co2e_org", 0.0) / _b["org_kwh"])

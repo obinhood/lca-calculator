@@ -217,6 +217,31 @@ def scope2_residual_mix_completeness(db: Session, run) -> dict:
                     f"— that table is append-only; corrections must be INSERTed so the "
                     f"filed figure still reproduces")
 
+        # RM-W9 — ALLOCATION ORDER SENSITIVITY. A contractual instrument that covers only
+        # part of a market's load must be applied to SOME of it, and when the remainder
+        # falls back to each line's OWN grid rate (no residual mix on file) the choice of
+        # which line was covered moves the disclosed market total. Today that choice is
+        # made by row order — arbitrary and undisclosed.
+        #
+        # The platform does NOT resolve it by picking a favourable order: covering the
+        # dirtiest load first would MINIMISE the reported figure, which is precisely the
+        # understating direction the doctrine forbids. It discloses the sensitivity and
+        # bounds it instead, and names the real resolution — a published residual mix
+        # prices ALL uncovered load in the market at one rate, which makes the question
+        # disappear entirely.
+        _lo, _hi = r.grid_rate_min_kg_per_kwh, r.grid_rate_max_kg_per_kwh
+        if (r.kwh_contractual > _EPS_KWH and r.kwh_priced_at_grid > _EPS_KWH
+                and _lo is not None and _hi is not None and _hi > _lo):
+            _swing = r.kwh_contractual * (_hi - _lo)
+            warnings.append(
+                f"Scope 2 ({where}): the market total is ORDER-SENSITIVE. A contractual "
+                f"instrument covers {r.kwh_contractual:.0f} kWh of this market while "
+                f"{r.kwh_priced_at_grid:.0f} kWh falls back to per-line grid rates spanning "
+                f"{_lo:.5f}-{_hi:.5f} kgCO2e/kWh, so WHICH load the instrument covered "
+                f"moves the figure by up to {_swing:.2f} kgCO2e and that choice is "
+                f"currently made by row order. Load the published residual mix: it prices "
+                f"all uncovered load in the market at one rate and the sensitivity vanishes")
+
         if r.unpriceable_lines:
             warnings.append(
                 f"Scope 2 ({where}): {r.unpriceable_lines} electricity line(s) could not be "
@@ -279,6 +304,13 @@ def scope2_residual_mix_completeness(db: Session, run) -> dict:
             "kwh_priced_at_residual": round(r.kwh_priced_at_residual, 6),
             "kwh_priced_at_grid": round(r.kwh_priced_at_grid, 6),
             "grid_rate_avg_kg_per_kwh": r.grid_rate_avg_kg_per_kwh,
+            "grid_rate_min_kg_per_kwh": r.grid_rate_min_kg_per_kwh,
+            "grid_rate_max_kg_per_kwh": r.grid_rate_max_kg_per_kwh,
+            "allocation_order_sensitive": bool(
+                r.kwh_contractual > _EPS_KWH and r.kwh_priced_at_grid > _EPS_KWH
+                and r.grid_rate_min_kg_per_kwh is not None
+                and r.grid_rate_max_kg_per_kwh is not None
+                and r.grid_rate_max_kg_per_kwh > r.grid_rate_min_kg_per_kwh),
             # Understatement still carried, on the CONSOLIDATED basis the disclosed
             # market total uses — an unweighted gap beside a weighted total is the
             # like-for-like error that bit the Cat 11 arithmetic check.
