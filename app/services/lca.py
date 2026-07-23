@@ -38,12 +38,18 @@ EN_GROUP_NOTE = {"A": "Product & construction (A1-A5)", "B": "Use (B1-B7)",
 # carry. Omitting `ttw` here silently dropped every third-party freight leg from the
 # disclosure while the well-to-wheel TOTAL stayed correct.
 #
-# WELL-TO-TANK is the upstream fuel supply. `generation` and `td_loss` are deliberately in
-# NEITHER set: on an electric leg they are the energy-supply side rather than a wheel-side
-# emission, and assigning them is a standards call this module should make explicitly
-# rather than by omission — until then they surface in `unclassified`, never dropped.
+# WELL-TO-TANK is the upstream energy provision — everything up to the energy entering the
+# vehicle's tank or battery. It has two sub-parts the standard reports separately:
+#   * FUEL SUPPLY — extraction, refining and distribution of a combustion fuel.
+#   * ENERGY PROVISION for an ELECTRIC leg — grid `generation` plus transmission &
+#     distribution (`td_loss`) losses. On a battery-electric vehicle the tank-to-wheel
+#     (tailpipe) emission is genuinely ZERO, so generation and T&D ARE the well-to-tank;
+#     leaving them `unclassified` understated the disclosed WTT of every electric leg.
+# ISO 14083:2023 / GLEC Framework treat these as the "energy provision" phase.
 _TTW_BOUNDARIES = ("ttw", "tank_to_wheel", "combustion")
-_WTT_BOUNDARIES = ("well_to_tank", "wtt")
+_WTT_FUEL_BOUNDARIES = ("well_to_tank", "wtt")
+_WTT_ELECTRIC_BOUNDARIES = ("generation", "td_loss")
+_WTT_BOUNDARIES = _WTT_FUEL_BOUNDARIES + _WTT_ELECTRIC_BOUNDARIES
 
 
 def en_module_group(module: str) -> str:
@@ -157,16 +163,24 @@ def compute_assessment(db: Session, assessment: LcaAssessment) -> dict:
         # dropped from the tank-to-wheel disclosure with no visible cause.
         _classified = set(_WTT_BOUNDARIES) | set(_TTW_BOUNDARIES)
         unclassified = sum(v for k, v in boundary_split.items() if k not in _classified)
+        wtt_fuel = sum(boundary_split.get(b, 0.0) for b in _WTT_FUEL_BOUNDARIES)
+        wtt_electric = sum(boundary_split.get(b, 0.0) for b in _WTT_ELECTRIC_BOUNDARIES)
         result["well_to_wheel_kg"] = {
             "well_to_tank": round(wtt, 6), "tank_to_wheel": round(ttw, 6),
             "unclassified": round(unclassified, 6),
             "well_to_wheel_total": round(total, 6),
+            # GLEC "energy provision" phase, split within WTT: fuel supply for combustion
+            # legs vs generation + T&D for electric legs. For a battery-electric leg the
+            # tank-to-wheel is zero, so its whole footprint sits under energy_provision.
+            "well_to_tank_fuel_supply": round(wtt_fuel, 6),
+            "well_to_tank_energy_provision": round(wtt_electric, 6),
             # A real check, not a tautology: it verifies the per-boundary split accounts
             # for the whole declared total.
             "reconciles": abs(wtt + ttw + unclassified - total) < 1e-9,
-            "note": "WTT+TTW split from factor boundaries. Boundaries the split does not "
-                    "classify as a fuel-supply or wheel-side quantity (e.g. electricity "
-                    "generation / T&D losses on an electric leg) are reported as "
-                    "`unclassified` — they are in the total and are never dropped.",
+            "note": "WTT+TTW split from factor boundaries. WTT = fuel supply (combustion "
+                    "legs) + energy provision (generation & T&D losses on electric legs, "
+                    "whose tank-to-wheel is zero). Boundaries the split cannot classify as "
+                    "either an energy-provision or a wheel-side quantity are reported as "
+                    "`unclassified` — in the total, never dropped.",
         }
     return result

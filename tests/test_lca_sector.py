@@ -162,18 +162,41 @@ def test_wtw_split_counts_third_party_ttw_legs_and_reconciles(db):
     assert wtw["reconciles"] is True
 
 
-def test_wtw_split_surfaces_unclassified_boundaries_instead_of_dropping_them(db):
-    """The structural fix: a boundary the split does not classify (e.g. grid `generation`
-    on an electric leg) must be VISIBLE, not silently absent from both halves."""
+def test_an_electric_leg_lands_in_well_to_tank_energy_provision(db):
+    """ISO 14083 / GLEC: on a battery-electric leg the tank-to-wheel is ZERO (no combustion
+    at the vehicle), so grid `generation` and T&D losses ARE the well-to-tank — the energy
+    provision phase. Leaving them `unclassified` understated the disclosed WTT."""
     org = _org(db)
     f_ev = _factor(db, "electricity", "kWh", 0.2, boundary="generation")
+    f_td = _factor(db, "electricity", "kWh", 0.02, subcategory="td", boundary="td_loss")
+    f_fleet = _factor(db, "diesel", "L", 2.0, subcategory="own", boundary="combustion")
+    f_fuel = _factor(db, "diesel", "L", 0.5, subcategory="wtt", boundary="well_to_tank")
+    a = _assess(db, org.id, "iso_14083", fu="1 t.km", fu_qty=1.0)
+    _item(db, a.id, "leg_ev", 100, "kWh", f_ev.id)        # 20.0 — generation
+    _item(db, a.id, "leg_ev_td", 100, "kWh", f_td.id)     # 2.0  — T&D losses
+    _item(db, a.id, "leg_fleet", 10, "L", f_fleet.id)     # 20.0 — combustion (TTW)
+    _item(db, a.id, "leg_fuel", 10, "L", f_fuel.id)       # 5.0  — fuel supply (WTT)
+    wtw = compute_assessment(db, a)["well_to_wheel_kg"]
+    assert wtw["tank_to_wheel"] == pytest.approx(20.0)                 # the diesel only
+    assert wtw["well_to_tank"] == pytest.approx(22.0 + 5.0)            # generation+T&D + fuel
+    assert wtw["well_to_tank_energy_provision"] == pytest.approx(22.0)
+    assert wtw["well_to_tank_fuel_supply"] == pytest.approx(5.0)
+    assert wtw["unclassified"] == pytest.approx(0.0)                   # nothing left over
+    assert wtw["reconciles"] is True
+    assert wtw["well_to_wheel_total"] == pytest.approx(47.0)
+
+
+def test_a_genuinely_unknown_boundary_is_still_surfaced_as_unclassified(db):
+    """Reclassifying generation/T&D must not empty `unclassified`: a mis-mapped factor
+    (e.g. cradle_to_gate on a transport leg) still belongs in neither half and stays
+    visible, never dropped."""
+    org = _org(db)
+    f_bad = _factor(db, "material", "kg", 1.0, boundary="cradle_to_gate")
     f_fleet = _factor(db, "diesel", "L", 2.0, subcategory="own", boundary="combustion")
     a = _assess(db, org.id, "iso_14083", fu="1 t.km", fu_qty=1.0)
-    _item(db, a.id, "leg_ev", 100, "kWh", f_ev.id)        # 20.0 — energy supply, not wheel-side
+    _item(db, a.id, "leg_bad", 30, "kg", f_bad.id)        # 30.0 — not a transport boundary
     _item(db, a.id, "leg_fleet", 10, "L", f_fleet.id)     # 20.0
     wtw = compute_assessment(db, a)["well_to_wheel_kg"]
     assert wtw["tank_to_wheel"] == pytest.approx(20.0)
-    assert wtw["well_to_tank"] == pytest.approx(0.0)
-    assert wtw["unclassified"] == pytest.approx(20.0)     # surfaced, not dropped
+    assert wtw["unclassified"] == pytest.approx(30.0)
     assert wtw["reconciles"] is True
-    assert wtw["well_to_wheel_total"] == pytest.approx(40.0)
