@@ -50,6 +50,7 @@ paths emitted a materially wrong number while stamping the report
 | Float accumulation vs neutrality threshold | ✅ Fixed (PR #27) |
 | Temporal straddle proration | ✅ Fixed (PR #29) |
 | GLEC well-to-wheel electric-leg split | ✅ Fixed (PR #33) |
+| Scope 2 allocation-order sensitivity | ✅ Disclosed (PR #35) |
 
 ## Remediation log
 
@@ -296,6 +297,20 @@ paths emitted a materially wrong number while stamping the report
   preserved (values moved from unclassified to WTT, nothing double-counted); gated on
   `iso_14083` so non-transport assessments and the headline total are untouched; a genuinely
   unknown boundary still surfaces as `unclassified`. No schema change.
+
+- **PR #35** — _Scope 2 allocation-order sensitivity disclosed (RM-W9)._ The last accuracy
+  item, and measuring it first changed the fix. MEASURED: two same-market sites on grid
+  factors 0.8/0.1 with one REC covering half → the disclosed market total is 100 kg or 800 kg
+  (an 8x swing) purely on row insert order. But the backlog's proposed "dirtiest-load-first"
+  was wrong on two counts: (1) the order dependence is entirely an artifact of the
+  GRID-AVERAGE FALLBACK — with a published residual mix all uncovered load in a market prices
+  at ONE rate and the question disappears (verified: 550.0 either way), so the
+  standards-correct path was already order-independent and the presumed two-pass restructure
+  was unnecessary; (2) dirtiest-first MINIMISES the figure (100, not 800), i.e. it would have
+  adopted the understating direction as policy. So the platform does not pick a favourable
+  order — it freezes the per-market min/max grid rate and RM-W9 discloses the sensitivity,
+  bounding the swing as `covered_kWh x (max_rate - min_rate)` and naming the real resolution.
+  Fail-open on the number (nothing moved), fail-closed on the disclosure.
 
 ## Strengths worth preserving
 
