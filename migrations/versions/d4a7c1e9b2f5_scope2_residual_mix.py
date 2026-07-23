@@ -85,6 +85,8 @@ def upgrade() -> None:
         sa.Column("kwh_priced_at_residual", sa.Float(), nullable=False),
         sa.Column("kwh_priced_at_grid", sa.Float(), nullable=False),
         sa.Column("grid_rate_avg_kg_per_kwh", sa.Float(), nullable=True),
+        sa.Column("grid_rate_min_kg_per_kwh", sa.Float(), nullable=True),
+        sa.Column("grid_rate_max_kg_per_kwh", sa.Float(), nullable=True),
         sa.Column("co2e_at_residual_kg", sa.Float(), nullable=False),
         sa.Column("co2e_at_grid_kg", sa.Float(), nullable=False),
         sa.Column("gap_consolidated_co2e_kg", sa.Float(), nullable=False),

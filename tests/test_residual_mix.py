@@ -569,3 +569,93 @@ def test_a_rec_plus_an_org_residual_instrument_splits_correctly(db):
     assert s2["kwh_residual_mix"] == pytest.approx(400.0)
     assert s2["kwh_contractual"] == pytest.approx(st.kwh_contractual)
     assert s2["kwh_residual_mix"] == pytest.approx(st.kwh_priced_at_residual)
+
+
+# --- Allocation-order sensitivity (RM-W9) --------------------------------------------
+
+def _two_site_run(db, dirty_first=True, residual=None, name="Co"):
+    """Two same-market sites on very different grid factors, one REC covering half."""
+    org = _org(db, name)
+    for val in ((0.8, 0.1) if dirty_first else (0.1, 0.8)):
+        _elec(db, org.id, kwh=1000.0, rate=val)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=1000.0, market="DE",
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    if residual is not None:
+        _rate(db, "DE", 2025, residual)
+    db.commit()
+    return org, compute_co2e(db, org.id)
+
+
+def test_the_market_total_is_order_dependent_without_a_residual_mix_and_says_so(db):
+    """The defect: a REC covering only part of a market must be applied to SOME of it, and
+    when the rest falls back to per-line grid rates, WHICH line was covered swings the
+    disclosed total — here 8x — on nothing but row order."""
+    _o1, r_dirty = _two_site_run(db, dirty_first=True, name="A")
+    _o2, r_clean = _two_site_run(db, dirty_first=False, name="B")
+    assert r_dirty.total_co2e == pytest.approx(r_clean.total_co2e)     # location identical
+    assert r_dirty.total_co2e_market != r_clean.total_co2e_market      # market is NOT
+    # ...and the platform DISCLOSES the sensitivity rather than silently picking a winner.
+    g = scope2_residual_mix_completeness(db, r_dirty)
+    w = " ".join(g["warnings"])
+    assert "ORDER-SENSITIVE" in w
+    assert "0.10000-0.80000" in w                    # the bound's inputs are named
+    assert "700.00 kgCO2e" in w                      # 1000 kWh x (0.8 - 0.1)
+    st = g["statements"][0]
+    assert st["allocation_order_sensitive"] is True
+
+
+def test_a_published_residual_mix_dissolves_the_order_sensitivity(db):
+    """The real resolution, and why the platform points at it instead of choosing an
+    order: a residual mix prices ALL uncovered load in the market at ONE rate, so which
+    line the instrument covered stops mattering."""
+    _o1, r_dirty = _two_site_run(db, dirty_first=True, residual=0.55, name="A")
+    _o2, r_clean = _two_site_run(db, dirty_first=False, residual=0.55, name="B")
+    assert r_dirty.total_co2e_market == pytest.approx(r_clean.total_co2e_market)
+    assert r_dirty.total_co2e_market == pytest.approx(1000.0 * 0.55)
+    g = scope2_residual_mix_completeness(db, r_dirty)
+    assert not any("ORDER-SENSITIVE" in w for w in g["warnings"])
+    assert g["statements"][0]["allocation_order_sensitive"] is False
+
+
+def test_a_single_grid_rate_is_never_order_sensitive(db):
+    """Nothing to choose between when every line in the market shares one rate."""
+    org = _org(db)
+    for _ in range(2):
+        _elec(db, org.id, kwh=1000.0, rate=0.4)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=1000.0, market="DE",
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    db.commit()
+    run = compute_co2e(db, org.id)
+    g = scope2_residual_mix_completeness(db, run)
+    assert not any("ORDER-SENSITIVE" in w for w in g["warnings"])
+    assert g["statements"][0]["allocation_order_sensitive"] is False
+
+
+def test_full_coverage_is_never_order_sensitive(db):
+    """With no uncovered load there is no fallback, so no choice to be made."""
+    org = _org(db)
+    for val in (0.8, 0.1):
+        _elec(db, org.id, kwh=1000.0, rate=val)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=None, market="DE",
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    db.commit()
+    g = scope2_residual_mix_completeness(db, compute_co2e(db, org.id))
+    assert not any("ORDER-SENSITIVE" in w for w in g["warnings"])
+
+
+def test_the_platform_never_resolves_it_by_minimising_the_figure(db):
+    """The direction that matters: covering the DIRTIEST load first would MINIMISE the
+    reported market total — the understating direction. The platform must not silently
+    adopt it, so the two orders still differ and the sensitivity is disclosed instead."""
+    _o1, r_dirty = _two_site_run(db, dirty_first=True, name="A")
+    _o2, r_clean = _two_site_run(db, dirty_first=False, name="B")
+    lo = min(r_dirty.total_co2e_market, r_clean.total_co2e_market)
+    hi = max(r_dirty.total_co2e_market, r_clean.total_co2e_market)
+    assert lo == pytest.approx(100.0) and hi == pytest.approx(800.0)
+    # Neither run silently reports the minimum as if it were the only answer.
+    for r in (r_dirty, r_clean):
+        assert any("ORDER-SENSITIVE" in w
+                   for w in scope2_residual_mix_completeness(db, r)["warnings"])

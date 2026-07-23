@@ -279,6 +279,11 @@ class RunResidualMixStatement(Base):
     kwh_priced_at_residual = Column(Float, nullable=False, default=0.0)
     kwh_priced_at_grid = Column(Float, nullable=False, default=0.0)
     grid_rate_avg_kg_per_kwh = Column(Float, nullable=True)
+    # Spread of the location grid rates across this market's electricity. When an
+    # instrument covers only part of the load and the rest falls back to each line's own
+    # grid rate, WHICH line was covered changes the total; the spread bounds that swing.
+    grid_rate_min_kg_per_kwh = Column(Float, nullable=True)
+    grid_rate_max_kg_per_kwh = Column(Float, nullable=True)
     co2e_at_residual_kg = Column(Float, nullable=False, default=0.0)
     co2e_at_grid_kg = Column(Float, nullable=False, default=0.0)
     # The CONSOLIDATED (boundary-share-weighted) understatement this market still carries.
