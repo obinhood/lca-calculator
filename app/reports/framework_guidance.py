@@ -130,9 +130,16 @@ FRAMEWORKS = {
     "iso_14025_epd": {
         "name": "ISO 14025 (Type III Environmental Product Declarations)",
         "category": "Product footprints", "jurisdiction": "global (ISO)",
-        "authority": "ISO", "platform_support": "reference", "endpoint": None,
+        "authority": "ISO", "platform_support": "partial",
+        "endpoint": "GET /reports/epd/{assessment_id}",
         "applies_to": "Third-party-verified EPDs against Product Category Rules (PCRs).",
-        "key_points": ["Follow a PCR; independently verify; publish via a programme operator."],
+        "key_points": [
+            "The platform renders the GWP-indicator core in EN 15804 module form (A1-A3, "
+            "A4, A5, B, C, D) from an en_15804 assessment, with Module D separate and "
+            "biogenic CO2 separate.",
+            "GWP ONLY: the other EN 15804+A2 impact categories are not computed.",
+            "NOT a verified EPD — independently verify against the PCR and publish via a "
+            "programme operator (ISO 14025 §8) before presenting it as one."],
     },
     "pef": {
         "name": "EU Product Environmental Footprint (PEF)",
