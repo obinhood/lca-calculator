@@ -703,6 +703,23 @@ def get_lca_report(assessment_id: int, org: Organisation = Depends(current_org),
     return JSONResponse(with_guidance(payload))
 
 
+@app.get("/reports/epd/{assessment_id}")
+def get_epd_report(assessment_id: int, pcr_reference: Optional[str] = Query(None),
+                   programme_operator: Optional[str] = Query(None),
+                   org: Organisation = Depends(current_org),
+                   db: Session = Depends(get_db)):
+    """An ISO 14025 / EN 15804 EPD-shaped GWP declaration over one LCA assessment.
+
+    Honest scope: the quantitative GWP core a verifier would check, not a verified EPD,
+    and the GWP indicator only (the further EN 15804+A2 impact categories are not
+    produced). See the payload's verification_status / not_covered.
+    """
+    from .reports.epd import epd_report
+    return JSONResponse(with_guidance(
+        epd_report(db, org.id, assessment_id, pcr_reference=pcr_reference,
+                   programme_operator=programme_operator)))
+
+
 @app.post("/finance/positions")
 def add_financed_position(investee_name: str = Query(...), asset_class: str = Query(...),
                           currency: str = Query(...), outstanding_amount: float = Query(...),
