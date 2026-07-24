@@ -312,6 +312,20 @@ paths emitted a materially wrong number while stamping the report
   bounding the swing as `covered_kWh x (max_rate - min_rate)` and naming the real resolution.
   Fail-open on the number (nothing moved), fail-closed on the disclosure.
 
+- **PR #37** — _ISO 14025 / EN 15804 EPD renderer (first new-scope feature)._ With the audit
+  backlog closed, this is the first NEW capability rather than remediation: it renders an
+  en_15804 assessment into the EPD module structure (A1-A3, A4, A5, B, C, D) with declared
+  unit + PCR metadata. Read-only over the LCA module (`by_stage_kg` already computed) — no
+  engine or schema change; registry `reference` → `partial`. HONEST by construction: not a
+  verified EPD, Module D separate, org-scoped, fail-closed. Found the A1/A2/A3-separate drop
+  myself (a product declared as A1+A2+A3 read as a zero-total EPD). A 3-lens review confirmed
+  3 more: **HIGH** — the module figure is GWP-FOSSIL but was labelled the EN 15804+A2
+  "GWP-total" indicator (even "fossil + biogenic net", which is false), mislabelling a timber
+  product's 500 kg while its 1600 kg biogenic sat separate → relabelled GWP-fossil, GWP-total
+  a stated omission; **MEDIUM** — the conservation guard false-blocked ~46% of complete
+  14-module EPDs on 6dp round-off → replaced with an exact set-membership check; **MEDIUM** —
+  en_15978 (whole-building) was accepted as a product EPD → restricted to en_15804.
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
