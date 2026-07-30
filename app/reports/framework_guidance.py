@@ -246,10 +246,18 @@ FRAMEWORKS = {
     "tcfd": {
         "name": "TCFD (Task Force on Climate-related Financial Disclosures)",
         "category": "Reporting", "jurisdiction": "global (legacy)",
-        "authority": "FSB TCFD (now consolidated into ISSB)", "platform_support": "reference",
-        "endpoint": "/reports/issb_s2",
+        "authority": "FSB TCFD (now consolidated into ISSB)", "platform_support": "partial",
+        "endpoint": "/reports/tcfd",
         "applies_to": "Legacy framework; still referenced by SB 261, Switzerland, and others.",
-        "key_points": ["Four pillars: governance, strategy, risk management, metrics & targets — now delivered via ISSB S2."],
+        "key_points": [
+            "Four pillars, 11 recommended disclosures: governance, strategy, risk management, "
+            "metrics & targets — now delivered through ISSB IFRS S2.",
+            "The platform renders a CROSS-REFERENCE MAP: only Metrics & Targets (b) (gross "
+            "Scope 1/2/3 GHG) is machine-produced, sourced verbatim from the ISSB S2 renderer.",
+            "The other ten disclosures — governance/strategy/scenario-resilience/risk-management "
+            "narratives and the non-GHG metrics/targets — are the preparer's, NOT produced here.",
+            "Not a complete TCFD disclosure; report against TCFD only where a regime still "
+            "requires it instead of ISSB S2."],
     },
     # --- Target setting ---
     "sbti": {
@@ -445,6 +453,7 @@ _NAME_TO_KEY = [
     ("California SB 253", "sb253"),
     ("EU CBAM", "cbam"),
     ("GRI 305", "gri"),
+    ("TCFD", "tcfd"),
     ("CDP", "cdp"),
     ("SBTi", "sbti"),
     ("ISO 14068", "iso_14068"),
