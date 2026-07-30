@@ -1659,6 +1659,22 @@ def get_issb_s2_report(run_id: Optional[int] = None,
                                        jurisdiction=jurisdiction)))
 
 
+@app.get("/reports/tcfd")
+def get_tcfd_report(run_id: Optional[int] = None,
+                    jurisdiction_reference: Optional[str] = None,
+                    org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+    """TCFD four-pillar cross-reference map over the ISSB S2 output.
+
+    Honest scope: only Metrics & Targets (b) (gross Scope 1/2/3) is produced by the platform,
+    sourced from ISSB S2; the other ten recommended disclosures are narrative the preparer
+    supplies. Not a complete TCFD report — see the payload's report_scope.
+    """
+    from .reports.tcfd import tcfd_report
+    return JSONResponse(with_guidance(tcfd_report(
+        db, org.id, run_id=run_id, jurisdiction_reference=jurisdiction_reference)))
+
+
 @app.get("/reports/gri")
 def get_gri_report(run_id: Optional[int] = None,
                    base_run_id: Optional[int] = None,
