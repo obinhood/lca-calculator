@@ -703,6 +703,22 @@ def get_lca_report(assessment_id: int, org: Organisation = Depends(current_org),
     return JSONResponse(with_guidance(payload))
 
 
+@app.get("/reports/rics/{assessment_id}")
+def get_rics_report(assessment_id: int, gia_unit: Optional[str] = Query(None),
+                    org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+    """RICS Whole Life Carbon groupings (upfront / embodied / operational / whole-life,
+    Module D separate) over an en_15978 building assessment, absolute and per unit area.
+
+    Honest scope: GWP-fossil only (biogenic separate, not RICS sequestration accounting),
+    and the carbon arithmetic in RICS groupings — not a full RICS-compliant WLCA. See the
+    payload's not_covered.
+    """
+    from .reports.rics import rics_report
+    return JSONResponse(with_guidance(
+        rics_report(db, org.id, assessment_id, gia_unit=gia_unit)))
+
+
 @app.get("/reports/epd/{assessment_id}")
 def get_epd_report(assessment_id: int, pcr_reference: Optional[str] = Query(None),
                    programme_operator: Optional[str] = Query(None),
