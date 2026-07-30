@@ -1676,6 +1676,30 @@ def get_gri_report(run_id: Optional[int] = None,
                                    intensity_denominator_unit=intensity_denominator_unit)))
 
 
+@app.get("/reports/iso_14064_2")
+def get_iso_14064_2_report(baseline_run_id: Optional[int] = None,
+                           project_run_id: Optional[int] = None,
+                           leakage_tco2e: Optional[float] = None,
+                           baseline_justification: Optional[str] = None,
+                           project_name: Optional[str] = None,
+                           org: Organisation = Depends(current_org),
+                           db: Session = Depends(get_db)):
+    """ISO 14064-2 project GHG reduction = (baseline run - project run - leakage).
+
+    Honest scope: the quantitative core a validator/verifier would check, not a verified
+    assertion. A justified baseline and a quantified leakage are required; the reduction is
+    a SEPARATE account from the corporate inventory (do not double-count). See the payload's
+    double_counting_warning / requirements_not_produced.
+    """
+    if leakage_tco2e is not None and not math.isfinite(leakage_tco2e):
+        raise HTTPException(status_code=400, detail="leakage_tco2e must be a finite number")
+    from .reports.iso_14064_2 import iso_14064_2_report
+    return JSONResponse(with_guidance(iso_14064_2_report(
+        db, org.id, baseline_run_id=baseline_run_id, project_run_id=project_run_id,
+        leakage_tco2e=leakage_tco2e, baseline_justification=baseline_justification,
+        project_name=project_name)))
+
+
 @app.get("/reports/cdp")
 def get_cdp_export(run_id: Optional[int] = None,
                    intensity_denominator: Optional[float] = None,
