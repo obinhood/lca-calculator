@@ -338,6 +338,20 @@ FRAMEWORKS = {
         "applies_to": "Whole-life carbon of buildings and construction products.",
         "key_points": ["Report by life-cycle module (A1-A5, B, C, D); EN 15804 EPDs feed EN 15978 building assessments."],
     },
+    "rics_wlc": {
+        "name": "RICS Whole Life Carbon Assessment (2nd ed.)",
+        "category": "Construction", "jurisdiction": "UK/global",
+        "authority": "RICS", "platform_support": "partial",
+        "endpoint": "GET /reports/rics/{assessment_id}",
+        "applies_to": "Whole-life carbon of buildings, in RICS reporting groupings.",
+        "key_points": [
+            "Renders an en_15978 assessment into RICS groupings — upfront (A1-A5), embodied "
+            "(A1-A5+B1-B5+C1-C4), operational (B6-B7), whole-life — absolute and per m2 GIA, "
+            "Module D separate.",
+            "GWP-FOSSIL only: biogenic CO2 is separate, NOT RICS sequestration accounting.",
+            "The carbon arithmetic in RICS form, not a full RICS-compliant WLCA — scenario "
+            "assumptions, benchmarking and independent review are the assessor's."],
+    },
     # --- Carbon credits / integrity ---
     "icvcm": {
         "name": "ICVCM Core Carbon Principles",
