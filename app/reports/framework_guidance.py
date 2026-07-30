@@ -74,6 +74,25 @@ FRAMEWORKS = {
             "Establish an inventory for verification against ISO 14064-3.",
         ],
     },
+    "iso_14064_2": {
+        "name": "ISO 14064-2 (quantification of project GHG reductions & removals)",
+        "category": "Organisational verification", "jurisdiction": "global (ISO)",
+        "authority": "ISO", "platform_support": "partial",
+        "endpoint": "GET /reports/iso_14064_2",
+        "applies_to": "GHG projects/interventions claiming emission reductions or removal enhancements.",
+        "key_points": [
+            "Quantify the reduction as (baseline scenario - project scenario - leakage), not "
+            "as a self-reported number; the platform computes the delta between two immutable runs.",
+            "The BASELINE is a justified counterfactual (what would have happened without the "
+            "project), not a prior year — its justification is required, not optional.",
+            "Assess and subtract LEAKAGE (emission increases outside the project boundary); "
+            "be conservative so as not to overstate the reduction.",
+            "A project reduction is a SEPARATE account from the corporate inventory "
+            "(14064-1) — do not double-count; validate/verify against ISO 14064-3.",
+            "Platform computes the quantitative core (delta, leakage, comparability guards); "
+            "baseline derivation, SSR identification, uncertainty, monitoring and verification are NOT produced.",
+        ],
+    },
     "iso_14064_3": {
         "name": "ISO 14064-3 (validation & verification of GHG statements)",
         "category": "Assurance", "jurisdiction": "global (ISO)",
@@ -431,6 +450,7 @@ _NAME_TO_KEY = [
     ("ISO 14068", "iso_14068"),
     ("PCAF financed emissions", "pcaf"),
     ("SFDR Principal Adverse Impacts", "sfdr"),
+    ("ISO 14064-2", "iso_14064_2"),
     ("ISO 14067", "iso_14067"),
     ("ISO 14040", "iso_14040_44"),
     ("ISO 14083", "iso_14083"),
