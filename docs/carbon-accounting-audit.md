@@ -326,6 +326,20 @@ paths emitted a materially wrong number while stamping the report
   14-module EPDs on 6dp round-off → replaced with an exact set-membership check; **MEDIUM** —
   en_15978 (whole-building) was accepted as a product EPD → restricted to en_15804.
 
+- **PR #39** — _RICS Whole Life Carbon renderer (EN 15978)._ The analogue of the EPD renderer,
+  over en_15978 buildings: re-groups the EN modules into RICS aggregations — upfront (A1-A5),
+  embodied (A1-A5+B1-B5+C1-C4), operational (B6-B7), whole-life (= embodied + operational) —
+  absolute and per m2 GIA, Module D separate. Read-only over compute_assessment; no engine or
+  schema change; registry `rics_wlc` `reference` -> `partial`. Both EPD lessons carried in
+  from the start: GWP-FOSSIL labelling (biogenic separate, NOT RICS sequestration accounting;
+  GWP-total a stated omission) and an EXACT set-membership conservation guard + an import-time
+  proof the module map partitions EN A-C exactly. Self-verified whole_life == A-C total ==
+  partition == embodied+operational with a negative Module D credit. A 3-lens review confirmed
+  1 (LOW), refuted 1, found NO overclaim and NO conservation defect — the honesty/partition
+  work held. The LOW: an empty / Module-D-only building read disclosure_ready with a
+  physically-impossible whole-life of ZERO -> upfront (A1-A5) now required (mirrors the EPD
+  mandatory-core gate), fail-closed not blessed-zero.
+
 ## Strengths worth preserving
 
 Fail-closed quantity/unit handling; real immutability and frozen lineage; correct
