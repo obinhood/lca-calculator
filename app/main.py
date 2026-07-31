@@ -719,6 +719,21 @@ def get_rics_report(assessment_id: int, gia_unit: Optional[str] = Query(None),
         rics_report(db, org.id, assessment_id, gia_unit=gia_unit)))
 
 
+@app.get("/reports/pef/{assessment_id}")
+def get_pef_report(assessment_id: int,
+                   org: Organisation = Depends(current_org),
+                   db: Session = Depends(get_db)):
+    """A PEF-shaped single-category coverage map over one LCA assessment.
+
+    Honest scope: the platform computes 1 of PEF's 16 EF 3.1 impact categories (Climate
+    change), and only its GWP-fossil sub-indicator — NOT a PEF profile (no normalisation,
+    weighting, single score, PEFCR compliance or verification). See the payload's
+    pef_profile_status / not_produced.
+    """
+    from .reports.pef import pef_report
+    return JSONResponse(with_guidance(pef_report(db, org.id, assessment_id)))
+
+
 @app.get("/reports/epd/{assessment_id}")
 def get_epd_report(assessment_id: int, pcr_reference: Optional[str] = Query(None),
                    programme_operator: Optional[str] = Query(None),

@@ -163,9 +163,17 @@ FRAMEWORKS = {
     "pef": {
         "name": "EU Product Environmental Footprint (PEF)",
         "category": "Product footprints", "jurisdiction": "EU",
-        "authority": "European Commission", "platform_support": "reference", "endpoint": None,
+        "authority": "European Commission", "platform_support": "partial",
+        "endpoint": "GET /reports/pef/{assessment_id}",
         "applies_to": "EU-harmonised product environmental footprints.",
-        "key_points": ["Use category rules (PEFCRs); multi-impact, not carbon-only."],
+        "key_points": [
+            "A MULTI-IMPACT method: EF 3.1 characterises 16 impact categories, then normalises "
+            "and weights them into a single score against a PEFCR, with independent review.",
+            "The platform populates ONLY the Climate change category, and only its GWP-fossil "
+            "sub-indicator — 1 of 16 categories; the other 15 are not computed.",
+            "GWP-fossil is NOT PEF's Climate change (GWP-total = fossil + biogenic + LULUC).",
+            "NOT a PEF profile: no normalisation, weighting, single EF score, PEFCR compliance "
+            "or verification. It is a single-category coverage map."],
     },
     # --- Reporting ---
     "esrs_e1": {
@@ -460,6 +468,7 @@ _NAME_TO_KEY = [
     ("PCAF financed emissions", "pcaf"),
     ("SFDR Principal Adverse Impacts", "sfdr"),
     ("ISO 14064-2", "iso_14064_2"),
+    ("EU Product Environmental Footprint", "pef"),
     ("ISO 14067", "iso_14067"),
     ("ISO 14040", "iso_14040_44"),
     ("ISO 14083", "iso_14083"),
