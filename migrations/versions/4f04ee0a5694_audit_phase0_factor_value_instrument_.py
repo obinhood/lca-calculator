@@ -26,22 +26,30 @@ def upgrade() -> None:
     # and recreating emission_factors — which activities/lca_items reference —
     # trips the FK enforcement app.database enables (PRAGMA foreign_keys=ON), so
     # toggle FK off OUTSIDE the migration transaction (PRAGMA is a no-op inside one).
-    with op.get_context().autocommit_block():
-        op.execute("PRAGMA foreign_keys=OFF")
+    # On Postgres the CHECK is added with a direct ALTER (no table recreate), so the
+    # PRAGMA/FK toggle is neither needed nor valid SQL there — guard it to sqlite.
+    _sqlite = op.get_bind().dialect.name == "sqlite"
+    if _sqlite:
+        with op.get_context().autocommit_block():
+            op.execute("PRAGMA foreign_keys=OFF")
     with op.batch_alter_table("emission_factors", schema=None) as batch_op:
         batch_op.create_check_constraint("ck_factor_value_nonneg", "value >= 0")
     with op.batch_alter_table("market_instruments", schema=None) as batch_op:
         batch_op.create_check_constraint("ck_instrument_rate_nonneg", "kg_co2e_per_kwh >= 0")
-    with op.get_context().autocommit_block():
-        op.execute("PRAGMA foreign_keys=ON")
+    if _sqlite:
+        with op.get_context().autocommit_block():
+            op.execute("PRAGMA foreign_keys=ON")
 
 
 def downgrade() -> None:
-    with op.get_context().autocommit_block():
-        op.execute("PRAGMA foreign_keys=OFF")
+    _sqlite = op.get_bind().dialect.name == "sqlite"
+    if _sqlite:
+        with op.get_context().autocommit_block():
+            op.execute("PRAGMA foreign_keys=OFF")
     with op.batch_alter_table("market_instruments", schema=None) as batch_op:
         batch_op.drop_constraint("ck_instrument_rate_nonneg", type_="check")
     with op.batch_alter_table("emission_factors", schema=None) as batch_op:
         batch_op.drop_constraint("ck_factor_value_nonneg", type_="check")
-    with op.get_context().autocommit_block():
-        op.execute("PRAGMA foreign_keys=ON")
+    if _sqlite:
+        with op.get_context().autocommit_block():
+            op.execute("PRAGMA foreign_keys=ON")
