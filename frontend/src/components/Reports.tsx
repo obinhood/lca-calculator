@@ -17,8 +17,9 @@ type Param = {
 type Framework = {
   key: string;
   label: string;
-  path: string;                 // GET endpoint
-  runScoped?: boolean;          // send run_id (default true)
+  path: string;                 // GET endpoint (base path; for assessmentScoped, /{id} is appended)
+  runScoped?: boolean;          // send run_id (default true; ignored when assessmentScoped)
+  assessmentScoped?: boolean;   // report is over an LCA assessment id (path param), not a run
   params: Param[];
   note?: string;                // honest-scope one-liner shown under the picker
 };
@@ -101,6 +102,18 @@ const FRAMEWORKS: Framework[] = [
       { name: "year", label: "year", def: "2025", width: 70 } ] },
   { key: "eu_taxonomy", label: "EU Taxonomy", path: "/reports/eu_taxonomy", runScoped: false,
     params: [ { name: "reporting_year", label: "reporting year", def: "2025", width: 90 } ] },
+  // --- Product / building LCA reports (over an LCA assessment id, not a run) ---
+  { key: "lca", label: "LCA assessment", path: "/reports/lca", assessmentScoped: true,
+    params: [] },
+  { key: "epd", label: "ISO 14025 / EN 15804 EPD", path: "/reports/epd", assessmentScoped: true,
+    params: [ { name: "pcr_reference", label: "PCR reference", def: "", width: 160 } ],
+    note: "The GWP-fossil core a verifier would check — not a verified EPD (needs a PCR + programme operator)." },
+  { key: "rics", label: "RICS Whole Life Carbon", path: "/reports/rics", assessmentScoped: true,
+    params: [ { name: "gia_unit", label: "GIA unit", def: "", width: 90 } ],
+    note: "RICS groupings over an en_15978 building; GWP-fossil only, not a full RICS-compliant WLCA." },
+  { key: "pef", label: "EU PEF (single category)", path: "/reports/pef", assessmentScoped: true,
+    params: [],
+    note: "1 of 16 EF 3.1 impact categories (Climate change, GWP-fossil) — not a PEF profile." },
 ];
 
 export default function Reports({ settings, runId }:
@@ -109,6 +122,7 @@ export default function Reports({ settings, runId }:
   const fw = useMemo(() => FRAMEWORKS.find((f) => f.key === key)!, [key]);
   const [vals, setVals] = useState<Record<string, string>>(
     () => Object.fromEntries(FRAMEWORKS[0].params.map((p) => [p.name, p.def])));
+  const [assessmentId, setAssessmentId] = useState<string>("");
   const [report, setReport] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -121,15 +135,21 @@ export default function Reports({ settings, runId }:
   };
 
   const generate = async () => {
-    setError(null); setReport(null); setLoading(true);
+    setError(null); setReport(null);
+    // Assessment-scoped reports need an id in the PATH; guard before firing a bad request.
+    if (fw.assessmentScoped && !assessmentId.trim()) {
+      setError("enter an LCA assessment id for this report"); return;
+    }
+    setLoading(true);
     try {
       const params: Record<string, string | number | undefined> = {};
-      if (fw.runScoped !== false) params.run_id = runId;
+      if (!fw.assessmentScoped && fw.runScoped !== false) params.run_id = runId;
       for (const p of fw.params) {
         const v = vals[p.name];
         if (v !== undefined && v !== "") params[p.name] = v;
       }
-      setReport(await api.report(settings, fw.path, params));
+      const path = fw.assessmentScoped ? `${fw.path}/${assessmentId.trim()}` : fw.path;
+      setReport(await api.report(settings, path, params));
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -153,6 +173,13 @@ export default function Reports({ settings, runId }:
         <select value={key} onChange={(e) => selectFramework(e.target.value)}>
           {FRAMEWORKS.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
         </select>
+        {fw.assessmentScoped && (
+          <span className="row" style={{ gap: 4 }}>
+            <label className="muted">assessment id</label>
+            <input style={{ width: 90 }} value={assessmentId}
+                   onChange={(e) => setAssessmentId(e.target.value)} />
+          </span>
+        )}
         {fw.params.map((p) => (
           <span key={p.name} className="row" style={{ gap: 4 }}>
             <label className="muted">{p.label}</label>
@@ -170,7 +197,10 @@ export default function Reports({ settings, runId }:
         <button className="primary" onClick={generate} disabled={loading}>
           {loading ? "…" : "Generate"}
         </button>
-        <span className="muted">{runId ? `run #${runId}` : "latest run"}</span>
+        <span className="muted">
+          {fw.assessmentScoped ? "over an LCA assessment"
+            : runId ? `run #${runId}` : "latest run"}
+        </span>
       </div>
       {fw.note && <p className="muted">{fw.note}</p>}
       {error && <p className="bad">{error}</p>}
