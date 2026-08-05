@@ -339,6 +339,57 @@ paths emitted a materially wrong number while stamping the report
   work held. The LOW: an empty / Module-D-only building read disclosure_ready with a
   physically-impossible whole-life of ZERO -> upfront (A1-A5) now required (mirrors the EPD
   mandatory-core gate), fail-closed not blessed-zero.
+- **PR #41** — _ISO 14064-2 project GHG quantification._ Project reduction = baseline run -
+  project run - leakage, the exact delta between two immutable runs, reusing GRI 305-5's
+  GWP-vintage and residual-mix comparability guards. Fails closed on what makes the assertion
+  credible: a documented baseline justification and a quantified leakage are both required; a
+  partial OR EMPTY scenario run is blocked (an empty run's 0 kg total would read as a 100%
+  reduction); reduction status is per basis; a net increase is reported honestly; a
+  double-counting firewall against the corporate inventory is on every payload. Read-only, no
+  schema. `GET /reports/iso_14064_2`; registry `iso_14064_2` `reference` -> `partial`. A 4-lens
+  review confirmed 1 HIGH + 2 MEDIUM + 1 LOW, all fixed: HIGH = empty scenario run slipped every
+  gate (partial is 0<0=False) -> explicit empty-run gate on the frozen count; MEDIUM = negative
+  leakage was blocked but still subtracted, inflating the surfaced net -> invalid leakage nulls
+  the net figures; MEDIUM+LOW = location-only `is_reduction` mislabelled a market-based increase
+  -> split into per-basis flags.
+- **PR #42** — _TCFD four-pillar cross-reference map._ Maps the platform's output onto the 11
+  TCFD recommended disclosures; only Metrics & Targets (b) (gross Scope 1/2/3) is machine-
+  produced, sourced VERBATIM from the ISSB S2 renderer (one source of truth). Never claims a
+  complete TCFD report — the other ten disclosures are marked narrative/preparer-supplied, and
+  the readiness signal is scoped precisely to the M&T(b) core. Read-only, no schema. `GET
+  /reports/tcfd`; registry `tcfd` `reference` -> `partial`. A 3-lens review confirmed 4
+  honesty/precision findings, all fixed (MED: readiness field over-scoped the whole M&T pillar
+  -> `metrics_and_targets_b_quantitative_ready`; LOWs: report_scope mislabelled M&T(a)/(c),
+  M&T(a) note misattributed GHG intensity to S2 rather than GRI 305-4, docstring named a key the
+  code never emits).
+- **PR #43** — _EU PEF single-category coverage map._ PEF is multi-impact (16 EF 3.1 categories,
+  normalised/weighted to a single score against a PEFCR, verified); this carbon engine computes
+  one — Climate change, GWP-fossil sub-indicator only. Lists all 16 (the other 15 explicitly not
+  computed), populates Climate change with the LCA engine's figure, and is loud that GWP-fossil
+  is NOT PEF's Climate change (GWP-total). Never a PEF profile. Read-only, no schema. `GET
+  /reports/pef/{id}`; registry `pef` `reference` -> `partial`. A 2-lens review raised 3; the two
+  correctness verify-agents hit a session limit, so the findings were assessed directly (all
+  valid): MED = no minimum-content gate (an empty assessment read ready-0) -> empty-product
+  blocker (same class as the 14064-2 empty-run gate); LOWs = readiness name over-scoped the
+  category -> `climate_change_gwp_fossil_ready`; row-schema asymmetry -> every row carries
+  `value: null` (the full GWP-total category value is never produced).
+- **PR #44** — _EU CSDDD Article 22 carbon-inputs readiness map._ CSDDD is a due-diligence
+  PROCESS directive; the platform touches only the Art 22 climate-transition-plan carbon inputs.
+  This maps the two — a GHG inventory (from ISSB S2) and a science-based reduction target (from
+  SBTi) — and is emphatic it is NOT the plan, the due-diligence process, the human-rights /
+  non-climate work, or CSDDD compliance. Read-only, no schema. `GET /reports/csddd`; registry
+  `csddd` `reference` -> `partial`. A 2-lens review confirmed 1 HIGH + 1 MEDIUM, both fixed:
+  HIGH = a WB2C target read as meeting the 1.5C minimum because SBTi's meets_minimum is
+  ambition-RELATIVE (2.5%/yr floor for WB2C) -> gate on the ACTUAL 1.5C floor (near-term implied
+  rate >= 4.2%/yr regardless of the label; net-zero >=90% is 1.5C by SBTi); MEDIUM = trajectory-
+  placement blockers dragged target-input readiness (a false negative) -> input readiness now
+  depends only on the target being sound and 1.5C-aligned, blockers surfaced but non-gating.
+
+**The reference-standard buildout is complete — registry now 24 built / 14 partial / 2
+reference.** The two remaining `reference` entries are honestly reference-only by nature:
+`ghg_protocol_product` (the methodology behind the built product renderers, ISO 14067 / EPD) and
+`issb_s1` (general, non-climate sustainability requirements) — neither is a carbon-computation
+standard to "build".
 
 ## Strengths worth preserving
 
