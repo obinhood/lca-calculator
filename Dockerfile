@@ -1,6 +1,17 @@
-# Carbon platform API — production image.
-# Runs the FastAPI app under gunicorn with uvicorn workers. The frontend (frontend/) is a
-# static Vite build and is served separately (CDN / static host), so it is NOT in this image.
+# Carbon platform — single-service image (API + built frontend on one origin).
+# Stage 1 builds the Vite frontend; stage 2 runs the FastAPI app under gunicorn and serves the
+# built frontend from the same origin, so one container is a complete, browsable deployment.
+
+# --- Stage 1: build the frontend -----------------------------------------------------------
+FROM node:20-slim AS frontend
+WORKDIR /fe
+# Install deps against the lockfile first so this layer caches across source-only changes.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build          # -> /fe/dist
+
+# --- Stage 2: runtime ----------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 
 # Faster, quieter, no .pyc clutter; unbuffered logs for container log collectors.
@@ -19,6 +30,8 @@ COPY app ./app
 COPY migrations ./migrations
 COPY alembic.ini .
 COPY scripts ./scripts
+# The built frontend from stage 1 — main.py serves it at / when this directory exists.
+COPY --from=frontend /fe/dist ./frontend/dist
 
 # Non-root user — never run the app as root.
 RUN useradd --create-home --uid 10001 appuser
@@ -26,8 +39,9 @@ USER appuser
 
 EXPOSE 8000
 
-# DB migrations are a RELEASE step, run once per deploy (not per container / worker), to avoid
-# many workers racing `alembic upgrade` on boot:
-#     python -m alembic upgrade head
-# Then the container serves the app. Workers overridable via WEB_CONCURRENCY.
-CMD ["sh", "-c", "gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-4} -b 0.0.0.0:8000 --access-logfile - --error-logfile -"]
+# Migrate + seed (idempotent: scripts.init_db upgrades always, seeds only when empty) ONCE
+# before gunicorn forks workers — so there is no per-worker migration race — then serve on the
+# platform-provided $PORT (Railway/Render set it; defaults to 8000 locally). For a
+# horizontally-scaled deploy (many container instances) move `init_db` to a release step
+# instead, so instances don't race the migration.
+CMD ["sh", "-c", "python -m scripts.init_db && exec gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:${PORT:-8000} --access-logfile - --error-logfile -"]

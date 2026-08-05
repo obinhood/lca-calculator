@@ -1931,3 +1931,15 @@ def list_factors(db: Session = Depends(get_db), category: Optional[str] = None,
     return [{"id": f.id, "src": f.source, "ver": f.version, "geo": f.geography, "year": f.year,
              "cat": f.category, "subcat": f.subcategory, "unit": f.unit, "gwp": f.gwp_set,
              "value": f.value} for f in facs]
+
+
+# --- Single-service frontend (optional) ---------------------------------------------------
+# When a built frontend exists (frontend/dist, produced by `npm run build`), serve it from
+# the SAME origin as the API so one container/host is a complete demo. This mount is added
+# LAST, so every API route above matches first; it is the catch-all for the SPA and its
+# assets. Guarded by existence, so dev and the test suite (no build present) are unaffected.
+_frontend_dist = _os.path.join(
+    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "frontend", "dist")
+if _os.path.isdir(_frontend_dist):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")

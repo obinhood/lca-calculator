@@ -4,8 +4,13 @@
 export type Settings = { baseUrl: string; apiKey: string };
 
 export function loadSettings(): Settings {
+  // In the deployed single-service demo the API serves this very page, so default to the
+  // SAME origin and everything works with no configuration. Under the Vite dev server
+  // (:5173) the API runs separately, so fall back to the local API port there.
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const devDefault = origin.includes(":5173") ? "http://127.0.0.1:8000" : origin;
   return {
-    baseUrl: localStorage.getItem("baseUrl") || "http://127.0.0.1:8000",
+    baseUrl: localStorage.getItem("baseUrl") || devDefault,
     apiKey: localStorage.getItem("apiKey") || "",
   };
 }
