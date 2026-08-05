@@ -58,13 +58,10 @@ export const api = {
     request(s, "GET", "/results/summary", { params: { run_id: runId } }),
   lineage: (s: Settings, runId: number) =>
     request(s, "GET", `/runs/${runId}/lineage`),
-  secr: (s: Settings, runId: number | undefined, denom: number, unit: string) =>
-    request(s, "GET", "/reports/secr", {
-      params: { run_id: runId, intensity_denominator: denom, intensity_denominator_unit: unit } }),
-  sb253: (s: Settings, runId: number | undefined, level: string, provider: string) =>
-    request(s, "GET", "/reports/sb253", {
-      params: { run_id: runId, assurance_level: level, assurance_provider: provider } }),
-  esrs: (s: Settings, runId: number | undefined, revenue: number, currency: string) =>
-    request(s, "GET", "/reports/esrs_e1", {
-      params: { run_id: runId, net_revenue_millions: revenue, revenue_currency: currency } }),
+  // Generic disclosure-report fetch: the report registry in Reports.tsx supplies the
+  // endpoint path and its query params, so a new framework is one registry entry, not a
+  // new client method. Every report endpoint is GET and org-scoped by the API key.
+  report: (s: Settings, path: string,
+           params: Record<string, string | number | undefined>) =>
+    request(s, "GET", path, { params }),
 };
