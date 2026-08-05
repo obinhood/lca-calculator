@@ -49,6 +49,58 @@ const FRAMEWORKS: Framework[] = [
         width: 200 } ] },
   { key: "neutrality", label: "ISO 14068 neutrality", path: "/reports/neutrality", params: [
       { name: "basis", label: "basis", def: "location", options: ["location", "market"] } ] },
+  { key: "scope3_inventory", label: "GHGP Scope 3 inventory", path: "/reports/scope3_inventory",
+    params: [] },
+  { key: "removals", label: "GHGP removals", path: "/reports/removals", params: [] },
+  { key: "esos", label: "UK ESOS", path: "/reports/esos", params: [] },
+  { key: "assurance_readiness", label: "Assurance readiness (ISO 14064)",
+    path: "/reports/assurance_readiness", params: [] },
+  { key: "ets_mrv", label: "EU/UK ETS — MRV", path: "/reports/ets_mrv", params: [
+      { name: "scheme", label: "scheme", def: "EU ETS", options: ["EU ETS", "UK ETS"] },
+      { name: "verified", label: "verified", def: "false", options: ["false", "true"] } ] },
+  { key: "tcfd", label: "TCFD (cross-reference map)", path: "/reports/tcfd", params: [
+      { name: "jurisdiction_reference", label: "jurisdiction ref", def: "", width: 160 } ],
+    note: "Cross-reference map: only Metrics & Targets (b) is machine-produced (from ISSB S2)." },
+  { key: "csddd", label: "EU CSDDD (Art 22 carbon inputs)", path: "/reports/csddd", params: [
+      { name: "target_id", label: "SBTi target id", def: "", width: 100 },
+      { name: "current_year", label: "current year", def: "", width: 90 } ],
+    note: "Readiness of the Art 22 carbon INPUTS only — not the plan or the due-diligence process." },
+  { key: "ecovadis", label: "EcoVadis (carbon/energy)", path: "/reports/ecovadis", params: [
+      { name: "baseline_run_id", label: "baseline run id", def: "", width: 100 },
+      { name: "intensity_denominator", label: "intensity denom", def: "1.0", width: 90 },
+      { name: "denominator_unit", label: "unit", def: "unit", width: 80 },
+      { name: "has_environmental_policy", label: "env policy", def: "false",
+        options: ["false", "true"] },
+      { name: "iso_14001_certified", label: "ISO 14001", def: "false", options: ["false", "true"] },
+      { name: "published_sustainability_report", label: "published report", def: "false",
+        options: ["false", "true"] } ],
+    note: "Covers only the carbon/energy portion of the Environment theme — no score or medal." },
+  // --- Nature (separate spatial data model; org-scoped, not tied to a carbon run) ---
+  { key: "tnfd", label: "TNFD (nature)", path: "/reports/tnfd", runScoped: false, params: [] },
+  { key: "sbtn", label: "SBTN (nature targets)", path: "/reports/sbtn", runScoped: false,
+    params: [] },
+  // --- Not tied to a single calculation run ---
+  { key: "sbti", label: "SBTi target", path: "/reports/sbti", runScoped: false, params: [
+      { name: "target_id", label: "target id", def: "", width: 100 } ] },
+  { key: "iso_14064_2", label: "ISO 14064-2 (project)", path: "/reports/iso_14064_2",
+    runScoped: false, params: [
+      { name: "baseline_run_id", label: "baseline run id", def: "", width: 110 },
+      { name: "project_run_id", label: "project run id", def: "", width: 110 },
+      { name: "leakage_tco2e", label: "leakage tCO₂e", def: "0", width: 90 },
+      { name: "baseline_justification", label: "baseline justification", def: "", width: 220 },
+      { name: "project_name", label: "project name", def: "", width: 140 } ],
+    note: "Reduction = baseline run − project run − leakage; a separate account from the corporate inventory." },
+  { key: "pcaf", label: "PCAF (financed emissions)", path: "/reports/pcaf", runScoped: false,
+    params: [
+      { name: "include_scope3", label: "incl. scope 3", def: "true", options: ["true", "false"] },
+      { name: "as_of", label: "as of (ISO ts)", def: "", width: 170 } ] },
+  { key: "sfdr_pai", label: "SFDR PAI", path: "/reports/sfdr_pai", runScoped: false, params: [
+      { name: "portfolio_value_millions", label: "portfolio value (M)", def: "", width: 120 },
+      { name: "include_scope3", label: "incl. scope 3", def: "true", options: ["true", "false"] } ] },
+  { key: "cbam", label: "EU CBAM", path: "/reports/cbam", runScoped: false, params: [
+      { name: "year", label: "year", def: "2025", width: 70 } ] },
+  { key: "eu_taxonomy", label: "EU Taxonomy", path: "/reports/eu_taxonomy", runScoped: false,
+    params: [ { name: "reporting_year", label: "reporting year", def: "2025", width: 90 } ] },
 ];
 
 export default function Reports({ settings, runId }:
