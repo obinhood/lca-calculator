@@ -33,8 +33,10 @@ COPY scripts ./scripts
 # The built frontend from stage 1 — main.py serves it at / when this directory exists.
 COPY --from=frontend /fe/dist ./frontend/dist
 
-# Non-root user — never run the app as root.
-RUN useradd --create-home --uid 10001 appuser
+# Non-root user — never run the app as root. `chown /app` so appuser can CREATE files in the
+# working dir: with the default (no-Postgres) config the app opens sqlite ./carbon_mvp.db here,
+# and COPY runs as root, so without this appuser hits "unable to open database file" on boot.
+RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8000
