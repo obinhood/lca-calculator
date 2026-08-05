@@ -98,6 +98,25 @@ def current_org(x_api_key: str = Header(...), db: Session = Depends(get_db)) -> 
     return org
 
 
+@app.get("/healthz")
+def healthz(db: Session = Depends(get_db)):
+    """Liveness + DB readiness for load balancers / orchestrators.
+
+    A trivial `SELECT 1` proves the connection pool can actually reach the database, not just
+    that the process is up. Returns 503 (not 200) when the DB is unreachable so a deploy
+    target stops routing to a broken instance. Unauthenticated by design — no tenant data.
+    """
+    from sqlalchemy import text
+    try:
+        db.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return JSONResponse(
+        {"status": "ok" if db_ok else "degraded", "database": db_ok, "version": app.version},
+        status_code=200 if db_ok else 503)
+
+
 @app.post("/organisations")
 def register_organisation(name: str = Query(...), sector: Optional[str] = None,
                           x_registration_token: Optional[str] = Header(None),
