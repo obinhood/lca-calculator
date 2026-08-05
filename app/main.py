@@ -47,6 +47,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Per-key API rate limiting — OPT-IN via RATE_LIMIT_PER_MINUTE (absent => pass-through, so
+# dev and tests are never throttled). Keyed by X-API-Key, falling back to client IP.
+import time as _time
+from .ratelimit import configure_from_env as _rl_configure_from_env, get_limiter as _rl_get
+_rl_configure_from_env()
+
+
+@app.middleware("http")
+async def _rate_limit_mw(request, call_next):
+    limiter = _rl_get()
+    if limiter is not None:
+        key = request.headers.get("x-api-key") or (
+            request.client.host if request.client else "anon")
+        allowed, retry_after = limiter.check(key, _time.monotonic())
+        if not allowed:
+            return JSONResponse(
+                {"detail": f"rate limit exceeded — retry in {retry_after}s"},
+                status_code=429, headers={"Retry-After": str(retry_after)})
+    return await call_next(request)
+
 # Schema is managed by alembic (scripts/init_db.py runs `upgrade head` + seeds).
 # A create_all here would create unstamped tables and diverge from the migration
 # chain, so it was removed deliberately.
