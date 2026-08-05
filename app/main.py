@@ -1674,6 +1674,24 @@ def get_issb_s2_report(run_id: Optional[int] = None,
                                        jurisdiction=jurisdiction)))
 
 
+@app.get("/reports/csddd")
+def get_csddd_report(run_id: Optional[int] = None,
+                     target_id: Optional[int] = None,
+                     current_year: Optional[int] = None,
+                     org: Organisation = Depends(current_org),
+                     db: Session = Depends(get_db)):
+    """CSDDD Article 22 climate transition-plan CARBON INPUTS readiness map.
+
+    Honest scope: evidences only the GHG inventory (ISSB S2) and a science-based target
+    (SBTi) that feed an Art 22 plan — NOT the transition plan, the due-diligence process,
+    the human-rights / non-climate impact work, or CSDDD compliance. See report_scope /
+    not_produced.
+    """
+    from .reports.csddd import csddd_report
+    return JSONResponse(with_guidance(csddd_report(
+        db, org.id, run_id=run_id, target_id=target_id, current_year=current_year)))
+
+
 @app.get("/reports/tcfd")
 def get_tcfd_report(run_id: Optional[int] = None,
                     jurisdiction_reference: Optional[str] = None,

@@ -319,9 +319,18 @@ FRAMEWORKS = {
     "csddd": {
         "name": "EU CSDDD (Corporate Sustainability Due Diligence Directive)",
         "category": "Compliance", "jurisdiction": "EU",
-        "authority": "European Commission", "platform_support": "reference", "endpoint": None,
+        "authority": "European Commission", "platform_support": "partial",
+        "endpoint": "GET /reports/csddd",
         "applies_to": "Large companies conducting value-chain due diligence.",
-        "key_points": ["Adopt and implement a climate transition plan; identify and address adverse value-chain impacts."],
+        "key_points": [
+            "A risk-based due-diligence PROCESS (Art 5-16) over adverse human-rights and "
+            "environmental impacts across the chain of activities — far broader than climate.",
+            "Article 22: adopt and put into effect a climate transition plan aligned with 1.5°C, "
+            "with time-bound (2030, five-yearly to 2050) and absolute GHG reduction targets.",
+            "The platform evidences ONLY the Art 22 CARBON INPUTS — the GHG inventory (ISSB S2) "
+            "and a science-based target + trajectory (SBTi) — via a readiness map.",
+            "It does NOT produce the transition plan, the due-diligence process, the human-rights "
+            "/ non-climate impact work, or any assertion of CSDDD compliance."],
     },
     # --- Compliance / carbon pricing ---
     "cbam": {
@@ -474,6 +483,7 @@ _NAME_TO_KEY = [
     ("ISO 14083", "iso_14083"),
     ("EN 15804", "en_15978_15804"),
     ("EN 15978", "en_15978_15804"),
+    ("EU CSDDD", "csddd"),
     ("EU Taxonomy", "eu_taxonomy"),
     ("EU ETS MRV", "eu_ets"),
     ("UK ETS MRV", "uk_ets"),
