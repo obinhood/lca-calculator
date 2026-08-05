@@ -1,0 +1,25 @@
+# Keep the image lean and free of local/dev state and secrets.
+.git
+.github
+.claude
+.venv
+venv
+__pycache__
+*.pyc
+*.db
+*.sqlite
+.env
+.env.*
+!.env.example
+frontend/node_modules
+frontend/dist
+node_modules
+tests
+docs
+sample_data
+streamlit_app.py
+requirements-dev.txt
+requirements_streamlit.txt
+.pytest_cache
+.mypy_cache
+*.md
