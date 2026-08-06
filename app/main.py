@@ -4,7 +4,8 @@ import secrets
 from typing import Optional
 
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, Depends, Query, Header, HTTPException
+from fastapi import (FastAPI, UploadFile, File, Depends, Query, Header, HTTPException,
+                     Request, Response)
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
@@ -237,17 +238,59 @@ async def upload_activities(file: UploadFile = File(...),
                          "mapping": statuses, "issues": issues})
 
 
-# A small, self-contained demo activity set (matches sample_data/sample_activities.csv) —
-# inlined so /demo/seed works in the container without shipping the sample file.
-_DEMO_ACTIVITIES = [
-    ("2025-01-15", "electricity", "", "HQ office electricity", 1200, "kWh", "GB"),
-    ("2025-01-20", "gas", "", "HQ gas usage", 800, "kWh", "GB"),
-    ("2025-02-10", "diesel", "", "Generator diesel", 150, "L", "GB"),
-    ("2025-02-18", "flight", "short_haul_economy", "London-Paris return, 2 pax", 900, "pkm", "GB"),
-    ("2025-03-01", "train", "average", "Commuter rail", 1200, "pkm", "GB"),
-    ("2025-03-12", "car", "average", "Pool car mileage", 500, "km", "GB"),
-    ("2025-03-25", "waste", "landfill_msw", "General waste", 250, "kg", "GB"),
-]
+# A realistic FULL-YEAR demo dataset for a mid-sized UK company across two sites — inlined so
+# /demo/seed works in the container without shipping a sample file. Every row uses a category
+# /subcategory/unit combination present in the demo factor catalogue so it AUTO-MAPS (nothing
+# lands in the review queue), and monthly energy carries real seasonality so the dashboard and
+# reports look like an actual inventory rather than a toy.
+def _demo_activities():
+    rows = []
+    # Monthly electricity (kWh) — HQ + workshop; summer dip, winter peak.
+    hq_elec =  [4200, 3900, 3600, 3200, 2900, 2700, 2650, 2700, 3000, 3400, 3900, 4300]
+    ws_elec =  [2600, 2500, 2400, 2300, 2200, 2150, 2100, 2150, 2250, 2400, 2550, 2700]
+    # Monthly gas (kWh) — heating-driven, near zero in summer.
+    hq_gas =   [6800, 6200, 4900, 3100, 1500,  600,  400,  450, 1300, 3300, 5200, 6600]
+    for m in range(12):
+        d = f"2025-{m + 1:02d}-15"
+        rows.append((d, "electricity", "", f"HQ office electricity — {d[:7]}", hq_elec[m], "kWh", "GB"))
+        rows.append((d, "electricity", "", f"Workshop electricity — {d[:7]}", ws_elec[m], "kWh", "GB"))
+        rows.append((d, "gas", "", f"HQ gas heating — {d[:7]}", hq_gas[m], "kWh", "GB"))
+    # Quarterly standby-generator diesel (L) — Scope 1 fuel.
+    for q, (d, litres) in enumerate([("2025-02-10", 180), ("2025-05-12", 120),
+                                     ("2025-08-11", 95), ("2025-11-09", 210)]):
+        rows.append((d, "diesel", "", f"Standby generator refuel Q{q + 1}", litres, "L", "GB"))
+    # Business travel (Scope 3) — flights, rail, road.
+    rows += [
+        ("2025-02-18", "flight", "short_haul_economy", "London–Paris return, 2 pax", 1720, "pkm", "GB"),
+        ("2025-04-22", "flight", "short_haul_economy", "London–Munich return, 3 pax", 5100, "pkm", "GB"),
+        ("2025-06-09", "flight", "long_haul_economy", "London–New York return, 2 pax", 22200, "pkm", "GB"),
+        ("2025-09-30", "flight", "long_haul_economy", "London–Singapore return, 1 pax", 21500, "pkm", "GB"),
+        ("2025-03-01", "train", "average", "Commuter and intercity rail Q1", 8400, "pkm", "GB"),
+        ("2025-06-02", "train", "average", "Commuter and intercity rail Q2", 7900, "pkm", "GB"),
+        ("2025-09-01", "train", "average", "Commuter and intercity rail Q3", 6800, "pkm", "GB"),
+        ("2025-12-01", "train", "average", "Commuter and intercity rail Q4", 8100, "pkm", "GB"),
+        ("2025-03-12", "car", "average", "Pool car mileage Q1", 4200, "km", "GB"),
+        ("2025-06-13", "car", "average", "Pool car mileage Q2", 3900, "km", "GB"),
+        ("2025-09-15", "car", "average", "Pool car mileage Q3", 3600, "km", "GB"),
+        ("2025-12-11", "car", "average", "Pool car mileage Q4", 4400, "km", "GB"),
+    ]
+    # Waste to landfill (kg), quarterly.
+    for q, (d, kg) in enumerate([("2025-03-25", 1450), ("2025-06-24", 1310),
+                                 ("2025-09-23", 1180), ("2025-12-19", 1520)]):
+        rows.append((d, "waste", "landfill_msw", f"General waste to landfill Q{q + 1}", kg, "kg", "GB"))
+    # Purchased goods & services (Scope 3, spend-based GBP) — shows the spend method and a
+    # lower data-quality tier alongside the activity-based rows.
+    rows += [
+        ("2025-02-28", "spend", "professional_services", "Legal and audit fees", 48000, "GBP", "GB"),
+        ("2025-07-31", "spend", "professional_services", "Consultancy retainer", 32000, "GBP", "GB"),
+        ("2025-04-15", "spend", "it_equipment", "Laptop and server refresh", 26500, "GBP", "GB"),
+        ("2025-10-20", "spend", "it_equipment", "Networking hardware", 9800, "GBP", "GB"),
+        ("2025-05-30", "spend", "construction", "Workshop mezzanine fit-out", 74000, "GBP", "GB"),
+    ]
+    return rows
+
+
+_DEMO_ACTIVITIES = _demo_activities()
 
 
 @app.post("/demo/seed")
@@ -1890,6 +1933,51 @@ def get_sb253_report(run_id: Optional[int] = None,
     return JSONResponse(with_guidance(sb253_report(db, org.id, run_id=run_id,
                                      assurance_level=assurance_level,
                                      assurance_provider=assurance_provider)))
+
+
+@app.get("/export/{framework_key}")
+def export_report(framework_key: str, request: Request, format: str = "csv",
+                  org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Download any framework report as CSV or PDF.
+
+    The report is REGENERATED server-side from the immutable run using the same renderer as
+    the JSON endpoint — an exported document can never contain figures the engine would not
+    itself produce. Every query param the JSON endpoint accepts is accepted here too.
+
+    The PDF is a disclosure DOCUMENT (the framework's fields laid out for a reader), not a
+    certification: it carries the same fail-closed verdict, is stamped DRAFT when the report
+    is not disclosure-ready, and states that it is unverified.
+    """
+    from .reports.export import build_report, to_csv, to_pdf, BUILDERS
+    from .services.calc import _utcnow_iso
+
+    fmt = (format or "csv").lower()
+    if fmt not in ("csv", "pdf"):
+        raise HTTPException(status_code=400, detail="format must be csv or pdf")
+    if framework_key not in BUILDERS:
+        raise HTTPException(status_code=404,
+                            detail=f"unknown report {framework_key!r}; "
+                                   f"one of {sorted(BUILDERS)}")
+    params = {k: v for k, v in request.query_params.items() if k != "format"}
+    try:
+        payload = build_report(db, org.id, framework_key, params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    label = str(payload.get("framework") or framework_key)
+    stamp = _utcnow_iso()
+    fname = f"{framework_key}_{stamp[:10]}"
+    if fmt == "csv":
+        return PlainTextResponse(
+            to_csv(payload), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{fname}.csv"'})
+    try:
+        pdf = to_pdf(payload, framework_label=label, organisation=org.name, generated_at=stamp)
+    except ImportError:
+        raise HTTPException(status_code=503,
+                            detail="PDF export unavailable: reportlab is not installed")
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}.pdf"'})
 
 
 @app.get("/reports/secr")

@@ -41,10 +41,14 @@ def test_seed_populates_activities_and_a_run(client):
     r = c.post("/demo/seed", headers=hdr)
     assert r.status_code == 200
     body = r.json()
-    assert body["seeded_activities"] == 7
+    from app.main import _DEMO_ACTIVITIES
+    assert body["seeded_activities"] == len(_DEMO_ACTIVITIES)
     assert body["already_had_activities"] is False
     assert body["run_id"] is not None
-    assert body["total_co2e_kg"] == pytest.approx(204.0)   # electricity 1200 * 0.17 (only mapped one)
+    # only the electricity factor is seeded in this fixture, so the total is the electricity
+    # rows x 0.17 — proves the sample rows actually map and compute.
+    elec = sum(q for (_d, cat, _s, _desc, q, _u, _g) in _DEMO_ACTIVITIES if cat == "electricity")
+    assert body["total_co2e_kg"] == pytest.approx(elec * 0.17)
 
 
 def test_seed_is_idempotent(client):
@@ -56,10 +60,11 @@ def test_seed_is_idempotent(client):
     assert body["seeded_activities"] == 0                # did not re-insert
     assert body["already_had_activities"] is True
     assert body["run_id"] is not None                    # but still (re)computed a run
+    from app.main import _DEMO_ACTIVITIES
     db = Session()
     org = db.query(ActivityRecord).count()
     db.close()
-    assert org == 7                                       # exactly one demo set, not doubled
+    assert org == len(_DEMO_ACTIVITIES)                   # exactly one demo set, not doubled
 
 
 def test_seed_requires_api_key(client):
