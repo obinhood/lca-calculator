@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
-import { api, Settings } from "../api";
+import { api, isAuthError, Settings } from "../api";
 import type { Page } from "../App";
+
+export const SESSION_GONE =
+  "Your session is no longer valid — the workspace it belonged to no longer exists (this demo " +
+  "resets its database on each redeploy). Create a new workspace below to continue.";
 
 const fmt = (v: number | null | undefined, d = 1) =>
   v === null || v === undefined ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: d });
@@ -8,10 +12,11 @@ const fmt = (v: number | null | undefined, d = 1) =>
 // The guided landing INSIDE the app: a 4-step checklist that always says what to do next,
 // plus a snapshot once there is a footprint.
 export default function Home({ settings, go, version, hasData, hasRun, reviewCount,
-                              onChanged, onSelectRun }: {
+                              onChanged, onSelectRun, onAuthError }: {
   settings: Settings; go: (p: Page) => void; version: number;
   hasData: boolean; hasRun: boolean; reviewCount: number;
   onChanged: () => void; onSelectRun: (id?: number) => void;
+  onAuthError: (why: string) => void;
 }) {
   const [summary, setSummary] = useState<any>(null);
   const [seeding, setSeeding] = useState(false);
@@ -25,7 +30,10 @@ export default function Home({ settings, go, version, hasData, hasRun, reviewCou
   const loadDemo = async () => {
     setSeeding(true); setError(null);
     try { const r = await api.seedDemo(settings); onSelectRun(r.run_id); onChanged(); }
-    catch (e: any) { setError(e.message); }
+    catch (e: any) {
+      if (isAuthError(e)) { onAuthError(SESSION_GONE); return; }
+      setError(e.message);
+    }
     setSeeding(false);
   };
 

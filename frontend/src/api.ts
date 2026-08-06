@@ -36,10 +36,27 @@ async function request(s: Settings, method: string, path: string,
   let json: any = null;
   try { json = text ? JSON.parse(text) : null; } catch { /* plaintext */ }
   if (!res.ok) {
-    throw new Error(json?.detail ? String(JSON.stringify(json.detail)) : `${res.status}: ${text.slice(0, 200)}`);
+    // Carry the HTTP status so callers can tell "your key is dead" (401/403) apart from a
+    // genuine data problem. A stale key in localStorage — e.g. after the demo database was
+    // reset by a redeploy — otherwise looks like every action silently failing.
+    const detail = json?.detail;
+    const msg = typeof detail === "string" ? detail
+      : detail ? JSON.stringify(detail) : `${res.status}: ${text.slice(0, 200)}`;
+    throw new ApiError(msg, res.status);
   }
   return json;
 }
+
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export const isAuthError = (e: any) => e?.status === 401 || e?.status === 403;
 
 export const api = {
   register: (s: Settings, name: string) =>

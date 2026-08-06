@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { api, loadSettings, saveSettings, Settings } from "./api";
+import { api, isAuthError, loadSettings, saveSettings, Settings } from "./api";
 import Landing from "./components/Landing";
-import Home from "./components/Home";
+import Home, { SESSION_GONE } from "./components/Home";
 import Upload from "./components/Upload";
 import Review from "./components/Review";
 import Dashboard from "./components/Dashboard";
@@ -44,10 +44,21 @@ export default function App() {
   const [hasData, setHasData] = useState(false);
   const [hasRun, setHasRun] = useState(false);
 
+  const [notice, setNotice] = useState<string | null>(null);
+
   const bump = () => setVersion((v) => v + 1);
   const update = (s: Settings) => { saveSettings(s); setSettings(s); };
 
-  // Drives the sidebar badge + the Get-started checklist.
+  // A stored key can be DEAD — most often because the demo database was reset by a redeploy,
+  // so the organisation it belonged to no longer exists. Without this the app would sail past
+  // the sign-in screen on a saved key and then fail every action with no explanation.
+  const signOut = (why?: string) => {
+    saveSettings({ ...settings, apiKey: "" });
+    setSettings({ ...settings, apiKey: "" });
+    setNotice(why || null);
+  };
+
+  // Drives the sidebar badge + the Get-started checklist, and validates the key.
   useEffect(() => {
     if (!settings.apiKey) return;
     api.runs(settings)
@@ -55,13 +66,19 @@ export default function App() {
         setHasRun(rs.length > 0);
         if (rs.length > 0) setHasData(true);
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (isAuthError(e)) {
+          signOut(SESSION_GONE);
+        }
+      });
     api.reviewQueue(settings)
       .then((q: any[]) => { setReviewCount(q.length); if (q.length) setHasData(true); })
       .catch(() => {});
   }, [settings.apiKey, settings.baseUrl, version]);
 
-  if (!settings.apiKey) return <Landing settings={settings} onChange={update} />;
+  if (!settings.apiKey) {
+    return <Landing settings={settings} onChange={update} notice={notice} />;
+  }
 
   const t = TITLES[page];
   return (
@@ -113,16 +130,17 @@ export default function App() {
             <Home settings={settings} go={setPage} version={version}
                   hasData={hasData} hasRun={hasRun} reviewCount={reviewCount}
                   onChanged={() => { setHasData(true); setHasRun(true); bump(); }}
-                  onSelectRun={setRunId} />
+                  onSelectRun={setRunId} onAuthError={signOut} />
           )}
           {page === "data" && (
-            <Upload settings={settings} go={setPage}
+            <Upload settings={settings} go={setPage} onAuthError={signOut}
                     onChanged={() => { setHasData(true); bump(); }} />
           )}
           {page === "review" && <Review settings={settings} version={version} onChanged={bump} />}
           {page === "footprint" && (
             <Dashboard settings={settings} runId={runId} onSelectRun={setRunId} version={version}
-                       onChanged={() => { setHasRun(true); bump(); }} go={setPage} />
+                       onChanged={() => { setHasRun(true); bump(); }} go={setPage}
+                       onAuthError={signOut} />
           )}
           {page === "audit" && <Lineage settings={settings} runId={runId} version={version} />}
           {page === "reports" && <Reports settings={settings} runId={runId} go={setPage} hasRun={hasRun} />}

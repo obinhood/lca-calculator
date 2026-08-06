@@ -2,8 +2,8 @@ import { useState } from "react";
 import { api, Settings } from "../api";
 
 // Signed-out entry point: explain the product, then get the user an organisation + API key.
-export default function Landing({ settings, onChange }:
-    { settings: Settings; onChange: (s: Settings) => void }) {
+export default function Landing({ settings, onChange, notice }:
+    { settings: Settings; onChange: (s: Settings) => void; notice?: string | null }) {
   const [orgName, setOrgName] = useState("");
   const [issuedKey, setIssuedKey] = useState<string | null>(null);
   const [existingKey, setExistingKey] = useState("");
@@ -29,6 +29,10 @@ export default function Landing({ settings, onChange }:
           ISSB, GRI, CDP, CBAM and 20 more.
         </p>
       </div>
+
+      {notice && (
+        <div className="callout warn" style={{ marginBottom: 20 }}>{notice}</div>
+      )}
 
       <div className="features">
         <div className="feature"><div className="ico">🔗</div><b>Every number traceable</b>

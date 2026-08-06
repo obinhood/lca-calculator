@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
-import { api, Settings } from "../api";
+import { api, isAuthError, Settings } from "../api";
 import type { Page } from "../App";
+import { SESSION_GONE } from "./Home";
 
 const fmt = (v: number | null | undefined, d = 1) =>
   v === null || v === undefined ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: d });
 
 
-export default function Dashboard({ settings, runId, onSelectRun, version, onChanged, go }: {
+export default function Dashboard({ settings, runId, onSelectRun, version, onChanged, go,
+                                   onAuthError }: {
   settings: Settings; runId?: number; onSelectRun: (id?: number) => void;
   version: number; onChanged: () => void; go: (p: Page) => void;
+  onAuthError: (why: string) => void;
 }) {
   const [runs, setRuns] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
@@ -20,13 +23,18 @@ export default function Dashboard({ settings, runId, onSelectRun, version, onCha
   const loadDemo = async () => {
     setSeeding(true); setError(null);
     try { const r = await api.seedDemo(settings); onSelectRun(r.run_id); onChanged(); }
-    catch (e: any) { setError(e.message); }
+    catch (e: any) {
+      if (isAuthError(e)) { onAuthError(SESSION_GONE); return; }
+      setError(e.message);
+    }
     setSeeding(false);
   };
 
   useEffect(() => {
-    api.runs(settings).then(setRuns).catch((e) => setError(e.message));
-    api.summary(settings, runId).then(setSummary).catch((e) => setError(e.message));
+    api.runs(settings).then(setRuns)
+      .catch((e) => { if (isAuthError(e)) onAuthError(SESSION_GONE); else setError(e.message); });
+    api.summary(settings, runId).then(setSummary)
+      .catch((e) => { if (!isAuthError(e)) setError(e.message); });
   }, [settings.apiKey, settings.baseUrl, runId, version]);
 
   const compute = async () => {

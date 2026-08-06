@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { api, Settings } from "../api";
+import { api, isAuthError, Settings } from "../api";
 import type { Page } from "../App";
+import { SESSION_GONE } from "./Home";
 
 const TEMPLATE =
   "date,category,subcategory,description,quantity,unit,geo\n" +
@@ -29,8 +30,9 @@ const EXAMPLES: [string, string, string, string][] = [
   ["🗑️ Waste", "waste", "kg", "Landfill, recycling, incineration"],
 ];
 
-export default function Upload({ settings, onChanged, go }:
-    { settings: Settings; onChanged: () => void; go: (p: Page) => void }) {
+export default function Upload({ settings, onChanged, go, onAuthError }:
+    { settings: Settings; onChanged: () => void; go: (p: Page) => void;
+      onAuthError: (why: string) => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,14 +43,20 @@ export default function Upload({ settings, onChanged, go }:
     if (!f) return;
     setBusy("upload"); setError(null); setResult(null);
     try { setResult(await api.upload(settings, f)); onChanged(); }
-    catch (e: any) { setError(e.message); }
+    catch (e: any) {
+      if (isAuthError(e)) { onAuthError(SESSION_GONE); return; }
+      setError(e.message);
+    }
     setBusy(null);
   };
 
   const loadDemo = async () => {
     setBusy("demo"); setError(null);
     try { await api.seedDemo(settings); onChanged(); go("footprint"); }
-    catch (e: any) { setError(e.message); }
+    catch (e: any) {
+      if (isAuthError(e)) { onAuthError(SESSION_GONE); return; }
+      setError(e.message);
+    }
     setBusy(null);
   };
 
