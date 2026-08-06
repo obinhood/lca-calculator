@@ -24,3 +24,4 @@ carbon_mvp.db
 .pytest_cache/
 .coverage
 htmlcov/
+frontend/tsconfig.tsbuildinfo

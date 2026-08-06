@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { api, Settings } from "../api";
+import type { Page } from "../App";
 
 const fmt = (v: number | null | undefined, d = 1) =>
   v === null || v === undefined ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: d });
 
-type Tab = "Dashboard" | "Upload" | "Review queue" | "Lineage" | "Reports";
 
 export default function Dashboard({ settings, runId, onSelectRun, version, onChanged, go }: {
   settings: Settings; runId?: number; onSelectRun: (id?: number) => void;
-  version: number; onChanged: () => void; go: (t: Tab) => void;
+  version: number; onChanged: () => void; go: (p: Page) => void;
 }) {
   const [runs, setRuns] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
@@ -162,7 +162,7 @@ export default function Dashboard({ settings, runId, onSelectRun, version, onCha
               <button className="primary big" onClick={loadDemo} disabled={seeding}>
                 {seeding ? "Loading…" : "✨ Load demo data"}
               </button>
-              <button className="big" onClick={() => go("Upload")}>Add my own data →</button>
+              <button className="big" onClick={() => go("data")}>Add my own data →</button>
             </div>
           </div>
         </div>

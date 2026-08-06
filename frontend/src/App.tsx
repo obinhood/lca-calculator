@@ -1,97 +1,134 @@
-import { useState } from "react";
-import { loadSettings, saveSettings, Settings } from "./api";
-import Setup from "./components/Setup";
+import { useEffect, useState } from "react";
+import { api, loadSettings, saveSettings, Settings } from "./api";
+import Landing from "./components/Landing";
+import Home from "./components/Home";
 import Upload from "./components/Upload";
 import Review from "./components/Review";
 import Dashboard from "./components/Dashboard";
 import Lineage from "./components/Lineage";
 import Reports from "./components/Reports";
+import SettingsPage from "./components/SettingsPage";
 
-const TABS = [
-  { key: "Dashboard", hint: "Totals, scopes, coverage & data quality" },
-  { key: "Upload", hint: "Add activity data (CSV) or load the demo" },
-  { key: "Review queue", hint: "Approve coarse factor matches" },
-  { key: "Lineage", hint: "Trace every number back to its source" },
-  { key: "Reports", hint: "Generate framework disclosures" },
-] as const;
-type Tab = (typeof TABS)[number]["key"];
+export type Page =
+  | "home" | "data" | "review" | "footprint" | "audit" | "reports" | "settings";
+
+const NAV: { group: string; items: { key: Page; label: string; ico: string }[] }[] = [
+  { group: "Overview", items: [
+      { key: "home", label: "Get started", ico: "🏠" } ] },
+  { group: "Your data", items: [
+      { key: "data", label: "Activity data", ico: "📥" },
+      { key: "review", label: "Review queue", ico: "🔍" } ] },
+  { group: "Carbon footprint", items: [
+      { key: "footprint", label: "Footprint", ico: "📊" },
+      { key: "audit", label: "Audit trail", ico: "🧾" } ] },
+  { group: "Disclosures", items: [
+      { key: "reports", label: "Reports", ico: "📄" } ] },
+];
+
+const TITLES: Record<Page, { title: string; sub: string }> = {
+  home: { title: "Get started", sub: "Your setup progress and what to do next" },
+  data: { title: "Activity data", sub: "Upload the energy, travel and waste data behind your footprint" },
+  review: { title: "Review queue", sub: "Approve factor matches that need a human decision" },
+  footprint: { title: "Carbon footprint", sub: "Your emissions inventory by scope, with coverage and data quality" },
+  audit: { title: "Audit trail", sub: "Trace every number back to its source record and emission factor" },
+  reports: { title: "Reports", sub: "Generate a disclosure for any framework from your inventory" },
+  settings: { title: "Settings", sub: "Organisation, API key and connection" },
+};
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings());
-  const [tab, setTab] = useState<Tab>("Dashboard");
+  const [page, setPage] = useState<Page>("home");
   const [runId, setRunId] = useState<number | undefined>(undefined);
-  // Bumped by Upload/Review/Dashboard actions so sibling panels refetch.
-  const [version, setVersion] = useState(0);
-  const [hasRun, setHasRun] = useState(false);   // drives the onboarding stepper
+  const [version, setVersion] = useState(0);            // bump -> siblings refetch
+  const [reviewCount, setReviewCount] = useState(0);
+  const [hasData, setHasData] = useState(false);
+  const [hasRun, setHasRun] = useState(false);
+
   const bump = () => setVersion((v) => v + 1);
   const update = (s: Settings) => { saveSettings(s); setSettings(s); };
-  const go = (t: Tab) => setTab(t);
 
-  const connected = !!settings.apiKey;
+  // Drives the sidebar badge + the Get-started checklist.
+  useEffect(() => {
+    if (!settings.apiKey) return;
+    api.runs(settings)
+      .then((rs: any[]) => {
+        setHasRun(rs.length > 0);
+        if (rs.length > 0) setHasData(true);
+      })
+      .catch(() => {});
+    api.reviewQueue(settings)
+      .then((q: any[]) => { setReviewCount(q.length); if (q.length) setHasData(true); })
+      .catch(() => {});
+  }, [settings.apiKey, settings.baseUrl, version]);
 
+  if (!settings.apiKey) return <Landing settings={settings} onChange={update} />;
+
+  const t = TITLES[page];
   return (
-    <div>
-      <div className="brand">
-        <h1>🌿 Carbon Platform</h1>
-        <span className="subtle">audit-grade GHG accounting &amp; disclosure</span>
-      </div>
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="logo">
+          <span className="mark">🌿</span>
+          <span><b>Carbon Platform</b><span>audit-grade accounting</span></span>
+        </div>
 
-      {!connected ? (
-        <>
-          <div className="hero">
-            <h2>Turn activity data into audit-grade climate disclosures</h2>
-            <p className="lead">
-              Upload your energy, travel and other activity data once. The platform builds an
-              immutable, fully-traceable emissions inventory and renders it into 25+ reporting
-              frameworks — SECR, CSRD/ESRS, ISSB S2, GRI, CDP, CBAM and more — each with a
-              fail-closed “disclosure-ready” gate so you never file a number you can’t defend.
-            </p>
-            <div className="features">
-              <div className="feature"><b>Every number traceable</b>
-                <span>Immutable runs; each figure links back to its source activity and emission factor.</span></div>
-              <div className="feature"><b>25+ frameworks, one inventory</b>
-                <span>Generate many disclosures from a single dataset, grouped by purpose.</span></div>
-              <div className="feature"><b>Honest by design</b>
-                <span>Reports state exactly what they cover and block on missing data.</span></div>
-            </div>
-          </div>
-          <Setup settings={settings} onChange={update} />
-        </>
-      ) : (
-        <>
-          <Setup settings={settings} onChange={update} />
-
-          <div className="steps">
-            <div className="step done"><span className="n">✓</span> Organisation</div>
-            <div className={"step " + (tab === "Upload" && !hasRun ? "active" : hasRun ? "done" : "")}>
-              <span className="n">{hasRun ? "✓" : "2"}</span> Add data</div>
-            <div className={"step " + (hasRun ? "done" : "")}>
-              <span className="n">{hasRun ? "✓" : "3"}</span> Calculation run</div>
-            <div className={"step " + (tab === "Reports" ? "active" : "")}>
-              <span className="n">4</span> Disclosures</div>
-          </div>
-
-          <div className="tabs">
-            {TABS.map((t) => (
-              <button key={t.key} className={t.key === tab ? "active" : ""}
-                      onClick={() => setTab(t.key)} title={t.hint}>
-                {t.key}
+        {NAV.map((g) => (
+          <div key={g.group}>
+            <div className="nav-label">{g.group}</div>
+            {g.items.map((it) => (
+              <button key={it.key}
+                      className={"nav-item" + (page === it.key ? " active" : "")}
+                      onClick={() => setPage(it.key)}>
+                <span className="ico">{it.ico}</span>{it.label}
+                {it.key === "review" && reviewCount > 0 && (
+                  <span className="count">{reviewCount}</span>
+                )}
               </button>
             ))}
           </div>
+        ))}
 
-          {tab === "Dashboard" && (
+        <div className="sidebar-foot">
+          <button className={"nav-item" + (page === "settings" ? " active" : "")}
+                  onClick={() => setPage("settings")}>
+            <span className="ico">⚙️</span>Settings
+          </button>
+        </div>
+      </aside>
+
+      <div className="main">
+        <header className="topbar">
+          <div>
+            <h1>{t.title}</h1>
+            <div className="sub">{t.sub}</div>
+          </div>
+          <div className="spacer" />
+          {hasRun && page !== "home" && (
+            <span className="badge brand">{runId ? `Run #${runId}` : "Latest run"}</span>
+          )}
+        </header>
+
+        <div className="content">
+          {page === "home" && (
+            <Home settings={settings} go={setPage} version={version}
+                  hasData={hasData} hasRun={hasRun} reviewCount={reviewCount}
+                  onChanged={() => { setHasData(true); setHasRun(true); bump(); }}
+                  onSelectRun={setRunId} />
+          )}
+          {page === "data" && (
+            <Upload settings={settings} go={setPage}
+                    onChanged={() => { setHasData(true); bump(); }} />
+          )}
+          {page === "review" && <Review settings={settings} version={version} onChanged={bump} />}
+          {page === "footprint" && (
             <Dashboard settings={settings} runId={runId} onSelectRun={setRunId} version={version}
-                       onChanged={() => { bump(); setHasRun(true); }} go={go} />
+                       onChanged={() => { setHasRun(true); bump(); }} go={setPage} />
           )}
-          {tab === "Upload" && (
-            <Upload settings={settings} onChanged={() => { bump(); setHasRun(true); }} go={go} />
-          )}
-          {tab === "Review queue" && <Review settings={settings} version={version} onChanged={bump} />}
-          {tab === "Lineage" && <Lineage settings={settings} runId={runId} version={version} />}
-          {tab === "Reports" && <Reports settings={settings} runId={runId} />}
-        </>
-      )}
+          {page === "audit" && <Lineage settings={settings} runId={runId} version={version} />}
+          {page === "reports" && <Reports settings={settings} runId={runId} go={setPage} hasRun={hasRun} />}
+          {page === "settings" && <SettingsPage settings={settings} onChange={update} />}
+        </div>
+      </div>
     </div>
   );
 }
