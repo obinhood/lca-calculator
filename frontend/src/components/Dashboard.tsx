@@ -4,15 +4,25 @@ import { api, Settings } from "../api";
 const fmt = (v: number | null | undefined, d = 1) =>
   v === null || v === undefined ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: d });
 
-export default function Dashboard({ settings, runId, onSelectRun, version, onChanged }: {
+type Tab = "Dashboard" | "Upload" | "Review queue" | "Lineage" | "Reports";
+
+export default function Dashboard({ settings, runId, onSelectRun, version, onChanged, go }: {
   settings: Settings; runId?: number; onSelectRun: (id?: number) => void;
-  version: number; onChanged: () => void;
+  version: number; onChanged: () => void; go: (t: Tab) => void;
 }) {
   const [runs, setRuns] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
   const [gwpSet, setGwpSet] = useState("AR6");
   const [busy, setBusy] = useState(false);
+  const [seeding, setSeeding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const loadDemo = async () => {
+    setSeeding(true); setError(null);
+    try { const r = await api.seedDemo(settings); onSelectRun(r.run_id); onChanged(); }
+    catch (e: any) { setError(e.message); }
+    setSeeding(false);
+  };
 
   useEffect(() => {
     api.runs(settings).then(setRuns).catch((e) => setError(e.message));
@@ -141,7 +151,21 @@ export default function Dashboard({ settings, runId, onSelectRun, version, onCha
           </div>
         </>
       ) : (
-        <div className="panel muted">No calculation run yet — upload activities, then run a calculation.</div>
+        <div className="panel">
+          <div className="empty">
+            <h3>No emissions inventory yet</h3>
+            <p>
+              Load the sample dataset to see a complete inventory and reports in one click, or add
+              your own activity data and run a calculation.
+            </p>
+            <div className="cta" style={{ justifyContent: "center" }}>
+              <button className="primary big" onClick={loadDemo} disabled={seeding}>
+                {seeding ? "Loading…" : "✨ Load demo data"}
+              </button>
+              <button className="big" onClick={() => go("Upload")}>Add my own data →</button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );

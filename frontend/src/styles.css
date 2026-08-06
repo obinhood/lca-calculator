@@ -36,3 +36,47 @@ pre.detail { background: var(--bg); border: 1px solid var(--border); border-radi
 .badge.high { color: var(--accent); } .badge.medium { color: var(--warn); }
 .badge.low { color: var(--bad); }
 .blockers { border-left: 3px solid var(--bad); padding-left: 10px; }
+
+/* --- header / brand --- */
+.brand { display: flex; align-items: baseline; gap: 10px; margin: 4px 0 16px; }
+.brand h1 { margin: 0; }
+.subtle { color: var(--muted); font-size: 13px; }
+
+/* --- landing / hero --- */
+.hero { background: linear-gradient(160deg, #16241c, var(--panel)); border: 1px solid var(--border);
+  border-radius: 12px; padding: 22px; margin-bottom: 14px; }
+.hero h2 { font-size: 22px; margin: 0 0 6px; }
+.hero p.lead { color: var(--muted); font-size: 14px; margin: 0 0 16px; max-width: 640px; line-height: 1.5; }
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 14px; }
+.feature { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.feature b { display: block; margin-bottom: 3px; }
+.feature span { color: var(--muted); font-size: 12px; }
+
+/* --- onboarding stepper --- */
+.steps { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
+.step { display: flex; align-items: center; gap: 7px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 999px; padding: 5px 12px; font-size: 12px; color: var(--muted); }
+.step .n { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+  border-radius: 50%; background: var(--border); color: var(--text); font-size: 11px; font-weight: 600; }
+.step.active { border-color: var(--accent); color: var(--text); }
+.step.active .n { background: #14532d; border: 1px solid var(--accent); }
+.step.done { color: var(--accent); }
+.step.done .n { background: #14532d; color: var(--accent); }
+
+/* --- buttons / CTAs --- */
+button.ghost { background: transparent; }
+button.big { padding: 10px 18px; font-size: 14px; }
+.cta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* --- help / empty states --- */
+.help { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
+  font-size: 13px; color: var(--muted); line-height: 1.5; }
+.help code, code { background: #0b0f14; border: 1px solid var(--border); border-radius: 4px;
+  padding: 1px 5px; font-size: 12px; color: var(--text); }
+.empty { text-align: center; padding: 26px 16px; }
+.empty h3 { margin: 0 0 6px; font-size: 16px; }
+.empty p { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+.divider { height: 1px; background: var(--border); margin: 14px 0; }
+.pill { display: inline-block; background: var(--bg); border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 9px; font-size: 11px; color: var(--muted); margin: 2px 4px 2px 0; }
+label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }

@@ -116,6 +116,26 @@ const FRAMEWORKS: Framework[] = [
     note: "1 of 16 EF 3.1 impact categories (Climate change, GWP-fossil) — not a PEF profile." },
 ];
 
+// Frameworks grouped into sections so the picker reads as categories, not a flat list of 27.
+const GROUPS: { label: string; keys: string[] }[] = [
+  { label: "Corporate carbon reporting", keys: ["secr", "sb253", "esrs_e1", "issb_s2", "gri", "cdp", "tcfd"] },
+  { label: "Inventory & assurance", keys: ["scope3_inventory", "removals", "neutrality", "assurance_readiness"] },
+  { label: "Compliance & carbon pricing", keys: ["ets_mrv", "esos", "cbam", "eu_taxonomy", "csddd"] },
+  { label: "Finance", keys: ["pcaf", "sfdr_pai"] },
+  { label: "Targets & projects", keys: ["sbti", "iso_14064_2"] },
+  { label: "Product & building footprints", keys: ["lca", "epd", "rics", "pef"] },
+  { label: "Nature", keys: ["tnfd", "sbtn"] },
+  { label: "Ratings", keys: ["ecovadis"] },
+];
+
+// Safety net: any framework not placed in a group above still shows, under "Other" —
+// so adding a registry entry can never make it silently disappear from the picker.
+const _GROUPED = new Set(GROUPS.flatMap((g) => g.keys));
+const _RENDER_GROUPS = [
+  ...GROUPS,
+  { label: "Other", keys: FRAMEWORKS.filter((f) => !_GROUPED.has(f.key)).map((f) => f.key) },
+].filter((g) => g.keys.length > 0);
+
 export default function Reports({ settings, runId }:
     { settings: Settings; runId?: number }) {
   const [key, setKey] = useState<string>(FRAMEWORKS[0].key);
@@ -171,7 +191,14 @@ export default function Reports({ settings, runId }:
       <h2>Disclosure reports</h2>
       <div className="row">
         <select value={key} onChange={(e) => selectFramework(e.target.value)}>
-          {FRAMEWORKS.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+          {_RENDER_GROUPS.map((g) => (
+            <optgroup key={g.label} label={g.label}>
+              {g.keys.map((k) => {
+                const f = FRAMEWORKS.find((x) => x.key === k);
+                return f ? <option key={f.key} value={f.key}>{f.label}</option> : null;
+              })}
+            </optgroup>
+          ))}
         </select>
         {fw.assessmentScoped && (
           <span className="row" style={{ gap: 4 }}>

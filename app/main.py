@@ -237,6 +237,59 @@ async def upload_activities(file: UploadFile = File(...),
                          "mapping": statuses, "issues": issues})
 
 
+# A small, self-contained demo activity set (matches sample_data/sample_activities.csv) —
+# inlined so /demo/seed works in the container without shipping the sample file.
+_DEMO_ACTIVITIES = [
+    ("2025-01-15", "electricity", "", "HQ office electricity", 1200, "kWh", "GB"),
+    ("2025-01-20", "gas", "", "HQ gas usage", 800, "kWh", "GB"),
+    ("2025-02-10", "diesel", "", "Generator diesel", 150, "L", "GB"),
+    ("2025-02-18", "flight", "short_haul_economy", "London-Paris return, 2 pax", 900, "pkm", "GB"),
+    ("2025-03-01", "train", "average", "Commuter rail", 1200, "pkm", "GB"),
+    ("2025-03-12", "car", "average", "Pool car mileage", 500, "km", "GB"),
+    ("2025-03-25", "waste", "landfill_msw", "General waste", 250, "kg", "GB"),
+]
+
+
+@app.post("/demo/seed")
+def seed_demo_data(org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """One-click demo: load a small sample activity set (if the org is empty) and run a
+    calculation, so every report has data to show. Idempotent — safe to click again.
+
+    Relies on the demo emission-factor catalog (seeded at startup by scripts.init_db); the
+    auto-mapper binds each activity to a factor exactly as an upload would.
+    """
+    existing = db.query(ActivityRecord).filter(
+        ActivityRecord.organisation_id == org.id).count()
+    seeded = 0
+    if existing == 0:
+        recs = [ActivityRecord(
+            organisation_id=org.id, date=d, category=cat, subcategory=sub, description=desc,
+            quantity=float(qty), unit=unit, geo=geo, source_file="demo",
+            upload_hash="demo_seed", provenance="process")
+            for (d, cat, sub, desc, qty, unit, geo) in _DEMO_ACTIVITIES]
+        db.add_all(recs); db.commit()
+        seeded = len(recs)
+        try:
+            for a in db.query(ActivityRecord).filter(
+                    ActivityRecord.organisation_id == org.id,
+                    ActivityRecord.factor_id.is_(None),
+                    ActivityRecord.mapping_status.in_(["unmapped", "needs_review", None])).all():
+                auto_map_activity(db, a)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    # Always (re)compute so a run exists for the reports to read.
+    run = compute_co2e(db, org.id, gwp_set="AR6")
+    return JSONResponse({
+        "seeded_activities": seeded,
+        "already_had_activities": existing > 0,
+        "run_id": run.id,
+        "total_co2e_kg": run.total_co2e,
+        "next": "Open the Dashboard to see the run, then the Reports tab to generate disclosures.",
+    })
+
+
 @app.get("/mappings/review")
 def list_review_queue(org: Organisation = Depends(current_org),
                       db: Session = Depends(get_db)):
