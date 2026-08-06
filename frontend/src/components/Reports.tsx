@@ -87,11 +87,12 @@ function Runner({ fw, settings, runId, back }:
     () => Object.fromEntries(fw.params.map((p) => [p.name, p.def])));
   const [assessmentId, setAssessmentId] = useState("");
   const [report, setReport] = useState<any>(null);
+  const [check, setCheck] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const generate = async () => {
-    setError(null); setReport(null);
+    setError(null); setReport(null); setCheck(null);
     if (fw.assessmentScoped && !assessmentId.trim()) {
       setError("Enter the LCA assessment ID this report should cover."); return;
     }
@@ -105,6 +106,9 @@ function Runner({ fw, settings, runId, back }:
       }
       const path = fw.assessmentScoped ? `${fw.path}/${assessmentId.trim()}` : fw.path;
       setReport(await api.report(settings, path, params));
+      const cparams = { ...params };
+      if (fw.assessmentScoped) cparams.assessment_id = assessmentId.trim();
+      api.compliance(settings, fw.key, cparams).then(setCheck).catch(() => setCheck(null));
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -253,6 +257,57 @@ function Runner({ fw, settings, runId, back }:
             <summary>Full data (JSON)</summary>
             <pre className="detail">{JSON.stringify(report, null, 2)}</pre>
           </details>
+        </div>
+      )}
+
+      {check?.assessable && (
+        <div className="card">
+          <div className="card-head">
+            <h3>Required-data checklist</h3>
+            <div className="spacer" />
+            <span className={"badge " + (check.data_complete ? "ok" : "warn")}>
+              {check.data_fields_present}/{check.required_data_fields} required fields
+              {check.data_complete ? " · complete" : ` · ${check.data_completeness_pct}%`}
+            </span>
+          </div>
+          <p className="lead" style={{ marginTop: 0 }}>{check.verdict}</p>
+
+          {(check.thresholds || []).length > 0 && (
+            <table style={{ marginBottom: 14 }}>
+              <thead><tr><th>Metric</th><th>Achieved</th><th>Required</th><th>Gap</th></tr></thead>
+              <tbody>
+                {check.thresholds.map((t: any, i: number) => (
+                  <tr key={i}>
+                    <td>{t.metric}</td>
+                    <td>{t.actual ?? "—"} {t.unit}</td>
+                    <td>{t.required} {t.unit}</td>
+                    <td className={t.status === "met" ? "ok" : t.status === "short" ? "bad" : "muted"}>
+                      {t.status === "met" ? "✓ met" : t.explanation}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <table>
+            <thead><tr><th>Reference</th><th>Requirement</th><th>Status</th></tr></thead>
+            <tbody>
+              {(check.requirements || []).map((r: any, i: number) => (
+                <tr key={i}>
+                  <td className="muted">{r.ref}</td>
+                  <td>{r.requirement}</td>
+                  <td>
+                    {r.status === "present" && <span className="badge ok">Present</span>}
+                    {r.status === "missing" && <span className="badge bad">Missing</span>}
+                    {r.status === "preparer_must_supply" && <span className="badge warn">You supply</span>}
+                    {r.status === "requires_independent_assurance" && <span className="badge">Assurance</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="muted" style={{ marginTop: 12 }}>{check.scope_note}</p>
         </div>
       )}
     </>

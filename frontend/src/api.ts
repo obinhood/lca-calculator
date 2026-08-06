@@ -87,6 +87,9 @@ export const api = {
   report: (s: Settings, path: string,
            params: Record<string, string | number | undefined>) =>
     request(s, "GET", path, { params }),
+  compliance: (s: Settings, key: string,
+               params: Record<string, string | number | undefined>) =>
+    request(s, "GET", `/compliance/${key}`, { params }),
   // Server-rendered CSV/PDF download. Returns a Blob (not JSON), so it bypasses `request`.
   exportReport: async (s: Settings, key: string,
                        params: Record<string, string | number | undefined>): Promise<Blob> => {
