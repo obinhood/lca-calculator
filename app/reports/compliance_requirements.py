@@ -30,15 +30,30 @@ def _a(ref, what):              return {"ref": ref, "what": what, "source": "ass
 
 REQUIREMENTS: Dict[str, List[Req]] = {
     # ---------------------------------------------------------------- Corporate reporting
+    # SECR = SI 2018/1155, inserting Pt. 7A into Sch. 7 of SI 2008/410. This checklist covers
+    # the LARGE UNQUOTED company / LLP route (Pt. 7A), which is what app/reports/secr.py
+    # implements. QUOTED companies fall under Sch. 7 Pt. 7 (paras 15-19A) and must report
+    # GLOBAL energy and emissions with the UK/offshore portion identified — a different list.
     "secr": [
-        _p("SECR reg. 20A(1)", "UK energy use in kWh", "energy_use_kwh.total_kwh"),
-        _p("SECR reg. 20A(2)", "Scope 1 emissions (tCO2e)", "emissions_tco2e.scope1"),
-        _p("SECR reg. 20A(2)", "Scope 2 emissions (tCO2e)", "emissions_tco2e.scope2_location_based"),
-        _p("SECR reg. 20A(4)", "At least one intensity ratio", "intensity_ratio"),
-        _p("SECR reg. 20A(6)", "Methodology used to calculate the figures", "methodology_statement"),
-        _u("SECR reg. 20A(3)", "Energy-efficiency actions taken in the reporting year (narrative)"),
-        _u("SECR reg. 20A(5)", "Prior-year comparatives (after the first year of reporting)"),
-        _u("SECR Part 7A", "Statement of the organisational boundary and any excluded emissions"),
+        _p("SI 2008/410 Sch. 7 Pt. 7A para. 20D(3)",
+           "Aggregate energy consumed in kWh (non-UK may be excluded under 20D(5))",
+           "energy_use_kwh.total_kwh"),
+        _p("SI 2008/410 Sch. 7 Pt. 7A para. 20D(1)",
+           "Emissions from gas combustion and transport fuel, tCO2e (Scope 1)",
+           "emissions_tco2e.scope1"),
+        _p("SI 2008/410 Sch. 7 Pt. 7A para. 20D(2)",
+           "Emissions from purchased electricity, tCO2e (Scope 2)",
+           "emissions_tco2e.scope2_location_based"),
+        _p("SI 2008/410 Sch. 7 Pt. 7A para. 20G", "At least one intensity ratio",
+           "intensity_ratio"),
+        _p("SI 2008/410 Sch. 7 Pt. 7A para. 20F", "Methodologies used to calculate the figures",
+           "methodology_statement"),
+        _u("SI 2008/410 Sch. 7 Pt. 7A para. 20D(4)",
+           "Principal energy-efficiency measures taken in the reporting year (narrative)"),
+        _u("SI 2008/410 Sch. 7 Pt. 7A para. 20H",
+           "Prior-year comparatives (after the first year of reporting)"),
+        _u("SI 2008/410 Sch. 7 Pt. 7A para. 20D(5)-(6)",
+           "Organisational boundary, any non-UK exclusion, and anything omitted with the reason why"),
     ],
     "esrs_e1": [
         _u("ESRS E1-1", "Transition plan for climate change mitigation"),
@@ -81,9 +96,13 @@ REQUIREMENTS: Dict[str, List[Req]] = {
         _p("IFRS S2 ¶29(a)(vi)", "Scope 3 categories included",
            "ghg_emissions_tco2e.scope3_categories_included"),
         _p("IFRS S2 ¶B23", "Latest IPCC GWP values used", "ghg_emissions_tco2e.gwp_source"),
-        _u("IFRS S2 ¶29(b)", "Industry-based (SASB-derived) metrics"),
-        _u("IFRS S2 ¶29(c)", "Internal carbon price"),
-        _u("IFRS S2 ¶29(d)", "Climate considerations in executive remuneration"),
+        _u("IFRS S2 ¶29(b)-(c)",
+           "Assets/business activities vulnerable to transition and to physical climate risks"),
+        _u("IFRS S2 ¶29(d)", "Assets/business activities aligned with climate opportunities"),
+        _u("IFRS S2 ¶29(e)", "Capital deployment towards climate risks and opportunities"),
+        _u("IFRS S2 ¶29(f)", "Internal carbon price, and how it is applied"),
+        _u("IFRS S2 ¶29(g)", "Climate considerations in executive remuneration"),
+        _u("IFRS S2 ¶32", "Industry-based metrics (SASB-derived)"),
         _u("IFRS S2 ¶33-37", "Climate-related targets and progress against them"),
     ],
     "gri": [
@@ -95,8 +114,15 @@ REQUIREMENTS: Dict[str, List[Req]] = {
         _p("GRI 305-5", "Reduction of GHG emissions vs a base year", "gri_305_5_reductions"),
         _p("GRI 302-1", "Energy consumption within the organisation", "gri_302_1_energy"),
         _p("GRI 302-3", "Energy intensity", "gri_302_3_energy_intensity"),
-        _p("GRI 305-1 (biogenic)", "Biogenic CO2 reported separately",
+        _p("GRI 305-1-b", "Biogenic CO2 emissions reported separately",
            "gri_305_1_scope1.biogenic_co2_tco2_separate"),
+        _p("GRI 305-1-e / 305-2-d / 305-3-e", "Source of the emission factors and GWPs used",
+           "methodology"),
+        _p("GRI 305-4-b", "Metrics (denominator) chosen to calculate the intensity ratio",
+           "gri_305_4_intensity.denominator_unit"),
+        _u("GRI 305-1-c / 305-2-e / 305-3-f", "Base year, rationale, and recalculation policy"),
+        _u("GRI 305-1-f / 305-2-f", "Consolidation approach used for the inventory"),
+        _u("GRI 305-3-b", "Scope 3 categories and activities included in the calculation"),
         _u("GRI 305-6", "Emissions of ozone-depleting substances (ODS) — not a GHG metric"),
         _u("GRI 305-7", "NOx, SOx and other significant air emissions"),
         _u("GRI 302-4 / 302-5", "Reduction of energy consumption and of product energy requirements"),
@@ -135,31 +161,34 @@ REQUIREMENTS: Dict[str, List[Req]] = {
         _u("TCFD Risk Mgmt (c)", "Integration into overall risk management"),
         _u("TCFD Metrics (a)", "Metrics used to assess climate risks and opportunities"),
         _p("TCFD Metrics (b)", "Scope 1, 2 and (if appropriate) Scope 3 GHG emissions",
-           "pillars"),
+           "pillars.recommended_disclosures.ghg_emissions_tco2e"),
         _u("TCFD Metrics (c)", "Targets and performance against them"),
     ],
 
     # ------------------------------------------------------------ Inventory & assurance
     "scope3_inventory": [
-        _p("GHGP Scope 3 Ch.5", "All 15 categories screened and declared", "scope3"),
-        _p("GHGP Scope 3 Ch.6", "Emissions by category", "scope3"),
+        _p("GHGP Scope 3 Ch.5", "All 15 categories screened and declared",
+           "scope3.completeness"),
+        _p("GHGP Scope 3 Ch.6", "Emissions by category", "scope3.categories"),
         _u("GHGP Scope 3 Ch.7", "Calculation method and data sources described per category"),
         _u("GHGP Scope 3 Ch.9", "Justification for any excluded category"),
     ],
     "removals": [
-        _p("GHGP LSRG", "Removals reported separately from gross emissions", "disclosure_ready"),
+        _p("GHGP LSRG Ch.6", "Removals reported separately from gross emissions",
+           "inventory_removals_tco2e"),
         _u("GHGP LSRG Ch.10", "Permanence, monitoring and reversal-risk narrative"),
         _a("ISO 14064-3", "Independent verification of removal claims"),
     ],
     "neutrality": [
-        _p("ISO 14068-1 §5", "Quantified GHG footprint for the subject", "gross_tco2e"),
+        _p("ISO 14068-1 §5", "Quantified GHG footprint for the subject", "gross_tco2e")
+        ,_p("ISO 14068-1 §7", "Residual emissions after reductions", "residual_tco2e"),
         _p("ISO 14068-1 §7", "Residual emissions offset with RETIRED credits", "credits"),
         _u("ISO 14068-1 §6", "Carbon-reduction plan: reduce first, offset the remainder"),
         _u("ISO 14068-1 §9", "Public carbon-neutrality declaration with claim wording"),
         _a("ISO 14068-1 §10", "Independent validation/verification of the neutrality claim"),
     ],
     "assurance_readiness": [
-        _p("ISO 14064-1 §9", "Inventory documented and traceable to source", "checks"),
+        _p("ISO 14064-1 §9", "Inventory documented and traceable to source", "ready"),
         _u("ISAE 3410 ¶17", "Agreed level of assurance and materiality with the practitioner"),
         _a("ISAE 3410 ¶69", "Assurance report / opinion issued"),
     ],
@@ -191,11 +220,14 @@ REQUIREMENTS: Dict[str, List[Req]] = {
         _a("ESOS reg. 29", "Review and sign-off by an approved ESOS lead assessor"),
     ],
     "eu_taxonomy": [
-        _p("Disclosures DA Annex II", "Turnover / CapEx / OpEx KPIs", "turnover"),
+        _p("Disclosures DA (EU) 2021/2178 Annex II", "Turnover KPI", "turnover")
+        ,_p("Disclosures DA (EU) 2021/2178 Annex II", "CapEx KPI", "capex")
+        ,_p("Disclosures DA (EU) 2021/2178 Annex II", "OpEx KPI", "opex"),
         _u("Taxonomy Reg. Art. 3(a)", "Substantial-contribution assessment per activity"),
         _u("Taxonomy Reg. Art. 17", "Do No Significant Harm (DNSH) assessment"),
         _u("Taxonomy Reg. Art. 18", "Minimum safeguards (OECD/UNGP) compliance"),
-        _u("Disclosures DA Art. 8", "Accounting policy and the KPI templates as prescribed"),
+        _u("Disclosures DA (EU) 2021/2178 Art. 8 / Annex II",
+           "Accounting policy and the prescribed KPI reporting templates"),
     ],
     "csddd": [
         _p("CSDDD Art. 22(1)", "GHG inventory underpinning the transition plan",
@@ -220,7 +252,9 @@ REQUIREMENTS: Dict[str, List[Req]] = {
         _p("SFDR RTS Annex I, PAI 1", "GHG emissions (Scopes 1, 2, 3)", "pai_1_ghg_emissions_tco2e"),
         _p("SFDR RTS Annex I, PAI 2", "Carbon footprint", "pai_2_carbon_footprint"),
         _p("SFDR RTS Annex I, PAI 3", "GHG intensity of investee companies", "pai_3_ghg_intensity_of_investees"),
-        _u("SFDR RTS Annex I, PAI 4-14", "Remaining mandatory adverse-impact indicators"),
+        _u("SFDR RTS Annex I Table 1",
+           "The remaining mandatory adverse-impact indicators (PAI 4-14 for corporate "
+           "investees, plus the sovereign and real-estate indicators where held)"),
         _u("SFDR Art. 4", "Statement on principal adverse impacts, and actions taken"),
     ],
 
@@ -294,6 +328,8 @@ REQUIREMENTS: Dict[str, List[Req]] = {
         _u("TNFD Governance A/B", "Governance of nature-related dependencies and impacts"),
         _u("TNFD Strategy A-D", "Strategy, including scenario analysis"),
         _u("TNFD Risk & Impact A-C", "Risk and impact management processes"),
+        _u("TNFD Strategy D", "Locations of assets/activities in sensitive areas"),
+        _u("TNFD Metrics & Targets C", "Targets for nature-related dependencies and impacts"),
     ],
     "sbtn": [
         _p("SBTN Step 1", "Assess: materiality across realms", "steps"),

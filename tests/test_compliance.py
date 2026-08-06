@@ -176,3 +176,87 @@ def test_export_carries_the_checklist(client):
     c, h = client
     csv_text = c.get("/export/secr", headers=h, params={"format": "csv"}).text
     assert "required_data_check" in csv_text
+
+
+# --- fixes from the standards review (each pins a defect that was found and corrected) ---
+
+def test_platform_house_rules_are_labelled_and_do_not_block_completeness():
+    """A data-quality target is OUR guideline, not a number the standard sets. It must be
+    labelled as such and must never make a report look non-compliant with the framework."""
+    got = evaluate("issb_s2", {
+        "ghg_emissions_tco2e": {"scope1_gross": 1, "scope2_location_based_gross": 1,
+                                "scope3_gross": 1, "scope2_market_based_information": 1,
+                                "scope3_categories_included": [1], "gwp_source": "IPCC AR6"},
+        "methodology_statement": "m", "scope1_2_disaggregation_29a_iv": {"x": 1},
+        "coverage": {"coverage_pct": 100.0}, "run": {"gwp_set": "AR6"},
+        "data_quality": {"emissions_weighted_score": 4.5}})          # worse than our 3.0
+    dq = next(t for t in got["thresholds"] if t["metric"] == "Data-quality score")
+    assert dq["provenance"] == "platform"
+    assert dq["status"] == "short"
+    assert got["advisory_flags"] == 1
+    assert got["data_complete"] is True          # a house rule cannot fail the framework
+    assert "platform guideline" in got["verdict"]
+
+
+def test_standard_thresholds_are_labelled_standard():
+    got = evaluate("issb_s2", {"run": {"gwp_set": "AR6"}})
+    gwp = next(t for t in got["thresholds"] if t["metric"] == "GWP vintage")
+    assert gwp["provenance"] == "standard"
+
+
+def test_unassessable_threshold_blocks_completeness():
+    """Previously an unevaluable check was excluded from 'short' and so silently allowed a
+    'every threshold is met' verdict."""
+    got = evaluate("secr", {"energy_use_kwh": {"total_kwh": 1}, "emissions_tco2e":
+                            {"scope1": 1, "scope2_location_based": 1},
+                            "intensity_ratio": {"x": 1}, "methodology_statement": "m"})
+    assert got["data_fields_missing"] == 0
+    assert got["thresholds_not_assessable"] == 1
+    assert got["data_complete"] is False
+    assert "could not be checked" in got["verdict"]
+
+
+def test_sbti_uses_the_criterion_for_the_targets_own_horizon():
+    """A flat 4.2%/yr floor false-failed net-zero targets, which are judged on ~90% absolute."""
+    netzero = evaluate("sbti", {"ambition_assessment": {
+        "target_type": "net_zero", "meets_minimum": True,
+        "criterion": ">= 90% absolute reduction (net-zero)"}})
+    t = next(t for t in netzero["thresholds"] if t["metric"].startswith("Target ambition"))
+    assert t["status"] == "met"
+
+    weak = evaluate("sbti", {"ambition_assessment": {
+        "target_type": "near_term", "meets_minimum": False,
+        "criterion": ">= 4.2%/yr linear (near-term 1.5C)"}})
+    t2 = next(t for t in weak["thresholds"] if t["metric"].startswith("Target ambition"))
+    assert t2["status"] == "short" and "4.2%/yr" in t2["explanation"]
+
+
+def test_epd_threshold_is_not_a_tautology():
+    """required == hard-coded actual made this check unfailable, implying EN 15804 asks for
+    one indicator."""
+    got = evaluate("epd", {})
+    t = next(t for t in got["thresholds"] if "Core impact indicators" in t["metric"])
+    assert t["required"] == 13 and t["actual"] == 1
+    assert t["status"] == "short" and t["gap"] == pytest.approx(12.0)
+
+
+def test_secr_citations_reference_the_real_instrument():
+    """SECR sits in Sch. 7 Pt. 7A of SI 2008/410 — 'reg. 20A(n)' was fabricated."""
+    refs = " ".join(r["ref"] for r in REQUIREMENTS["secr"])
+    assert "SI 2008/410 Sch. 7 Pt. 7A" in refs
+    assert "reg. 20A" not in refs
+
+
+def test_issb_paragraph_letters_are_correct():
+    """29(b)-(e) are risk/opportunity and capital items; internal carbon price is (f),
+    remuneration (g); industry metrics are para 32 — not 29(b)."""
+    by_ref = {r["ref"]: r["what"] for r in REQUIREMENTS["issb_s2"]}
+    assert "Internal carbon price" in by_ref["IFRS S2 ¶29(f)"]
+    assert "remuneration" in by_ref["IFRS S2 ¶29(g)"]
+    assert "Industry-based metrics" in by_ref["IFRS S2 ¶32"]
+
+
+def test_resolver_walks_lists_to_reach_a_nested_disclosure():
+    payload = {"pillars": [{"recommended_disclosures": [{"ref": "x"},
+                                                        {"ghg_emissions_tco2e": {"s1": 1}}]}]}
+    assert _resolve(payload, "pillars.recommended_disclosures.ghg_emissions_tco2e") == {"s1": 1}

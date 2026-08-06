@@ -88,11 +88,12 @@ function Runner({ fw, settings, runId, back }:
   const [assessmentId, setAssessmentId] = useState("");
   const [report, setReport] = useState<any>(null);
   const [check, setCheck] = useState<any>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const generate = async () => {
-    setError(null); setReport(null); setCheck(null);
+    setError(null); setReport(null); setCheck(null); setCheckError(null);
     if (fw.assessmentScoped && !assessmentId.trim()) {
       setError("Enter the LCA assessment ID this report should cover."); return;
     }
@@ -108,7 +109,10 @@ function Runner({ fw, settings, runId, back }:
       setReport(await api.report(settings, path, params));
       const cparams = { ...params };
       if (fw.assessmentScoped) cparams.assessment_id = assessmentId.trim();
-      api.compliance(settings, fw.key, cparams).then(setCheck).catch(() => setCheck(null));
+      // Awaited, with its own error state: a silently-swallowed failure would just hide the
+      // checklist and read as "this framework has no requirements".
+      try { setCheck(await api.compliance(settings, fw.key, cparams)); }
+      catch (e: any) { setCheck(null); setCheckError(e.message); }
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -260,6 +264,10 @@ function Runner({ fw, settings, runId, back }:
         </div>
       )}
 
+      {checkError && (
+        <div className="callout warn">Could not load the required-data checklist: {checkError}</div>
+      )}
+
       {check?.assessable && (
         <div className="card">
           <div className="card-head">
@@ -280,7 +288,11 @@ function Runner({ fw, settings, runId, back }:
                   <tr key={i}>
                     <td>{t.metric}</td>
                     <td>{t.actual ?? "—"} {t.unit}</td>
-                    <td>{t.required} {t.unit}</td>
+                    <td>{t.required} {t.unit}
+                      {t.provenance === "platform" && (
+                        <div className="muted">platform guideline</div>
+                      )}
+                    </td>
                     <td className={t.status === "met" ? "ok" : t.status === "short" ? "bad" : "muted"}>
                       {t.status === "met" ? "✓ met" : t.explanation}
                     </td>
