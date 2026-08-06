@@ -2,3 +2,4 @@
 pytest==8.4.2
 httpx==0.27.2
 pypdf==5.1.0
+hypothesis==6.141.1
