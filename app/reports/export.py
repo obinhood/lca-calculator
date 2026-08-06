@@ -241,6 +241,16 @@ def build_report(db: Session, organisation_id: int, key: str, params: dict) -> d
     return builder(db, organisation_id, params)
 
 
+def build_with_compliance(db: Session, organisation_id: int, key: str, params: dict) -> dict:
+    """The report plus its required-data checklist, so exports carry the completeness
+    evidence rather than only the figures."""
+    from .compliance import evaluate
+    payload = build_report(db, organisation_id, key, params)
+    payload = dict(payload)
+    payload["required_data_check"] = evaluate(key, payload)
+    return payload
+
+
 # ---------------------------------------------------------------------------------------
 # CSV
 
@@ -436,6 +446,41 @@ def to_pdf(payload: dict, *, framework_label: str, organisation: str,
         story.append(Paragraph("Scope limitations", h2))
         story.append(ListFlowable([ListItem(Paragraph(x, body)) for x in lim_rows[:40]],
                                   bulletType="bullet", start="•", leftIndent=12))
+
+    # --- Required-data checklist: does this document carry what the framework asks for? ---
+    chk = payload.get("required_data_check") or {}
+    if chk.get("assessable"):
+        story.append(Paragraph("Required-data checklist", h2))
+        story.append(Paragraph(str(chk.get("verdict", "")), body))
+        rows = [[Paragraph(f"<b>{r['ref']}</b><br/>{r['requirement']}", body),
+                 Paragraph({"present": "Present",
+                            "missing": "MISSING",
+                            "preparer_must_supply": "You must supply",
+                            "requires_independent_assurance": "Independent assurance",
+                            }.get(r["status"], r["status"]), body)]
+                for r in chk.get("requirements", [])]
+        _table(rows, f"Coverage of required disclosures "
+                     f"({chk.get('data_fields_present')}/{chk.get('required_data_fields')} "
+                     f"platform fields present)")
+
+        thr = chk.get("thresholds") or []
+        if thr:
+            trows = [[Paragraph(t["metric"], body),
+                      Paragraph(f"{_fmt(t['actual'])} {t.get('unit','')}", body),
+                      Paragraph(f"{_fmt(t['required'])} {t.get('unit','')}", body),
+                      Paragraph(t["explanation"], body)] for t in thr]
+            story.append(Paragraph("Thresholds — achieved vs required", h2))
+            tt = Table([["Metric", "Achieved", "Required", "Gap"]] + trows,
+                       colWidths=[doc.width * .28, doc.width * .18, doc.width * .18,
+                                  doc.width * .36])
+            tt.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f4f2")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#5f6f68")),
+                ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#e2e8e4")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 5)]))
+            story.append(tt)
+        story.append(Paragraph(str(chk.get("scope_note", "")), small))
 
     run = payload.get("run") or {}
     if isinstance(run, dict) and run.get("id"):

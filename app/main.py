@@ -1935,6 +1935,28 @@ def get_sb253_report(run_id: Optional[int] = None,
                                      assurance_provider=assurance_provider)))
 
 
+@app.get("/compliance/{framework_key}")
+def get_compliance(framework_key: str, request: Request,
+                   org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Required-data checklist for one framework: which mandatory fields this report carries,
+    which are missing, and — where the standard sets a number — by how much you fall short.
+
+    Accepts the same query params as the report itself. This is a DATA-completeness check,
+    not a compliance opinion: preparer narrative and independent assurance are listed as
+    outstanding, never assumed.
+    """
+    from .reports.export import build_report, BUILDERS
+    from .reports.compliance import evaluate
+    if framework_key not in BUILDERS:
+        raise HTTPException(status_code=404, detail=f"unknown report {framework_key!r}")
+    params = {k: v for k, v in request.query_params.items()}
+    try:
+        payload = build_report(db, org.id, framework_key, params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse(evaluate(framework_key, payload))
+
+
 @app.get("/export/{framework_key}")
 def export_report(framework_key: str, request: Request, format: str = "csv",
                   org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
@@ -1948,7 +1970,7 @@ def export_report(framework_key: str, request: Request, format: str = "csv",
     certification: it carries the same fail-closed verdict, is stamped DRAFT when the report
     is not disclosure-ready, and states that it is unverified.
     """
-    from .reports.export import build_report, to_csv, to_pdf, BUILDERS
+    from .reports.export import build_with_compliance, to_csv, to_pdf, BUILDERS
     from .services.calc import _utcnow_iso
 
     fmt = (format or "csv").lower()
@@ -1960,7 +1982,7 @@ def export_report(framework_key: str, request: Request, format: str = "csv",
                                    f"one of {sorted(BUILDERS)}")
     params = {k: v for k, v in request.query_params.items() if k != "format"}
     try:
-        payload = build_report(db, org.id, framework_key, params)
+        payload = build_with_compliance(db, org.id, framework_key, params)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
