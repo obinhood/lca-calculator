@@ -87,4 +87,20 @@ export const api = {
   report: (s: Settings, path: string,
            params: Record<string, string | number | undefined>) =>
     request(s, "GET", path, { params }),
+  // Server-rendered CSV/PDF download. Returns a Blob (not JSON), so it bypasses `request`.
+  exportReport: async (s: Settings, key: string,
+                       params: Record<string, string | number | undefined>): Promise<Blob> => {
+    const url = new URL(`${s.baseUrl}/export/${key}`);
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== "") url.searchParams.set(k, String(v));
+    }
+    const res = await fetch(url.toString(),
+      { headers: s.apiKey ? { "X-API-Key": s.apiKey } : {} });
+    if (!res.ok) {
+      let msg = `${res.status}`;
+      try { const j = JSON.parse(await res.text()); msg = j?.detail || msg; } catch { /* binary */ }
+      throw new ApiError(String(msg), res.status);
+    }
+    return res.blob();
+  },
 };

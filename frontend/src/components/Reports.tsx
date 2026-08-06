@@ -118,12 +118,34 @@ function Runner({ fw, settings, runId, back }:
     report.ghg_emissions_tco2e || null);
   const methodology = report?.methodology_statement || report?.methodology || null;
 
-  const download = () => {
-    const url = URL.createObjectURL(
-      new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+  const saveBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `${fw.key}_report.json`; a.click();
+    a.href = url; a.download = filename; a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const downloadJson = () =>
+    saveBlob(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }),
+             `${fw.key}_report.json`);
+
+  // CSV/PDF are produced by the SERVER from the same immutable run (never from this page's
+  // copy of the payload), so a downloaded document can't contain client-edited figures.
+  const [exporting, setExporting] = useState<null | "csv" | "pdf">(null);
+  const downloadServer = async (format: "csv" | "pdf") => {
+    setExporting(format); setError(null);
+    try {
+      const params: Record<string, string | number | undefined> = { format };
+      if (fw.assessmentScoped) params.assessment_id = assessmentId.trim();
+      else if (fw.runScoped !== false) params.run_id = runId;
+      for (const p of fw.params) {
+        const v = vals[p.name];
+        if (v !== undefined && v !== "") params[p.name] = v;
+      }
+      const blob = await api.exportReport(settings, fw.key, params);
+      saveBlob(blob, `${fw.key}_report.${format}`);
+    } catch (e: any) { setError(e.message); }
+    finally { setExporting(null); }
   };
 
   return (
@@ -189,7 +211,13 @@ function Runner({ fw, settings, runId, back }:
                 {ready ? "✓ Disclosure-ready" : "Not ready yet"}
               </span>
             )}
-            <button onClick={download}>⬇ Download JSON</button>
+            <button onClick={() => downloadServer("pdf")} disabled={exporting !== null}>
+              {exporting === "pdf" ? "Preparing…" : "📄 PDF"}
+            </button>
+            <button onClick={() => downloadServer("csv")} disabled={exporting !== null}>
+              {exporting === "csv" ? "Preparing…" : "📊 CSV"}
+            </button>
+            <button onClick={downloadJson}>⬇ JSON</button>
           </div>
 
           {report.report_scope && <p className="muted">{report.report_scope}</p>}
