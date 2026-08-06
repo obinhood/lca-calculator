@@ -59,6 +59,7 @@ export const api = {
   run: (s: Settings, gwpSet: string) =>
     request(s, "POST", "/calculate/run", { params: { gwp_set: gwpSet } }),
   runs: (s: Settings) => request(s, "GET", "/runs"),
+  seedDemo: (s: Settings) => request(s, "POST", "/demo/seed"),
   summary: (s: Settings, runId?: number) =>
     request(s, "GET", "/results/summary", { params: { run_id: runId } }),
   lineage: (s: Settings, runId: number) =>
