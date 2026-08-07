@@ -553,9 +553,36 @@ class CbamDefaultValue(Base):
     )
     id = Column(Integer, primary_key=True)
     cn_code_prefix = Column(String, nullable=False)   # e.g. "7208" (flat-rolled iron/steel)
+    # The Commission's default tables are published per CN code AND country of origin — the
+    # same good from two countries carries different defaults. NULL = a country-agnostic
+    # fallback row, used only when no country-specific row matches (and flagged as such).
+    origin_country = Column(String, nullable=True)
     good_category = Column(String, nullable=False)    # iron_steel | aluminium | cement | fertilisers | hydrogen | electricity
     direct_t_co2e_per_t = Column(Float, nullable=False)
     indirect_t_co2e_per_t = Column(Float, nullable=False)
+    valid_year = Column(Integer, nullable=False)
+    recorded_at = Column(String, nullable=True)
+
+
+class CbamBenchmark(Base):
+    """EU ETS production benchmark for a CBAM good (tCO2e per tonne of product).
+
+    This is the basis of the FREE-ALLOCATION ADJUSTMENT: CBAM equalises an importer with an
+    EU producer, who receives free allocation of benchmark x production. The certificate
+    obligation is therefore embedded emissions MINUS that adjustment, not embedded emissions
+    scaled by the CBAM factor — the two coincide only when embedded emissions happen to equal
+    the benchmark exactly. Global reference data (admin-gated writes), append-only.
+    """
+    __tablename__ = "cbam_benchmarks"
+    __table_args__ = (
+        CheckConstraint("benchmark_t_co2e_per_t >= 0", name="ck_cbam_benchmark_nonneg"),
+    )
+    id = Column(Integer, primary_key=True)
+    cn_code_prefix = Column(String, nullable=False)
+    good_category = Column(String, nullable=False)
+    benchmark_t_co2e_per_t = Column(Float, nullable=False)
+    # Column A (process-related) vs Column B (including precursors) in the Commission tables.
+    basis = Column(String, nullable=True)
     valid_year = Column(Integer, nullable=False)
     recorded_at = Column(String, nullable=True)
 

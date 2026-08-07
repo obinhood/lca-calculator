@@ -118,6 +118,33 @@ def seed_cbam_defaults(session):
     session.commit()
 
 
+def seed_cbam_benchmarks(session):
+    """DEMO EU production benchmarks (tCO2e per tonne of product).
+
+    These drive the free-allocation adjustment, so a wrong benchmark moves the
+    certificate count directly. They are deliberately ROUND, obviously-invented numbers
+    — never near-misses of the real published values, which would invite a reader who
+    spot-checks one to trust the rest — set at 2/3 of each demo default's DIRECT factor
+    so an above-benchmark importer owes a visible amount. Replace with the official EU
+    ETS product benchmarks before any real declaration.
+    """
+    from app.models import CbamBenchmark
+    from app.services.calc import _utcnow_iso
+    now = _utcnow_iso()
+    rows = [
+        ("7208", "iron_steel",  1.20),   # vs 1.90 direct
+        ("7601", "aluminium",   1.00),   # vs 1.50 direct
+        ("2523", "cement",      0.40),   # vs 0.55 direct (+0.05 indirect, Annex II)
+        ("3102", "fertilisers", 1.00),   # vs 1.50 direct (+0.30 indirect, Annex II)
+        ("280410", "hydrogen",  6.00),   # vs 9.00 direct
+    ]
+    for prefix, cat, v in rows:
+        session.add(CbamBenchmark(cn_code_prefix=prefix, good_category=cat,
+                                  benchmark_t_co2e_per_t=v, valid_year=2026,
+                                  recorded_at=now))
+    session.commit()
+
+
 def main():
     upgrade_schema()
     from app.database import SessionLocal
@@ -132,10 +159,13 @@ def main():
         if session.query(PriceIndex).count() == 0:
             seed_reference_data(session)
             print("Seeded demo FX/CPI reference data.")
-        from app.models import CbamDefaultValue
+        from app.models import CbamBenchmark, CbamDefaultValue
         if session.query(CbamDefaultValue).count() == 0:
             seed_cbam_defaults(session)
             print("Seeded demo CBAM default values.")
+        if session.query(CbamBenchmark).count() == 0:
+            seed_cbam_benchmarks(session)
+            print("Seeded demo CBAM benchmarks.")
     finally:
         session.close()
 

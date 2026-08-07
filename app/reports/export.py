@@ -110,7 +110,13 @@ def _b_taxonomy(db, org, p):
 
 def _b_cbam(db, org, p):
     from .cbam import cbam_declaration
-    return cbam_declaration(db, org, _p(p, "year", _int, 2025))
+    from ..services.cbam import DEFINITIVE_PERIOD_START
+    # The ETS reference price must reach the declaration: without it the certificate
+    # count is suppressed, and a CSV/PDF export silently loses the headline figure.
+    # Default to the first definitive-period year, matching the UI. A 2025 default sent
+    # unparameterised exports into the transitional period, where certificates are zero.
+    return cbam_declaration(db, org, _p(p, "year", _int, DEFINITIVE_PERIOD_START),
+                            ets_price_eur_per_t=_p(p, "ets_price_eur_per_t", _float))
 
 def _b_ecovadis(db, org, p):
     from .ecovadis import ecovadis_readiness

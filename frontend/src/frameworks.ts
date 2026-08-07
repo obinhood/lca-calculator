@@ -122,7 +122,9 @@ export const FRAMEWORKS: Framework[] = [
     category: "Compliance & carbon pricing", needs: "year",
     blurb: "Importer declaration of embedded emissions for steel, cement, aluminium and more.",
     path: "/reports/cbam", runScoped: false, params: [
-      { name: "year", label: "Reporting year", def: "2025", width: 100 } ] },
+      { name: "year", label: "Reporting year", def: "2026", width: 100 },
+      { name: "ets_price_eur_per_t", label: "EU ETS price (EUR/t) — placeholder",
+        def: "80", width: 210 } ] },
   { key: "ets_mrv", label: "EU / UK ETS", full: "Emissions Trading System — MRV",
     category: "Compliance & carbon pricing", needs: "run",
     blurb: "Monitoring, reporting & verification for installations under an ETS.",

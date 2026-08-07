@@ -25,3 +25,4 @@ carbon_mvp.db
 .coverage
 htmlcov/
 frontend/tsconfig.tsbuildinfo
+.hypothesis/
