@@ -77,6 +77,9 @@ export const api = {
     request(s, "POST", "/calculate/run", { params: { gwp_set: gwpSet } }),
   runs: (s: Settings) => request(s, "GET", "/runs"),
   seedDemo: (s: Settings) => request(s, "POST", "/demo/seed"),
+  sectors: (s: Settings) => request(s, "GET", "/sectors"),
+  setSector: (s: Settings, sector: string) =>
+    request(s, "POST", "/organisations/profile", { params: { sector } }),
   summary: (s: Settings, runId?: number) =>
     request(s, "GET", "/results/summary", { params: { run_id: runId } }),
   lineage: (s: Settings, runId: number) =>

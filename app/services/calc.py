@@ -4,6 +4,7 @@ import hashlib
 from datetime import date as date_cls, datetime, timezone
 from typing import Optional, List
 from sqlalchemy.orm import Session
+from . import sectors
 from ..models import (
     ActivityRecord, EmissionFactor, CalculationRun, EmissionLineItem, ReportingPeriod,
     MarketInstrument, Scope3CategoryDeclaration, RunScope3Declaration,
@@ -1038,6 +1039,12 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
             ))
         run.ghgp_standard_version = GHGP_STANDARD_VERSION
         run.ghgp_map_version = CATEGORY_MAP_VERSION
+        # Frozen, not looked up later: a profile edit must not retroactively change what
+        # a past run's screening was challenged against. Only a recognised sector is
+        # frozen — an unrecognised string would read as a prior that silently never fired.
+        _org = db.get(Organisation, run.organisation_id)
+        _sector = getattr(_org, "sector", None)
+        run.organisation_sector = _sector if sectors.is_valid(_sector) else None
         # Stated at run level too: a run with zero Scope 3 lines must still say which
         # acceptance vocabulary it was computed under.
         run.ghgp_boundary_policy_version = BOUNDARY_POLICY_VERSION

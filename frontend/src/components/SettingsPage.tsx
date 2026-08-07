@@ -1,9 +1,12 @@
 import { Settings } from "../api";
+import SectorCard from "./SectorCard";
 
 export default function SettingsPage({ settings, onChange }:
     { settings: Settings; onChange: (s: Settings) => void }) {
   return (
     <>
+      <SectorCard settings={settings} />
+
       <div className="card">
         <h2>Your workspace</h2>
         <table style={{ marginTop: 10 }}>

@@ -118,6 +118,63 @@ def healthz(db: Session = Depends(get_db)):
         status_code=200 if db_ok else 503)
 
 
+def _check_sector(sector: Optional[str]) -> None:
+    """An unrecognised sector is rejected, not stored. A free-text sector would be
+    silently dropped by the relevance prior — the org would believe it had declared a
+    sector while no sector challenge ever ran against its Scope 3 screening."""
+    from .services import sectors
+    if sector is not None and not sectors.is_valid(sector):
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown sector {sector!r} — choose one of "
+                   f"{', '.join(sorted(sectors.SECTORS))} (see GET /sectors)")
+
+
+@app.get("/sectors")
+def list_sectors():
+    """The sector taxonomy, with the Scope 3 categories each sector must defend excluding.
+
+    Open (no key): this is reference data a caller needs BEFORE registering.
+    """
+    from .services import sectors
+    return {
+        "sectors": sectors.catalogue(),
+        "what_sector_does": [
+            "Routes the Scope 3 relevance challenge: excluding a category that dominates "
+            "in your sector requires evidence specific to your entity (GHGP Scope 3 Ch.6 "
+            "makes sector guidance a relevance criterion). You can still exclude it — you "
+            "just have to say why the sector pattern does not hold for you.",
+        ],
+        "what_sector_does_not_do": [
+            "It does not change any emission figure. Emissions are activity data x "
+            "emission factor; no sector multiplier, uplift or estimate is applied to a "
+            "measured number anywhere in this platform.",
+            "Where a sector DOES key a factor — spend-based EEIO — it is the SUPPLIER's "
+            "sector on the transaction, not your own.",
+            "It does not decide which disclosure frameworks you must file. That is driven "
+            "by size, listing status and jurisdiction, which this platform does not yet "
+            "model.",
+        ],
+    }
+
+
+@app.post("/organisations/profile")
+def update_organisation_profile(sector: str = Query(...),
+                                org: Organisation = Depends(current_org),
+                                db: Session = Depends(get_db)):
+    """Set the organisation's sector. Runs already frozen keep the sector they were
+    computed under — this only affects runs calculated from here on."""
+    _check_sector(sector)
+    org.sector = sector
+    db.commit()
+    from .services import sectors
+    return {"id": org.id, "sector": org.sector,
+            "sector_label": sectors.label(org.sector),
+            "dominant_scope3_categories": sectors.dominant_categories(org.sector),
+            "note": "Existing calculation runs keep the sector frozen at their run time; "
+                    "recalculate to apply this sector to a run's Scope 3 screening."}
+
+
 @app.post("/organisations")
 def register_organisation(name: str = Query(...), sector: Optional[str] = None,
                           x_registration_token: Optional[str] = Header(None),
@@ -134,6 +191,7 @@ def register_organisation(name: str = Query(...), sector: Optional[str] = None,
             raise HTTPException(status_code=401, detail="registration requires a valid X-Registration-Token")
     if db.query(Organisation).filter(Organisation.name == name).first():
         raise HTTPException(status_code=409, detail=f"organisation {name!r} already exists")
+    _check_sector(sector)
     key = secrets.token_urlsafe(32)
     org = Organisation(name=name, sector=sector, api_key_hash=_hash_key(key))
     db.add(org); db.commit(); db.refresh(org)

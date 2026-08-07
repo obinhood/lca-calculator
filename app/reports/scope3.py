@@ -212,6 +212,13 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
             "inventory_coverage_pct": gate.get("inventory_coverage_pct"),
             "blockers": gate.get("blockers", []),
             "warnings": gate.get("warnings", []),
+            # Which relevance prior was applied is part of the completeness statement:
+            # a screening judged with the sector criterion switched off is a weaker
+            # assertion than one judged with it on, and a reader must be able to tell.
+            "sector": gate.get("sector"),
+            "sector_label": gate.get("sector_label"),
+            "sector_dominant_categories": gate.get("sector_dominant_categories"),
+            "sector_prior_applied": gate.get("sector_prior_applied"),
         },
     }
 

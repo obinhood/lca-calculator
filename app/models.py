@@ -664,6 +664,12 @@ class CalculationRun(Base):
     # NULL ghgp_standard_version is the LEGACY-RUN sentinel: such a run has no
     # completeness statement and must never be rendered as a clean 15x0.0 table.
     ghgp_standard_version = Column(String, nullable=True)
+    # The reporting entity's sector AS AT this run, frozen like every other basis. The
+    # sector routes the Scope 3 relevance challenge (services/sectors.py), so reading the
+    # organisation's CURRENT sector would let a later profile edit silently change a
+    # frozen run's completeness statement. NULL = no sector stated, or a run predating
+    # the column; either way no sector challenge ran, and the payload says so.
+    organisation_sector = Column(String, nullable=True)
     ghgp_map_version = Column(String, nullable=True)
     # Which factor-boundary ACCEPTANCE VOCABULARY (Table 5.4 token policy) produced this
     # run's per-line minimum-boundary verdicts. Versioned apart from the GHGP standard
