@@ -1,11 +1,11 @@
 import { Settings } from "../api";
 import SectorCard from "./SectorCard";
 
-export default function SettingsPage({ settings, onChange }:
-    { settings: Settings; onChange: (s: Settings) => void }) {
+export default function SettingsPage({ settings, onChange, onSaved }:
+    { settings: Settings; onChange: (s: Settings) => void; onSaved?: () => void }) {
   return (
     <>
-      <SectorCard settings={settings} />
+      <SectorCard settings={settings} onSaved={onSaved} />
 
       <div className="card">
         <h2>Your workspace</h2>

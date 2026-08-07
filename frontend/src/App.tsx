@@ -7,10 +7,12 @@ import Review from "./components/Review";
 import Dashboard from "./components/Dashboard";
 import Lineage from "./components/Lineage";
 import Reports from "./components/Reports";
+import Obligations from "./components/Obligations";
 import SettingsPage from "./components/SettingsPage";
 
 export type Page =
-  | "home" | "data" | "review" | "footprint" | "audit" | "reports" | "settings";
+  | "home" | "data" | "review" | "footprint" | "audit" | "reports" | "obligations"
+  | "settings";
 
 const NAV: { group: string; items: { key: Page; label: string; ico: string }[] }[] = [
   { group: "Overview", items: [
@@ -22,6 +24,7 @@ const NAV: { group: string; items: { key: Page; label: string; ico: string }[] }
       { key: "footprint", label: "Footprint", ico: "📊" },
       { key: "audit", label: "Audit trail", ico: "🧾" } ] },
   { group: "Disclosures", items: [
+      { key: "obligations", label: "What applies to you", ico: "⚖️" },
       { key: "reports", label: "Reports", ico: "📄" } ] },
 ];
 
@@ -31,6 +34,7 @@ const TITLES: Record<Page, { title: string; sub: string }> = {
   review: { title: "Review queue", sub: "Approve factor matches that need a human decision" },
   footprint: { title: "Carbon footprint", sub: "Your emissions inventory by scope, with coverage and data quality" },
   audit: { title: "Audit trail", sub: "Trace every number back to its source record and emission factor" },
+  obligations: { title: "What applies to you", sub: "Which disclosure regimes compel a filing from your entity, and which merely apply" },
   reports: { title: "Reports", sub: "Generate a disclosure for any framework from your inventory" },
   settings: { title: "Settings", sub: "Organisation, API key and connection" },
 };
@@ -143,8 +147,9 @@ export default function App() {
                        onAuthError={signOut} />
           )}
           {page === "audit" && <Lineage settings={settings} runId={runId} version={version} />}
+          {page === "obligations" && <Obligations settings={settings} go={setPage} version={version} />}
           {page === "reports" && <Reports settings={settings} runId={runId} go={setPage} hasRun={hasRun} />}
-          {page === "settings" && <SettingsPage settings={settings} onChange={update} />}
+          {page === "settings" && <SettingsPage settings={settings} onChange={update} onSaved={bump} />}
         </div>
       </div>
     </div>
