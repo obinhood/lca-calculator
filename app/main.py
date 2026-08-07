@@ -1,4 +1,5 @@
 import hashlib
+import json as _json
 import math
 import secrets
 from typing import Optional
@@ -14,6 +15,7 @@ from .models import (
     Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun,
     MarketInstrument, FxRate, PriceIndex,
 )
+from .services import applicability
 from .services.ingestion import parse_csv
 from .services.qa import check_records
 from .services.resolver import auto_map_activity
@@ -118,6 +120,38 @@ def healthz(db: Session = Depends(get_db)):
         status_code=200 if db_ok else 503)
 
 
+def _fx_rates(db: Session, as_of_year: Optional[int] = None) -> dict:
+    """{(base, quote): (rate, year)} from the append-only FX reference table.
+
+    Applicability thresholds are stated in the regime's own currency. Without a rate the
+    comparison is not approximated — it is refused (see applicability._convert), because a
+    EUR threshold silently tested against a GBP turnover is simply a wrong legal answer.
+
+    The rate is picked for the year the FINANCIALS describe, not the newest row on file:
+    converting 2026 turnover at a 2021 rate can flip a definite verdict, and the rate year
+    is returned so the answer can say which one it used.
+    """
+    from .models import FxRate
+    best: dict = {}
+    # Append-only table: corrections INSERT a new row, so a later id for the same year
+    # supersedes. Among years, prefer the one closest to (and not after) as_of_year.
+    for r in db.query(FxRate).order_by(FxRate.id).all():
+        key = (r.base_currency.upper(), r.quote_currency.upper())
+        prev = best.get(key)
+        if prev is None:
+            best[key] = (r.rate, r.year); continue
+        if as_of_year is None:
+            if r.year >= prev[1]:
+                best[key] = (r.rate, r.year)
+            continue
+        # closest at-or-before as_of_year, else the earliest available after it
+        def score(y):
+            return (0, as_of_year - y) if y <= as_of_year else (1, y - as_of_year)
+        if score(r.year) <= score(prev[1]):
+            best[key] = (r.rate, r.year)
+    return best
+
+
 def _check_sector(sector: Optional[str]) -> None:
     """An unrecognised sector is rejected, not stored. A free-text sector would be
     silently dropped by the relevance prior — the org would believe it had declared a
@@ -128,6 +162,29 @@ def _check_sector(sector: Optional[str]) -> None:
             status_code=400,
             detail=f"unknown sector {sector!r} — choose one of "
                    f"{', '.join(sorted(sectors.SECTORS))} (see GET /sectors)")
+
+
+@app.get("/applicability")
+def get_applicability(org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """Which disclosure regimes COMPEL a filing from this entity, and which merely apply.
+
+    Indicative only. Every test that was applied is returned with its citation and the
+    distance from the threshold, so the answer can be checked rather than trusted. An
+    input the entity has not supplied yields 'cannot determine' — never 'not required'.
+    """
+    from .services.applicability_rules import RULES
+    from .services.calc import _parse_iso_date
+    d = _parse_iso_date(org.financials_as_of or "")
+    return JSONResponse(applicability.evaluate(
+        org, RULES, rates=_fx_rates(db, d.year if d else None)))
+
+
+@app.get("/applicability/vocabulary")
+def get_applicability_vocabulary():
+    """Jurisdiction and listing-market codes accepted by POST /organisations/profile."""
+    return {"jurisdictions": applicability.JURISDICTIONS,
+            "listing_markets": applicability.LISTING_MARKETS}
 
 
 @app.get("/sectors")
@@ -159,20 +216,106 @@ def list_sectors():
 
 
 @app.post("/organisations/profile")
-def update_organisation_profile(sector: str = Query(...),
-                                org: Organisation = Depends(current_org),
-                                db: Session = Depends(get_db)):
-    """Set the organisation's sector. Runs already frozen keep the sector they were
-    computed under — this only affects runs calculated from here on."""
-    _check_sector(sector)
-    org.sector = sector
-    db.commit()
+def update_organisation_profile(
+        sector: Optional[str] = None,
+        employees: Optional[int] = Query(None, description="average FTE over the year"),
+        annual_turnover: Optional[float] = Query(None, description="NET turnover/revenue"),
+        balance_sheet_total: Optional[float] = Query(None, description="gross assets"),
+        financials_currency: Optional[str] = Query(None, description="ISO 4217, e.g. EUR"),
+        financials_as_of: Optional[str] = Query(None, description="ISO date the figures describe"),
+        jurisdictions: Optional[str] = Query(
+            None, description="comma-separated codes where the entity operates, e.g. EU,UK"),
+        listed_markets: Optional[str] = Query(
+            None, description="comma-separated markets the entity is listed on; "
+                              "pass an empty string to record 'unlisted'"),
+        org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Set the entity profile: sector, size, where it operates and whether it is listed.
+
+    Sector routes the Scope 3 relevance challenge (frozen per run). The size, jurisdiction
+    and listing fields decide which regimes COMPEL a filing — a live question about the
+    entity today, so they are deliberately not frozen onto past runs.
+
+    Every field is optional and only supplied fields are written, so a caller can fill the
+    profile in incrementally. An absent field stays absent rather than being reset — and
+    an absent field makes an applicability answer 'cannot determine', never 'not required'.
+    """
     from .services import sectors
-    return {"id": org.id, "sector": org.sector,
-            "sector_label": sectors.label(org.sector),
-            "dominant_scope3_categories": sectors.dominant_categories(org.sector),
-            "note": "Existing calculation runs keep the sector frozen at their run time; "
-                    "recalculate to apply this sector to a run's Scope 3 screening."}
+    if sector is not None:
+        _check_sector(sector)
+        org.sector = sector
+    if employees is not None:
+        if employees < 0 or employees > 50_000_000:
+            raise HTTPException(status_code=400,
+                                detail="employees must be between 0 and 50,000,000")
+        org.employees = employees
+    for name_, val in (("annual_turnover", annual_turnover),
+                       ("balance_sheet_total", balance_sheet_total)):
+        if val is None:
+            continue
+        if not math.isfinite(val) or val < 0:
+            raise HTTPException(status_code=400,
+                                detail=f"{name_} must be a finite number >= 0")
+        setattr(org, name_, val)
+    if financials_currency is not None:
+        from .services.units import _CURRENCIES
+        code = financials_currency.strip().upper()
+        if code not in _CURRENCIES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"financials_currency must be a known ISO 4217 code "
+                       f"({', '.join(sorted(_CURRENCIES))})")
+        org.financials_currency = code
+    if financials_as_of is not None:
+        from .services.calc import _parse_iso_date
+        if _parse_iso_date(financials_as_of) is None:
+            raise HTTPException(status_code=400,
+                                detail="financials_as_of must be an ISO date (YYYY-MM-DD)")
+        org.financials_as_of = financials_as_of
+    if jurisdictions is not None:
+        codes = [c.strip().upper() for c in jurisdictions.split(",") if c.strip()]
+        unknown = [c for c in codes if c not in applicability.JURISDICTIONS]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown jurisdiction(s) {unknown} — choose from "
+                       f"{', '.join(sorted(applicability.JURISDICTIONS))}")
+        org.jurisdictions = _json.dumps(codes)
+    if listed_markets is not None:
+        markets = [c.strip().upper() for c in listed_markets.split(",") if c.strip()]
+        unknown = [c for c in markets if c not in applicability.LISTING_MARKETS]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown market(s) {unknown} — choose from "
+                       f"{', '.join(sorted(applicability.LISTING_MARKETS))}")
+        org.listed_markets = _json.dumps(markets)
+
+    # A monetary figure with no currency cannot be tested against any threshold, so it is
+    # rejected at the boundary rather than silently stored as an untestable number.
+    if (org.annual_turnover is not None or org.balance_sheet_total is not None) \
+            and not org.financials_currency:
+        raise HTTPException(
+            status_code=400,
+            detail="financials_currency is required when annual_turnover or "
+                   "balance_sheet_total is set — a monetary figure with no currency "
+                   "cannot be tested against any threshold")
+
+    db.commit(); db.refresh(org)
+    return {
+        "id": org.id,
+        "sector": org.sector,
+        "sector_label": sectors.label(org.sector),
+        "dominant_scope3_categories": sectors.dominant_categories(org.sector),
+        "employees": org.employees,
+        "annual_turnover": org.annual_turnover,
+        "balance_sheet_total": org.balance_sheet_total,
+        "financials_currency": org.financials_currency,
+        "financials_as_of": org.financials_as_of,
+        "jurisdictions": _json.loads(org.jurisdictions or "[]"),
+        "listed_markets": _json.loads(org.listed_markets or "[]"),
+        "note": "Existing calculation runs keep the sector frozen at their run time; "
+                "recalculate to apply a new sector to a run's Scope 3 screening. Size, "
+                "jurisdiction and listing apply immediately — see GET /applicability."}
 
 
 @app.post("/organisations")

@@ -78,8 +78,10 @@ export const api = {
   runs: (s: Settings) => request(s, "GET", "/runs"),
   seedDemo: (s: Settings) => request(s, "POST", "/demo/seed"),
   sectors: (s: Settings) => request(s, "GET", "/sectors"),
-  setSector: (s: Settings, sector: string) =>
-    request(s, "POST", "/organisations/profile", { params: { sector } }),
+  setProfile: (s: Settings, params: Record<string, string | number | undefined>) =>
+    request(s, "POST", "/organisations/profile", { params }),
+  applicability: (s: Settings) => request(s, "GET", "/applicability"),
+  applicabilityVocab: (s: Settings) => request(s, "GET", "/applicability/vocabulary"),
   summary: (s: Settings, runId?: number) =>
     request(s, "GET", "/results/summary", { params: { run_id: runId } }),
   lineage: (s: Settings, runId: number) =>

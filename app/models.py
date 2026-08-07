@@ -7,6 +7,24 @@ class Organisation(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True, nullable=False)
     sector = Column(String, nullable=True)
+    # --- Entity profile: SIZE, FOOTPRINT-OF-OPERATIONS and LISTING STATUS ---------------
+    # These decide which disclosure regimes COMPEL a filing (services/applicability.py).
+    # They are deliberately NOT frozen onto calculation runs, unlike `sector`: "which
+    # sector was my screening challenged against" is a property of a past run, whereas
+    # "what must I file" is a live question about the entity as it is today. Freezing it
+    # would answer last year's question with last year's headcount.
+    employees = Column(Integer, nullable=True)             # average FTE over the year
+    annual_turnover = Column(Float, nullable=True)         # NET turnover / revenue
+    balance_sheet_total = Column(Float, nullable=True)     # gross assets
+    financials_currency = Column(String, nullable=True)    # ISO 4217 for both figures above
+    financials_as_of = Column(String, nullable=True)       # ISO date the figures describe
+    # JSON list of jurisdiction codes where the entity operates, is established, or is
+    # listed — a group can be in scope of several regimes at once, so this is not a
+    # single "home country".
+    jurisdictions = Column(Text, nullable=True)
+    # Where the entity's securities trade, if anywhere: several regimes key off listing
+    # rather than size. JSON list; empty/absent means unlisted.
+    listed_markets = Column(Text, nullable=True)
     # SHA-256 hash of the org's API key (the plaintext key is returned exactly
     # once at registration and never stored). Supports rotation (new hash) and
     # revocation (revoked=True disables the key without deleting the org's data).
