@@ -340,7 +340,8 @@ FRAMEWORKS = {
         "applies_to": "Importers of iron/steel, aluminium, cement, fertilisers, hydrogen, electricity.",
         "key_points": [
             "Declare embedded emissions per CN code; verified actual installation values, else default values.",
-            "Certificate obligation = embedded x CBAM factor (2.5% in 2026 → 100% by 2034) x origin-carbon-price deduction.",
+            "Certificates = embedded emissions MINUS a free-allocation adjustment (quantity x EU benchmark x CBAM factor), floored at zero, then the origin-carbon-price deduction.",
+            "The CBAM factor is the share of EU free allocation still retained: 97.5% in 2026 falling to 0% in 2034, so the payable share of the gap to benchmark rises 2.5% → 100%.",
             "Indirect emissions enter the obligation only for Annex II goods (cement, fertilisers, electricity).",
             "Annual declaration by 31 May; ~50 t/year de minimis exemption.",
         ],

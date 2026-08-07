@@ -749,11 +749,37 @@ def get_cbam_declaration(year: int = Query(...),
                                          ets_price_eur_per_t=ets_price_eur_per_t)))
 
 
+# A typo'd good_category puts a line outside INDIRECT_IN_OBLIGATION, silently dropping
+# indirect emissions from the obligation for cement/fertilisers/electricity — an
+# understatement, so the category is closed-vocabulary at the boundary.
+CBAM_GOOD_CATEGORIES = {"iron_steel", "aluminium", "cement", "fertilisers",
+                        "hydrogen", "electricity"}
+
+
+def _check_cbam_category(good_category: str) -> None:
+    if good_category not in CBAM_GOOD_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"good_category must be one of "
+                   f"{', '.join(sorted(CBAM_GOOD_CATEGORIES))}")
+
+
+def _check_origin_country(origin_country: Optional[str]) -> None:
+    code = (origin_country or "").strip()
+    if code and (len(code) != 2 or not code.isalpha()):
+        raise HTTPException(status_code=400,
+                            detail="origin_country must be an ISO 3166-1 alpha-2 code "
+                                   "(e.g. CN), or omitted for a country-agnostic row")
+
+
 @app.post("/reference/cbam_defaults")
 def add_cbam_default(cn_code_prefix: str = Query(...), good_category: str = Query(...),
                      direct_t_co2e_per_t: float = Query(...),
                      indirect_t_co2e_per_t: float = Query(...),
                      valid_year: int = Query(...),
+                     origin_country: Optional[str] = Query(
+                         None, description="ISO country code; omit for a country-agnostic "
+                                           "fallback row"),
                      _: None = Depends(require_admin), db: Session = Depends(get_db)):
     """Append-only, admin-gated (global reference data, same doctrine as FX/CPI)."""
     from .models import CbamDefaultValue
@@ -766,13 +792,46 @@ def add_cbam_default(cn_code_prefix: str = Query(...), good_category: str = Quer
     if not cn_code_prefix.strip().isdigit() or len(cn_code_prefix.strip()) < 2:
         raise HTTPException(status_code=400,
                             detail="cn_code_prefix must be numeric, at least 2 digits")
+    _check_cbam_category(good_category)
+    _check_origin_country(origin_country)
     row = CbamDefaultValue(cn_code_prefix=cn_code_prefix.strip(),
+                           origin_country=(origin_country or "").strip().upper() or None,
                            good_category=good_category, valid_year=valid_year,
                            direct_t_co2e_per_t=direct_t_co2e_per_t,
                            indirect_t_co2e_per_t=indirect_t_co2e_per_t,
                            recorded_at=_utcnow_iso())
     db.add(row); db.commit(); db.refresh(row)
-    return {"id": row.id, "cn_code_prefix": row.cn_code_prefix}
+    return {"id": row.id, "cn_code_prefix": row.cn_code_prefix,
+            "origin_country": row.origin_country}
+
+
+@app.post("/reference/cbam_benchmarks")
+def add_cbam_benchmark(cn_code_prefix: str = Query(...), good_category: str = Query(...),
+                       benchmark_t_co2e_per_t: float = Query(...),
+                       valid_year: int = Query(...),
+                       basis: Optional[str] = Query(
+                           None, description="e.g. process-related, or including precursors"),
+                       _: None = Depends(require_admin), db: Session = Depends(get_db)):
+    """EU production benchmarks — the basis of the CBAM free-allocation adjustment.
+
+    Append-only, admin-gated. A wrong benchmark moves the certificate count directly, so
+    this is reference data with the same doctrine as FX/CPI and the default values.
+    """
+    from .models import CbamBenchmark
+    from .services.calc import _utcnow_iso
+    if not math.isfinite(benchmark_t_co2e_per_t) or benchmark_t_co2e_per_t < 0:
+        raise HTTPException(status_code=400,
+                            detail="benchmark_t_co2e_per_t must be a finite number >= 0")
+    if not cn_code_prefix.strip().isdigit() or len(cn_code_prefix.strip()) < 2:
+        raise HTTPException(status_code=400,
+                            detail="cn_code_prefix must be numeric, at least 2 digits")
+    _check_cbam_category(good_category)
+    row = CbamBenchmark(cn_code_prefix=cn_code_prefix.strip(), good_category=good_category,
+                        benchmark_t_co2e_per_t=benchmark_t_co2e_per_t, basis=basis,
+                        valid_year=valid_year, recorded_at=_utcnow_iso())
+    db.add(row); db.commit(); db.refresh(row)
+    return {"id": row.id, "cn_code_prefix": row.cn_code_prefix,
+            "benchmark_t_co2e_per_t": row.benchmark_t_co2e_per_t}
 
 
 @app.post("/lca/assessments")
