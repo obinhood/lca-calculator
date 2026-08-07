@@ -613,8 +613,12 @@ def scope3_completeness(db: Session, run) -> dict:
     This is what stops "3 of 15 categories" reading as "100% complete".
     """
     from ..models import RunScope3Declaration, EmissionLineItem, Scope3CategoryDeclaration
+    from . import sectors
 
     blockers, warnings = [], []
+    # The reporting entity's OWN sector routes the challenge; it never touches a figure.
+    # Read from what the RUN froze, never from the organisation's current profile.
+    sector = run.organisation_sector
 
     # B1 — legacy run: never render a clean 15x0.0 table for a run that predates
     # the category dimension. It has no completeness statement to show.
@@ -681,6 +685,18 @@ def scope3_completeness(db: Session, run) -> dict:
             f"Scope 3 lines carry no GHGP category ({unassigned_sources}) — they ARE included in "
             f"total_co2e but cannot be attributed to a category; set activities.ghgp_category")
 
+    if not sectors.is_valid(sector) or sector == "other":
+        # Fail closed on the DISCLOSURE: a completeness statement produced with one of the
+        # seven relevance criteria switched off must say so. NULL covers three cases —
+        # no sector stated, a run predating the column, and a legacy free-text sector
+        # dropped at freeze because it matched no taxonomy entry — and a reader cannot
+        # tell them apart, so the caveat names all three.
+        warnings.append(
+            "no sector prior was applied to this screening — the organisation stated no "
+            "sector, stated one outside the taxonomy, or the run predates the sector "
+            "dimension. GHGP Scope 3 Ch.6 sector guidance was therefore NOT tested "
+            "against any category; set a sector (GET /sectors) and recalculate to apply it")
+
     for c in CATEGORIES:
         d = decls.get(c)
         if d is None:
@@ -704,6 +720,40 @@ def scope3_completeness(db: Session, run) -> dict:
                 blockers.append(f"category {c} declared NOT MATERIAL without {missing} — an "
                                 f"immaterial exclusion must be screened against all seven "
                                 f"relevance criteria with an estimate and a threshold")
+        # B21 — sector guidance is the Scope 3 Standard's SIXTH relevance criterion, and
+        # the one a company cannot answer from its own books. Excluding a category that
+        # dominates in this entity's sector is the most common way an inventory
+        # understates — so the exclusion must ANSWER that criterion specifically, with
+        # evidence about this entity.
+        #
+        # This is a challenge with a discharge, deliberately, not a wall. An insurance
+        # intermediary in `financial_services` genuinely holds no portfolio; a wall would
+        # block its truthful `not_applicable` while leaving `included` with no data
+        # passing at 100% coverage — blocking the honest disclosure and waving through
+        # the understated one, which is the doctrine exactly inverted. The prior raises
+        # the evidential bar; it never decides the answer and never supplies a number.
+        rel = sectors.relevance(sector, c)
+        if rel == sectors.DOMINANT and d.status in ("not_applicable", "not_material",
+                                                    "not_measured"):
+            try:
+                _crit = json.loads(d.criteria or "{}")
+            except ValueError:
+                _crit = {}
+            _sg = _crit.get("sector_guidance") or {}
+            _note = (_sg.get("note") if isinstance(_sg, dict) else None) or ""
+            if is_boilerplate(_note):
+                blockers.append(
+                    f"category {c} ({category_name(c)}) is declared {d.status.upper()} but "
+                    f"typically DOMINATES emissions in the {sectors.label(sector)} sector — "
+                    f"GHGP Scope 3 Ch.6 makes sector guidance a relevance criterion, so the "
+                    f"'sector_guidance' criterion must carry evidence specific to THIS "
+                    f"entity explaining why the sector pattern does not hold (min "
+                    f"{MIN_JUSTIFICATION_CHARS} chars)")
+        elif rel == sectors.TYPICAL and d.status in ("not_applicable", "not_material"):
+            warnings.append(
+                f"category {c} ({category_name(c)}) is excluded as {d.status} but is "
+                f"normally present in the {sectors.label(sector)} sector — expect an "
+                f"assurer to test this")
         # B7 — boilerplate is not a justification.
         if d.status in ("not_applicable", "not_material", "not_measured") and \
                 is_boilerplate(d.justification):
@@ -952,4 +1002,10 @@ def scope3_completeness(db: Session, run) -> dict:
         "categories_accounted_for": accounted,
         "inventory_coverage_pct": round(100.0 * accounted / 15.0, 2),
         "unassigned_sources": unassigned_sources,
+        # Disclosed so a reader can see WHICH prior was applied — an unstated sector
+        # means no sector challenge ran, which is itself a completeness caveat.
+        "sector": sector,
+        "sector_label": sectors.label(sector),
+        "sector_dominant_categories": sectors.dominant_categories(sector),
+        "sector_prior_applied": sectors.is_valid(sector) and sector != "other",
     }
