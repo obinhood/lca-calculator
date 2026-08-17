@@ -37,8 +37,15 @@ def sfdr_pai_report(db: Session, organisation_id: int,
     weighted_intensity = 0.0
     weight_sum = 0.0
     n_with_revenue = 0
+    # `investee_scope3_tco2e` is nullable precisely so "not reported" and "zero" stay
+    # distinguishable. Coercing NULL to 0.0 keeps the position in the average at an
+    # understated intensity — so the coercion is COUNTED and disclosed rather than
+    # silently applied, and a reader can see how much of PAI 3 rests on absent data.
+    n_scope3_missing = 0
     for p in positions:
         if p.investee_revenue_millions and p.investee_revenue_millions > 0:
+            if include_scope3 and p.investee_scope3_tco2e is None:
+                n_scope3_missing += 1
             s3 = (p.investee_scope3_tco2e or 0.0) if include_scope3 else 0.0
             own = (p.investee_scope1_tco2e or 0.0) + (p.investee_scope2_tco2e or 0.0) + s3
             intensity = own / p.investee_revenue_millions
@@ -48,6 +55,25 @@ def sfdr_pai_report(db: Session, organisation_id: int,
     pai3 = round(weighted_intensity / weight_sum, 6) if weight_sum else None
 
     return {
+        # Echoed because it CHANGES PAI 1, 2 and 3. Two reports generated with
+        # different values for it are not comparable, and without this a reader
+        # cannot tell which one they are holding.
+        "include_scope3": bool(include_scope3),
+        "pai3_data_coverage": {
+            "positions_with_revenue": n_with_revenue,
+            "investee_scope3_not_reported": n_scope3_missing,
+            "note": (f"{n_scope3_missing} of {n_with_revenue} position(s) in PAI 3 have "
+                     f"NO reported investee Scope 3 and were treated as zero, which "
+                     f"understates the weighted intensity — 'not reported' is not 'zero'."
+                     if n_scope3_missing else
+                     "every position in PAI 3 carries reported investee Scope 3 data")
+            if include_scope3 else "Scope 3 excluded from PAI 3 by request",
+            "scope": "PAI 3 only. PAI 1 and PAI 2 come from the PCAF engine, which "
+                     "applies the same NULL-as-zero coercion over ALL positions "
+                     "(including those without revenue, which PAI 3 excludes) and does "
+                     "not yet count it — so their Scope 3 component may also rest on "
+                     "absent data.",
+        },
         "framework": "SFDR Principal Adverse Impacts (climate)",
         "ok": not blockers,
         "blockers": blockers,

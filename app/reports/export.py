@@ -406,7 +406,10 @@ def to_pdf(payload: dict, *, framework_label: str, organisation: str,
     def _table(rows, title):
         if not rows:
             return
-        story.append(Paragraph(title, h2))
+        # The derivation sub-tables sit under their own figure heading, so they pass
+        # None rather than repeating it above every worked calculation.
+        if title:
+            story.append(Paragraph(title, h2))
         tb = Table([["Field", "Value"]] + rows, colWidths=[doc.width * 0.55, doc.width * 0.45])
         tb.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f4f2")),
@@ -435,6 +438,48 @@ def to_pdf(payload: dict, *, framework_label: str, organisation: str,
                 and k not in ("framework", "report_scope", "methodology",
                               "methodology_statement", "disclosure_ready", "filing_ready", "ok")]
         _table(rows[:40], "Reported values")
+
+    # --- How each figure was arrived at. The point of the section is reperformance:
+    # an assurer should be able to rebuild every number from what is printed here.
+    dvs = payload.get("derivations") or {}
+    if dvs.get("figures"):
+        story.append(Paragraph("How these figures were calculated", h2))
+        story.append(Paragraph(str(dvs.get("note", "")), body))
+        if dvs.get("independently_verified"):
+            story.append(Paragraph(
+                "Independently verified (checked against a separately derived value, so "
+                "these fail on bad data): "
+                + ", ".join(dvs["independently_verified"]), body))
+        if dvs.get("warning"):
+            story.append(Paragraph(f"<b>{dvs['warning']}</b>", body))
+        for d in dvs["figures"]:
+            unit = f" {d['unit']}" if d.get("unit") else ""
+            story.append(Paragraph(
+                f"<b>{d['figure']}</b> = {_fmt(d.get('reported'))}{unit}", body))
+            drows = []
+            if d.get("basis"):
+                drows.append([Paragraph("basis", body), Paragraph(str(d["basis"]), body)])
+            for t in d.get("terms", []):
+                lbl = t["label"] + (f"  [{t['count']} record(s)]"
+                                    if t.get("count") is not None else "")
+                drows.append([Paragraph(lbl, body),
+                              Paragraph(_fmt(t.get("value")), body)])
+            if d["operation"] not in ("stated", "alternatives", "blocked"):
+                drows.append([Paragraph("<b>=</b>", body),
+                              Paragraph(f"<b>{d['expression']}</b>", body)])
+            elif d["operation"] == "alternatives":
+                drows.append([Paragraph("", body),
+                              Paragraph("<i>alternative measurements of the same "
+                                        "quantity — never added</i>", body)])
+            if drows:
+                _table(drows, None)
+            # A blocked figure's `note` and `reconciliation_error` carry the same text,
+            # so printing both said it twice.
+            if d.get("note") and d["operation"] != "blocked":
+                story.append(Paragraph(f"<i>{d['note']}</i>", body))
+            if not d.get("reconciles"):
+                _err = d.get("reconciliation_error") or "this figure could not be reconciled"
+                story.append(Paragraph(f"<b>{_err}</b>", body))
 
     method = payload.get("methodology_statement") or payload.get("methodology")
     if method:

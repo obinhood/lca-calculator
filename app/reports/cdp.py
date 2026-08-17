@@ -51,6 +51,8 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
     _financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
 
     by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}
+    # C6.10's numerator: gross Scope 1 + Scope 2 on the location basis only.
+    _scope12_tco2e = (by_scope.get("1", 0.0) + s["scope2"]["location_based"]) / 1000.0
     ef_sources = run_factor_sources(db, run)
     dq = s.get("data_quality") or {}
 
@@ -67,13 +69,25 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
             "C6.1_scope1_gross_tco2e": round(by_scope.get("1", 0.0) / 1000.0, 6),
             "C6.3_scope2_location_tco2e": round(s["scope2"]["location_based"] / 1000.0, 6),
             "C6.3_scope2_market_tco2e": round(s["scope2"]["market_based"] / 1000.0, 6),
-            "C6.5_scope3_tco2e": round(by_scope.get("3", 0.0) / 1000.0 + _financed_tco2e, 6),
+            # None when Cat 15 is declared through BOTH activity lines and a PCAF
+            # portfolio: adding them double-counts the same investee (GHGP Ch.9).
+            "C6.5_scope3_tco2e": (
+                None if s.get("cat15_double_count_blocked")
+                else round(by_scope.get("3", 0.0) / 1000.0 + _financed_tco2e, 6)),
+            "C6.5_cat15_double_count_blocked": bool(s.get("cat15_double_count_blocked")),
             "C6.5_scope3_excl_financed_tco2e": round(by_scope.get("3", 0.0) / 1000.0, 6),
             "C6.5_scope3_by_ghgp_category_tco2e": category_tco2e(s.get("scope3_ghgp") or {}),
             "C6.5_cat15_financed_tco2e": round(_financed_tco2e, 6) if run.financed_co2e is not None else None,
             "C6.7_biogenic_co2_tco2": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
+            # CDP C6.10 asks for gross global combined SCOPE 1 AND 2 emissions per unit
+            # of total revenue. Computing it over the whole inventory plus financed
+            # emissions inflated the filed ratio by the entire value chain.
             "C6.10_intensity": ({
-                "tco2e_per_unit": round((run.total_co2e / 1000.0 + _financed_tco2e) / intensity_denominator, 6),
+                "tco2e_per_unit": round(_scope12_tco2e / intensity_denominator, 6),
+                "numerator_tco2e": round(_scope12_tco2e, 6),
+                "numerator_basis": "gross Scope 1 + Scope 2 (location-based), per CDP "
+                                   "C6.10 — NOT the whole inventory and NOT including "
+                                   "Scope 3 or financed emissions",
                 "denominator": intensity_denominator,
                 "denominator_unit": intensity_denominator_unit or "unit",
             } if denom_ok else None),

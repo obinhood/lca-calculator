@@ -13,8 +13,11 @@ pre-submission validation gate, not a silent pass.
 """
 import json
 import math
+
+from . import derivation as D
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models import ActivityRecord, CalculationRun, EmissionLineItem
@@ -30,6 +33,17 @@ DIESEL_KWH_PER_LITRE_DEMO = 10.0
 
 # Carriers that count toward the SECR "energy use" figure and how to get kWh.
 _ENERGY_CARRIERS = ("electricity", "gas", "diesel")
+# Units that denote an energy-bearing quantity. Used only to DETECT carriers the kWh
+# figure omits — never to convert them, which would need an audited calorific value.
+# Matched case-INSENSITIVELY on a normalised token, because the units that actually appear
+# in a SECR filing are the ones an exact-case list misses: m3 for gas by volume, tonne and
+# kg for solid fuel, and lowercase kwh/l from a spreadsheet export.
+_ENERGY_UNITS = {
+    "kwh", "mwh", "gwh", "wh", "gj", "mj", "kj", "therm", "therms", "btu", "mmbtu",
+    "l", "litre", "litres", "liter", "liters", "gal", "gallon", "gallons",
+    "m3", "m^3", "scf", "ccf", "mcf",
+    "kg", "t", "tonne", "tonnes", "ton", "tons",
+}
 
 
 def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
@@ -85,7 +99,36 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
                 out[a.category] += convert(_qty, a.unit, "kWh") * share
         except UnitConversionError as exc:
             notes.append(f"activity {a.id} excluded from energy figure: {exc}")
+    # Any energy-bearing activity OUTSIDE the three-carrier allowlist had its emissions
+    # counted in Scope 1/2 while its energy silently vanished from the kWh figure. The
+    # omission is now measured and disclosed; an undisclosed one is what made a partial
+    # energy total read as complete.
+    # Restricted to the SAME scopes as the figure it annotates. Without this it reported
+    # a Scope 3 line as an omission from an own-operations total it was never part of —
+    # and asserted its emissions sat in Scope 1/2, which was simply false, in a filed
+    # CSRD disclosure.
+    oq = db.query(ActivityRecord.category, ActivityRecord.unit)\
+        .join(EmissionLineItem, EmissionLineItem.activity_id == ActivityRecord.id)\
+        .filter(EmissionLineItem.run_id == run.id,
+                EmissionLineItem.method == "location",
+                ~ActivityRecord.category.in_(_ENERGY_CARRIERS))
+    if scopes is not None:
+        oq = oq.filter(EmissionLineItem.scope.in_(scopes))
+    omitted: dict = {}
+    for cat, u in oq.all():
+        if (u or "").strip().lower().replace(" ", "") in _ENERGY_UNITS:
+            omitted[cat] = omitted.get(cat, 0) + 1
+    if omitted:
+        out["carriers_omitted"] = omitted
+        _where = ("the Scope 1/2 figures" if scopes is None or set(scopes) <= {"1", "2"}
+                  else f"the Scope {'/'.join(sorted(scopes))} figures")
+        notes.append(
+            f"energy-denominated activities outside the reported carriers "
+            f"({', '.join(sorted(omitted))}) are NOT in this kWh total, though their "
+            f"emissions ARE in {_where} — the energy figure is therefore incomplete "
+            f"relative to the emissions beside it")
     out["total_kwh"] = sum(v for k, v in out.items() if k in _ENERGY_CARRIERS)
+    out["carriers_reported"] = list(_ENERGY_CARRIERS)
     out["basis"] = "consolidated_entity_share" if consolidated else "gross_physical_energy"
     if consolidated and weighted_any:
         notes.append("energy weighted by the GHGP Ch.3 entity share, on the same basis "
@@ -162,8 +205,65 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         f"{s['method_split']['primary_data_share_pct']}%."
     )
 
+    # Worked calculations for every disclosed figure. Terms carry FULL precision while
+    # the payload publishes 6dp, which is the correct order — rounding intermediates then
+    # aggregating drifts. `display_dp` makes reconciliation check the right thing: that
+    # the report rounded the correct underlying number.
+    derivations = [
+        D.total_of("Scope 1 + 2 (location-based)",
+                   [{"k": "Scope 1", "v": scope1_kg / 1000.0},
+                    {"k": "Scope 2 (location-based)", "v": scope2_loc_kg / 1000.0}],
+                   label_key="k", value_key="v", unit="tCO2e", display_dp=6,
+                   stated_value=round((scope1_kg + scope2_loc_kg) / 1000.0, 6),
+                   basis=f"{run.gwp_set} GWP-100",
+                   note="SECR's headline is Scope 1 + 2 on the LOCATION basis. The "
+                        "market-based figure is disclosed alongside, never added to it."),
+        D.alternatives("Scope 2 — dual reported",
+                       [("Location-based", round(scope2_loc_kg / 1000.0, 6)),
+                        ("Market-based", round(scope2_mkt_kg / 1000.0, 6))],
+                       reported=round(scope2_loc_kg / 1000.0, 6), unit="tCO2e",
+                       note="GHG Protocol Scope 2 Guidance requires both; they measure "
+                            "the same electricity two ways and are never summed."),
+        D.total_of("Total (location-based)",
+                   [{"k": "Scope 1", "v": scope1_kg / 1000.0},
+                    {"k": "Scope 2 (location-based)", "v": scope2_loc_kg / 1000.0},
+                    {"k": "Scope 3 (voluntary under SECR)", "v": scope3_kg / 1000.0}],
+                   label_key="k", value_key="v", unit="tCO2e", display_dp=6,
+                   stated_value=round(run.total_co2e / 1000.0, 6), independent=True,
+                   note="Scope 3 is voluntary under SECR but is included in this total "
+                        "because the run computed it; the mandatory figure is the "
+                        "Scope 1 + 2 line above."),
+    ]
+    if intensity:
+        derivations.append(D.ratio(
+            "Intensity ratio",
+            f"Scope 1 + 2 location-based (tCO2e)",
+            (scope1_kg + scope2_loc_kg) / 1000.0,
+            f"Denominator ({intensity_denominator_unit or 'unit'})", intensity_denominator,
+            unit=f"tCO2e per {intensity_denominator_unit or 'unit'}", display_dp=6,
+            stated_value=intensity["tco2e_scope1_and_2_location"],
+            note="The denominator is supplied by the preparer. SECR does not prescribe "
+                 "one, so confirm it covers the SAME entities and period as the "
+                 "emissions numerator — a mismatched boundary is the usual defect here."))
+    if energy and energy.get("total_kwh") is not None:
+        rows = [{"k": c, "v": energy[c]} for c in _ENERGY_CARRIERS if c in energy]
+        if rows:
+            _om = energy.get("carriers_omitted") or {}
+            _note = ("Gross physical energy at operated sites — not converted to, or "
+                     "derived from, the emissions figures above.")
+            if _om:
+                # The arithmetic adds up, but the figure is INCOMPLETE. Saying only that
+                # it reconciles would let a tick read as completeness.
+                _note += (f" INCOMPLETE: {', '.join(sorted(_om))} carry energy that this "
+                          f"total does not include, while their emissions are in the "
+                          f"figures above.")
+            derivations.append(D.total_of(
+                "Energy use", rows, label_key="k", value_key="v", unit="kWh",
+                stated_value=energy["total_kwh"], basis=energy.get("basis"), note=_note))
+
     return {
         "framework": "UK SECR",
+        "derivations": D.summarise(derivations),
         "disclosure_ready": not blockers,
         "blockers": blockers,
         "run": run_info,
