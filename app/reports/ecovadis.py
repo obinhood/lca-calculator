@@ -220,6 +220,10 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
         "framework": "EcoVadis (Environment theme — carbon & energy readiness)",
         "assessment_ready": not blockers,
         "blockers": blockers,
+        # The KPIs below are reported per scope; an assumed scope is a caveat on the
+        # evidence, and evidence submitted without it overstates what was verified.
+        # None when nothing was assumed.
+        "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "pillars": pillars,
         "kpis": {

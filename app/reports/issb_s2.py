@@ -155,6 +155,10 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
         "jurisdiction_profile": {"key": jurisdiction, **profile},
         "disclosure_ready": not blockers,
         "blockers": blockers,
+        # ¶29(a) requires Scope 1, 2 and 3 disclosed SEPARATELY; where a category was
+        # unrecognised that separation rests on a machine guess, so the caveat travels
+        # with the figures. None when nothing was assumed.
+        "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "reporting_period_id": run.reporting_period_id,
         "ghg_emissions_tco2e": {

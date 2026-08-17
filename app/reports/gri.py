@@ -105,6 +105,9 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         "framework": "GRI 305 Emissions / GRI 302 Energy",
         "disclosure_ready": not blockers,
         "blockers": blockers,
+        # 305-1/2/3 are three per-scope disclosures; an assumed scope decides which of
+        # them an activity lands in. None when nothing was assumed.
+        "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "gri_305_1_scope1": {
             "gross_tco2e": round(scope1_kg / 1000.0, 6),

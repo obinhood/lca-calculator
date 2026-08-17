@@ -754,6 +754,15 @@ def get_plain_report(run_id: Optional[int] = None,
     lines.append("\nBy scope:")
     for row in s["by_scope"]:
         lines.append(f"  Scope {row['scope']}: {row['co2e']:.2f} kgCO2e")
+    # This renderer PRINTS the scope split, so it must print the caveat when part of that
+    # split was guessed from an unrecognised category — otherwise the plain-text report is
+    # the one place the assumption becomes invisible.
+    _sa = s.get("scope_assumptions")
+    if _sa:
+        lines.append("  ASSUMED SCOPE 3 (unrecognised category, activity count): "
+                     + ", ".join(f"{c}={n}" for c, n in sorted(
+                         _sa["assumed_scope3_by_category"].items())))
+        lines.append("  " + _sa["note"])
     lines.append("\nBy category:")
     for row in s["by_category"]:
         lines.append(f"  {row.get('category','?')}: {row.get('co2e',0.0):.2f} kgCO2e")

@@ -439,6 +439,18 @@ def to_pdf(payload: dict, *, framework_label: str, organisation: str,
                               "methodology_statement", "disclosure_ready", "filing_ready", "ok")]
         _table(rows[:40], "Reported values")
 
+    # --- Assumed scopes. This is the document that gets FILED, so the caveat has to be
+    # printed beside the figures it qualifies: where a category was unrecognised, which
+    # scope those emissions sit in is a machine guess, not a preparer's classification.
+    _sa = payload.get("scope_assumptions")
+    if isinstance(_sa, dict) and _sa.get("assumed_scope3_by_category"):
+        story.append(Paragraph("Assumed scope classification", h2))
+        story.append(Paragraph(
+            "Unrecognised categories defaulted to Scope 3 (activity count): "
+            + ", ".join(f"<b>{k}</b> — {v}" for k, v in
+                        sorted(_sa["assumed_scope3_by_category"].items())), body))
+        story.append(Paragraph(f"<i>{_sa.get('note', '')}</i>", body))
+
     # --- How each figure was arrived at. The point of the section is reperformance:
     # an assurer should be able to rebuild every number from what is printed here.
     dvs = payload.get("derivations") or {}
