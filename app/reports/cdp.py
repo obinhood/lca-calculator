@@ -63,6 +63,11 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
                               "against the current release before submission.",
         "submission_ready": not blockers,
         "blockers": blockers,
+        # C6.1/C6.3/C6.5 ARE the scope split. Where a category was unrecognised, the
+        # scope behind those answers is a machine guess — the caveat has to travel with
+        # the figure into the submission, not stop at /reports/summary. None when every
+        # activity's scope was declared or matched a rule.
+        "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "answers": {
             "C5.2_base_year_emissions": None,   # set when a base year is designated
