@@ -23,7 +23,9 @@ import itertools
 
 import pytest
 
-from app.models import EmissionFactor, ActivityRecord, EmissionLineItem, Organisation
+from app.models import (
+    EmissionFactor, ActivityRecord, EmissionLineItem, FinancedPosition, Organisation,
+)
 from app.services.calc import compute_co2e
 
 
@@ -233,46 +235,243 @@ def test_recomputing_the_same_data_gives_the_same_number(db):
 # ---------------------------------------------------------------------------------------
 # D. Cross-renderer agreement — one run, one truth
 
-def test_all_renderers_report_the_same_scope_totals(db):
-    """SECR / ESRS / ISSB / GRI / CDP each restate the same inventory. If any two disagree,
-    at least one published disclosure is wrong."""
+def _all_renderers(db, org_id, run_id):
+    """Every renderer that restates one run, keyed for cross-renderer comparison."""
     from app.reports.secr import secr_report
+    from app.reports.sb253 import sb253_report
     from app.reports.esrs_e1 import esrs_e1_report
     from app.reports.issb_s2 import issb_s2_report
     from app.reports.gri import gri_report
     from app.reports.cdp import cdp_export
+    from app.reports.ecovadis import ecovadis_readiness
 
+    return {
+        "secr": secr_report(db, org_id, run_id=run_id, intensity_denominator=1.0,
+                            intensity_denominator_unit="unit"),
+        "sb253": sb253_report(db, org_id, run_id=run_id, assurance_level="limited"),
+        "esrs": esrs_e1_report(db, org_id, run_id=run_id, net_revenue_millions=1.0),
+        "issb": issb_s2_report(db, org_id, run_id=run_id),
+        "gri": gri_report(db, org_id, run_id=run_id, intensity_denominator=1.0,
+                          intensity_denominator_unit="unit"),
+        "cdp": cdp_export(db, org_id, run_id=run_id, intensity_denominator=1.0,
+                          intensity_denominator_unit="unit"),
+        "ecovadis": ecovadis_readiness(db, org_id, run_id=run_id,
+                                       intensity_denominator=1.0),
+    }
+
+
+def _financed_position(db, org_id, investee_tco2e):
+    """A PCAF position attributed 1:1, so the frozen financed figure is exactly its
+    investee emissions. Goes through the real freeze path (RunFinancedLine rows), which
+    is what the Cat 15 gate reads — setting run.financed_co2e by hand would not."""
+    db.add(FinancedPosition(
+        organisation_id=org_id, investee_name="Acme", asset_class="listed_equity",
+        currency="GBP", outstanding_amount=100.0, attribution_denominator=100.0,
+        investee_scope1_tco2e=investee_tco2e, investee_scope2_tco2e=0.0,
+        data_quality_score=2, as_of_date="2025-01-01"))
+    db.commit()
+
+
+def _agree(name, named_values):
+    """Assert every renderer reports the same value, naming the culprits when they don't."""
+    vals = list(named_values.values())
+    assert all(v == pytest.approx(vals[0], rel=1e-9) for v in vals), \
+        f"{name} disagrees across renderers: {named_values}"
+
+
+def test_all_renderers_report_the_same_scope_totals(db):
+    """SECR / SB 253 / ESRS / ISSB / GRI / CDP / EcoVadis each restate the same inventory.
+    If any two disagree, at least one published disclosure is wrong.
+
+    Covers, beyond the scope figures: the financed-emissions treatment behind
+    `total_location_based` and `scope3` (the three frameworks whose scope includes GHGP
+    Cat 15 must agree, and the two that exclude it must SAY so), and the kWh behind
+    "energy consumption" (GRI 302-1 and the EcoVadis Results KPI). Each of those was a
+    real divergence: two renderers publishing different numbers under one field name."""
     org = _org(db)
     _build(db, org)
     run = compute_co2e(db, org.id, gwp_set="AR6")
-    rid = run.id
+    r = _all_renderers(db, org.id, run.id)
+    secr_e = r["secr"]["emissions_tco2e"]
+    sb_e = r["sb253"]["emissions_tco2e"]
+    esrs_e = r["esrs"]["e1_6_gross_ghg_emissions_tco2e"]
+    issb_e = r["issb"]["ghg_emissions_tco2e"]
 
-    secr = secr_report(db, org.id, run_id=rid, intensity_denominator=1.0,
-                       intensity_denominator_unit="unit")
-    esrs = esrs_e1_report(db, org.id, run_id=rid, net_revenue_millions=1.0)
-    issb = issb_s2_report(db, org.id, run_id=rid)
-    gri = gri_report(db, org.id, run_id=rid, intensity_denominator=1.0,
-                     intensity_denominator_unit="unit")
-    cdp = cdp_export(db, org.id, run_id=rid, intensity_denominator=1.0,
-                     intensity_denominator_unit="unit")
+    _agree("scope 1", {
+        "secr": secr_e["scope1"],
+        "sb253": sb_e["scope1"],
+        "esrs": esrs_e["scope1"],
+        "issb": issb_e["scope1_gross"],
+        "gri": r["gri"]["gri_305_1_scope1"]["gross_tco2e"],
+        "cdp": r["cdp"]["answers"]["C6.1_scope1_gross_tco2e"],
+        "ecovadis": r["ecovadis"]["kpis"]["scope1_tco2e"],
+    })
+    _agree("scope 2 (location)", {
+        "secr": secr_e["scope2_location_based"],
+        "sb253": sb_e["scope2_location_based"],
+        "esrs": esrs_e["scope2_location_based"],
+        "issb": issb_e["scope2_location_based_gross"],
+        "gri": r["gri"]["gri_305_2_scope2"]["location_based_tco2e"],
+        "cdp": r["cdp"]["answers"]["C6.3_scope2_location_tco2e"],
+        "ecovadis": r["ecovadis"]["kpis"]["scope2_location_tco2e"],
+    })
+    _agree("scope 2 (market)", {
+        "secr": secr_e["scope2_market_based"],
+        "sb253": sb_e["scope2_market_based"],
+        "esrs": esrs_e["scope2_market_based"],
+        "issb": issb_e["scope2_market_based_information"],
+        "gri": r["gri"]["gri_305_2_scope2"]["market_based_tco2e"],
+        "cdp": r["cdp"]["answers"]["C6.3_scope2_market_tco2e"],
+        "ecovadis": r["ecovadis"]["kpis"]["scope2_market_tco2e"],
+    })
+    # Activity-derived Scope 3: every renderer, on whichever field it reports it under.
+    _agree("scope 3 excl. financed", {
+        "secr": secr_e["scope3_voluntary"],
+        "sb253": sb_e["scope3_excl_financed"],
+        "esrs": esrs_e["scope3_excl_financed"],
+        "issb": issb_e["scope3_gross_excl_financed"],
+        "gri": r["gri"]["gri_305_3_scope3"]["gross_tco2e"],
+        "cdp": r["cdp"]["answers"]["C6.5_scope3_excl_financed_tco2e"],
+        "ecovadis": r["ecovadis"]["kpis"]["scope3_tco2e"],
+    })
+    # `total_location_based` means ONE thing across the renderers that publish that name.
+    _agree("total (location-based)", {
+        "sb253": sb_e["total_location_based"],
+        "esrs": esrs_e["total_location_based"],
+        "issb": issb_e["total_location_based"],
+        # SECR excludes financed emissions by design, so it agrees only with the
+        # excl-financed line — and must flag the exclusion (asserted below).
+        "secr": secr_e["total_location_based"],
+    })
+    _agree("total (market-based)", {
+        "sb253": sb_e["total_market_based"],
+        "esrs": esrs_e["total_market_based"],
+        "issb": issb_e["total_market_based"],
+        "secr": secr_e["total_market_based"],
+    })
+    # "Energy consumption" for one run is ONE kWh figure, on one basis.
+    _agree("energy (kWh, own operations, consolidated)", {
+        "gri": r["gri"]["gri_302_1_energy"]["total_mwh"] * 1000.0,
+        "esrs": r["esrs"]["e1_5_energy_consumption"]["total_mwh"] * 1000.0,
+        "ecovadis": r["ecovadis"]["kpis"]["energy_kwh"],
+    })
+    _agree("energy basis", {
+        "gri": r["gri"]["gri_302_1_energy"]["basis"],
+        "ecovadis": r["ecovadis"]["kpis"]["energy_basis"],
+    })
 
-    scope1 = [
-        secr["emissions_tco2e"]["scope1"],
-        esrs["e1_6_gross_ghg_emissions_tco2e"]["scope1"],
-        issb["ghg_emissions_tco2e"]["scope1_gross"],
-        gri["gri_305_1_scope1"]["gross_tco2e"],
-        cdp["answers"]["C6.1_scope1_gross_tco2e"],
-    ]
-    scope2 = [
-        secr["emissions_tco2e"]["scope2_location_based"],
-        esrs["e1_6_gross_ghg_emissions_tco2e"]["scope2_location_based"],
-        issb["ghg_emissions_tco2e"]["scope2_location_based_gross"],
-        gri["gri_305_2_scope2"]["location_based_tco2e"],
-        cdp["answers"]["C6.3_scope2_location_tco2e"],
-    ]
-    for name, vals in (("scope 1", scope1), ("scope 2", scope2)):
-        assert all(v == pytest.approx(vals[0], rel=1e-9) for v in vals), \
-            f"{name} disagrees across renderers: {vals}"
+
+def test_financed_emissions_are_in_or_flagged_out_of_every_total(db):
+    """Cat 15 financed emissions must be either INSIDE a renderer's Scope 3 and totals
+    (ESRS ¶51-52, IFRS S2 ¶B58-B63, SB 253 via § 38532's GHG Protocol reference) or
+    flagged as excluded (SECR, GRI 305-3). SB 253 used to do neither: it omitted them
+    from `scope3` and `total_location_based` with no flag, while ISSB S2 put them INTO
+    the identically-named fields for the same run."""
+    org = _org(db)
+    _build(db, org)
+    financed_t = 12.345
+    _financed_position(db, org.id, financed_t)
+    run = compute_co2e(db, org.id, gwp_set="AR6")
+    assert run.financed_co2e == pytest.approx(financed_t * 1000.0)
+
+    r = _all_renderers(db, org.id, run.id)
+    sb_e = r["sb253"]["emissions_tco2e"]
+    esrs_e = r["esrs"]["e1_6_gross_ghg_emissions_tco2e"]
+    issb_e = r["issb"]["ghg_emissions_tco2e"]
+
+    # The three frameworks that include Cat 15 agree, field for field.
+    _agree("scope 3 incl. financed", {"sb253": sb_e["scope3"], "esrs": esrs_e["scope3"],
+                                      "issb": issb_e["scope3_gross"]})
+    _agree("total (location) incl. financed",
+           {"sb253": sb_e["total_location_based"], "esrs": esrs_e["total_location_based"],
+            "issb": issb_e["total_location_based"]})
+    _agree("total (market) incl. financed",
+           {"sb253": sb_e["total_market_based"], "esrs": esrs_e["total_market_based"],
+            "issb": issb_e["total_market_based"]})
+    # ...and each is the activity-derived figure PLUS the financed one, not a coincidence.
+    assert sb_e["scope3"] == pytest.approx(sb_e["scope3_excl_financed"] + financed_t)
+    assert sb_e["total_location_based"] == pytest.approx(
+        sb_e["total_location_based_excl_financed"] + financed_t)
+    assert sb_e["scope3_cat15_financed"]["included_in_scope3_and_totals"] is True
+
+    # The renderers that exclude Cat 15 must SAY so — an unflagged omission is the defect.
+    assert r["secr"]["emissions_tco2e"]["financed_emissions_excluded"] is True
+    assert r["gri"]["gri_305_3_scope3"]["financed_emissions_excluded"] is True
+    assert r["gri"]["gri_305_3_scope3"]["financed_emissions_tco2e"] == \
+        pytest.approx(financed_t)
+
+    # IFRS S2's honest-scope statement must not contradict the numbers beside it.
+    from app.reports.issb_s2 import NOT_COVERED
+    assert not any("financed emissions" in n and "facilitated" not in n
+                   for n in NOT_COVERED), NOT_COVERED
+
+
+def test_no_renderer_publishes_a_double_counted_cat15_total(db):
+    """When Cat 15 is declared through BOTH activity lines and a PCAF portfolio, summing
+    them counts the same investee twice. Every renderer that adds financed emissions must
+    refuse the sum (None) — not just the ones that happened to have the guard."""
+    from tests.scope3_util import ready_run
+    org = _org(db)
+    _build(db, org)
+    for a in db.query(ActivityRecord).filter(ActivityRecord.category == "waste").all():
+        a.ghgp_category = 5                            # so only Cat 15 is contested
+    # A Scope 3 activity carrying GHGP category 15 — the activity-derived Cat 15 line...
+    inv = _activity(db, org.id, _factor(db, "investments", "kg", 1.5), 100.0)
+    inv.scope, inv.ghgp_category = "3", 15
+    db.commit()
+    _financed_position(db, org.id, 9.0)                # ...and a PCAF portfolio too
+    run, _period = ready_run(db, org.id)
+    assert run.financed_co2e == pytest.approx(9000.0)
+
+    r = _all_renderers(db, org.id, run.id)
+    assert r["cdp"]["answers"]["C6.5_cat15_double_count_blocked"] is True
+    assert r["cdp"]["answers"]["C6.5_scope3_tco2e"] is None
+    for key, block, fields in (
+            ("sb253", r["sb253"]["emissions_tco2e"],
+             ("scope3", "total_location_based", "total_market_based")),
+            ("esrs", r["esrs"]["e1_6_gross_ghg_emissions_tco2e"],
+             ("scope3", "total_location_based", "total_market_based")),
+            ("issb", r["issb"]["ghg_emissions_tco2e"],
+             ("scope3_gross", "total_location_based", "total_market_based"))):
+        for f in fields:
+            assert block[f] is None, f"{key}.{f} published a double-counted sum: {block[f]}"
+    # A refusal always travels with a blocker — never a silent hole in the payload.
+    for key, ready in (("sb253", "filing_ready"), ("esrs", "disclosure_ready"),
+                       ("issb", "disclosure_ready"), ("cdp", "submission_ready")):
+        assert r[key][ready] is False
+        assert any("Cat 15" in b for b in r[key]["blockers"]), r[key]["blockers"]
+    # The excl-financed figures stay reportable: the inventory is not in doubt, the sum is.
+    assert r["esrs"]["e1_6_gross_ghg_emissions_tco2e"][
+        "total_location_based_excl_financed"] == round(run.total_co2e / 1000.0, 6)
+
+
+def test_energy_notes_travel_with_the_energy_figure(db):
+    """The incompleteness caveat and the diesel calorific-value assumption live in
+    `_energy_kwh`'s notes. GRI 302-1/302-3 and the EcoVadis KPI published the numerator
+    and dropped them, so a partial figure read as a complete one."""
+    org = _org(db)
+    _build(db, org)
+    # An energy-bearing carrier OUTSIDE the three reported ones: its emissions are in
+    # Scope 1, its energy is not in the kWh total.
+    coal = _activity(db, org.id, _factor(db, "coal", "kg", 2.4), 500.0)
+    coal.scope = "1"
+    db.commit()
+    run = compute_co2e(db, org.id, gwp_set="AR6")
+    r = _all_renderers(db, org.id, run.id)
+
+    for name, block in (("gri 302-1", r["gri"]["gri_302_1_energy"]),
+                        ("gri 302-3", r["gri"]["gri_302_3_energy_intensity"])):
+        assert block["complete"] is False, name
+        assert "coal" in block["carriers_omitted"], name
+        assert any("NOT in this kWh total" in n for n in block["notes"]), name
+        assert any("kWh/L" in n for n in block["notes"]), f"{name} dropped the diesel CV note"
+        assert block["basis"] == "consolidated_entity_share"
+
+    k = r["ecovadis"]["kpis"]
+    assert k["energy_complete"] is False
+    assert "coal" in k["energy_carriers_omitted"]
+    assert any("kWh/L" in n for n in k["energy_notes"])
+    assert any("INCOMPLETE" in g for g in r["ecovadis"]["all_gaps"])
 
 
 def test_renderer_totals_match_the_run_and_the_oracle(db):

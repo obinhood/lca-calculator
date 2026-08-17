@@ -80,7 +80,11 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
     s2 = s.get("scope2") or {}
     scope2_loc = s2.get("location_based", 0.0)
     scope2_mkt = s2.get("market_based", 0.0)
-    energy = _energy_kwh(db, run)
+    # Own-operations energy on the CONSOLIDATED basis — the same call GRI 302-1 and ESRS
+    # E1-5 make. The defaults (all scopes, gross physical energy) put a different kWh
+    # figure beside the same run's consolidated emissions than the GRI 305/302 report an
+    # assessor cross-checks this pack against, and implied a wrong intensity against them.
+    energy = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
 
     # --- RESULTS: the reported KPIs ------------------------------------------
     results_evidence, results_gaps = [], []
@@ -89,10 +93,18 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
                             f"{scope2_mkt / 1000:.3f} tCO2e (market), "
                             f"Scope 3 {scope3 / 1000:.3f} tCO2e")
     if energy["total_kwh"] > 0:
-        results_evidence.append(f"Energy consumption reported: {energy['total_kwh']:.0f} kWh")
+        results_evidence.append(
+            f"Energy consumption reported: {energy['total_kwh']:.0f} kWh "
+            f"(own operations, Scope 1/2; {energy['basis']})")
     else:
         results_gaps.append("no energy-carrier consumption reported (kWh) — EcoVadis "
                             "Results expect an energy KPI alongside emissions")
+    # An assessor must not read a partial kWh figure as the whole energy footprint.
+    if energy.get("carriers_omitted"):
+        results_gaps.append(
+            f"energy KPI is INCOMPLETE: {', '.join(sorted(energy['carriers_omitted']))} "
+            f"carry energy that the kWh total excludes, while their emissions are in the "
+            f"Scope 1/2 figures reported beside it")
     if scope3 <= 0:
         results_gaps.append("no Scope 3 emissions reported — value-chain emissions are "
                             "expected for a strong Environment score")
@@ -229,6 +241,15 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
             "scope3_tco2e": round(scope3 / 1000.0, 6),
             "total_tco2e_location": round((run.total_co2e or 0.0) / 1000.0, 6),
             "energy_kwh": round(energy["total_kwh"], 3),
+            # The caveats travel WITH the number: which carriers it covers, which
+            # energy-bearing ones it omits, its basis, and the diesel calorific-value
+            # assumption all live in these notes.
+            "energy_boundary": "own operations (Scope 1/2 line items)",
+            "energy_basis": energy["basis"],
+            "energy_carriers_reported": energy["carriers_reported"],
+            "energy_carriers_omitted": energy.get("carriers_omitted"),
+            "energy_complete": not energy.get("carriers_omitted"),
+            "energy_notes": energy["notes"],
             "intensity_tco2e_per_denominator": intensity,
             "denominator_unit": denominator_unit,
             "coverage_pct": cov,

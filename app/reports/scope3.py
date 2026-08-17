@@ -237,6 +237,59 @@ def category_tco2e(scope3_ghgp: dict) -> dict:
     return out
 
 
+def disclosed_totals_incl_financed(s: dict, run) -> dict:
+    """Scope 3 and the inventory totals AS DISCLOSED by the frameworks whose reporting
+    scope INCLUDES Cat 15 financed emissions, in tCO2e rounded to the published 6dp.
+
+    Three renderers publish these under identical field names — ESRS E1 (¶51-52), IFRS S2
+    (¶29(a)(vi), ¶B58-B63) and California SB 253 (Health & Safety Code § 38532 requires
+    Scope 1/2/3 per the GHG Protocol, so financed emissions are Category 15 and belong in
+    Scope 3) — so they compute them ONCE, here. Computing them per-renderer is exactly how
+    `total_location_based` came to mean two different things in two payloads for one run.
+
+    ``run.total_co2e`` itself is never changed: it is activity-derived, and financed
+    emissions are added for DISCLOSURE only because positions are a live ledger.
+
+    When Cat 15 is declared through BOTH activity-derived lines and a PCAF portfolio, the
+    two count the same investee twice, so every combined figure is REFUSED (None) rather
+    than double-counted — the same refusal as ``totals.scope3_gross_kg`` above,
+    ``summary.total_co2e_incl_financed_kg`` and CDP C6.5. ``scope3_completeness`` blocks
+    any such run (B13), so a None here always travels with a blocker, never as a silent
+    hole. Callers must therefore gate on that blocker, not on these values.
+    """
+    blocked = bool(s.get("cat15_double_count_blocked"))
+    scope3_kg = {row["scope"]: row["co2e"] for row in s["by_scope"]}.get("3", 0.0)
+    financed_t = (run.financed_co2e or 0.0) / 1000.0
+
+    def _disclosed(base_kg) -> Optional[float]:
+        return None if blocked else round((base_kg or 0.0) / 1000.0 + financed_t, 6)
+
+    return {
+        "financed_evaluated": run.financed_co2e is not None,
+        "financed_tco2e": (round(financed_t, 6) if run.financed_co2e is not None else None),
+        "financed_as_of": run.financed_as_of,
+        "cat15_double_count_blocked": blocked,
+        "scope3_excl_financed": round(scope3_kg / 1000.0, 6),
+        "scope3": _disclosed(scope3_kg),
+        "total_location_based_excl_financed": round((run.total_co2e or 0.0) / 1000.0, 6),
+        "total_location_based": _disclosed(run.total_co2e),
+        "total_market_based_excl_financed": round((run.total_co2e_market or 0.0) / 1000.0, 6),
+        "total_market_based": _disclosed(run.total_co2e_market),
+        "note": (
+            "Category 15 is declared through BOTH activity-derived lines and a PCAF "
+            "portfolio; summing them would count the same investee emissions twice (GHG "
+            "Protocol Scope 3 Standard Ch.9), so no Scope 3 or total figure is reported. "
+            "See the Cat 15 blocker." if blocked else
+            "Scope 3 and the totals INCLUDE Scope 3 Cat 15 financed emissions (PCAF Part A), "
+            "frozen to this run; the *_excl_financed figures are the activity-derived "
+            "inventory, which run.total_co2e always is."
+            if run.financed_co2e is not None else
+            "Financed emissions (Scope 3 Cat 15) were not evaluated for this run, so the "
+            "disclosed figures equal the activity-derived inventory. If the organisation "
+            "holds financed positions, the Cat 15 gate blocks rather than reporting zero."),
+    }
+
+
 def scope3_inventory_report(db: Session, organisation_id: int,
                             run_id: Optional[int] = None) -> dict:
     """The disclosure-facing wrapper: the 15-row statement + its gate."""

@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from ..models import CalculationRun
 from .summary import summary, run_factor_sources
-from .scope3 import category_tco2e
+from .scope3 import category_tco2e, disclosed_totals_incl_financed
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
 from ..services.removals import removals_completeness
@@ -70,7 +70,13 @@ NOT_COVERED = [
     "internal carbon price disclosure",
     "climate targets (pending the target-setting module)",
     "remuneration linkage; capex/financing alignment",
-    "financed emissions (financial-sector Scope 3 category 15)",
+    # Financed emissions (Cat 15) ARE produced — PCAF Part A, in scope3_gross and the
+    # totals below, with the ¶B58-B63 exposure detail. Listing them here as unproduced
+    # contradicted the numbers in the same payload. What is genuinely absent is the rest
+    # of PCAF: facilitated (capital-markets) and insurance-associated emissions, which
+    # ¶B61-B63 asks financial institutions to disclose separately from financed.
+    "facilitated (capital-markets) and insurance-associated emissions — only PCAF "
+    "Part A financed emissions are produced",
 ]
 
 
@@ -113,8 +119,11 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
     blockers.extend(removals_completeness(db, run).get("blockers", []))
 
-    # Cat 15 financed emissions (frozen) roll into the disclosed Scope 3 / totals.
-    _financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
+    # Cat 15 financed emissions (frozen) roll into the disclosed Scope 3 / totals — via
+    # the shared helper, so S2, ESRS E1 and SB 253 publish the same number under the same
+    # field name, and so the Cat-15 double-count refusal applies here too (it did not:
+    # this payload added the two together twelve lines from CDP's refusal of the same sum).
+    disclosed = disclosed_totals_incl_financed(s, run)
     _cat15 = (((s.get("scope3_ghgp") or {}).get("categories") or {}).get("15") or {})
     _cat15_financed = _cat15.get("financed_emissions")
     if _cat15_financed is not None:
@@ -167,15 +176,26 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
                 "kwh_residual_mix": s["scope2"]["kwh_residual_mix"],
                 "kwh_electricity_accounted": s["scope2"]["kwh_electricity_accounted"],
             },
-            "scope3_gross_excl_financed": round(by_scope.get("3", 0.0) / 1000.0, 6),
-            "scope3_gross": round(by_scope.get("3", 0.0) / 1000.0 + _financed_tco2e, 6),
+            "scope3_gross_excl_financed": disclosed["scope3_excl_financed"],
+            # None when the Cat-15 double-count refusal fired (B13 blocks the run) —
+            # never a silently double-counted sum, and never a zero.
+            "scope3_gross": disclosed["scope3"],
             "scope3_by_ghgp_category_tco2e": scope3_cats,
             "scope3_categories_included": scope3_categories_included,
             # IFRS S2 ¶29(a)(vi) + ¶B58-B63 + Dec-2025 ¶29A: financed emissions are a
             # MANDATORY Cat 15 subtotal for financial institutions.
             "scope3_cat15_financed": _cat15_financed,
-            "total_location_based": round(run.total_co2e / 1000.0 + _financed_tco2e, 6),
-            "total_market_based": round(run.total_co2e_market / 1000.0 + _financed_tco2e, 6),
+            "scope3_cat15_financed_included_in_totals": (
+                disclosed["financed_evaluated"]
+                and not disclosed["cat15_double_count_blocked"]),
+            "cat15_double_count_blocked": disclosed["cat15_double_count_blocked"],
+            "financed_emissions_note": disclosed["note"],
+            "total_location_based": disclosed["total_location_based"],
+            "total_market_based": disclosed["total_market_based"],
+            "total_location_based_excl_financed":
+                disclosed["total_location_based_excl_financed"],
+            "total_market_based_excl_financed":
+                disclosed["total_market_based_excl_financed"],
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
             # GHG Protocol Land Sector & Removals: own within-boundary removals, reported
             # SEPARATELY. total_location_based (gross, ¶29(a)) above is UNCHANGED.

@@ -5,7 +5,10 @@ covered entity (> $1B revenue doing business in California):
   * Scope 1 and Scope 2 GHG emissions (tCO2e), Scope 2 dual-reported per the
     GHG Protocol (CARB filings follow GHG Protocol standards).
   * Scope 3 (phase-in: first required the year after Scope 1/2 reporting
-    begins; included here with its phase-in status labelled).
+    begins; included here with its phase-in status labelled). § 38532 requires
+    Scope 3 measured per the GHG Protocol, so Category 15 financed emissions
+    are part of Scope 3 and of the totals — same treatment as ESRS E1 and
+    IFRS S2, computed by the shared helper so the three cannot diverge.
   * Assurance metadata — SB 253 requires LIMITED assurance for Scope 1/2 from
     the first filings, escalating to REASONABLE assurance in 2030.
 
@@ -18,6 +21,9 @@ from sqlalchemy.orm import Session
 
 from ..models import CalculationRun
 from .summary import summary, run_factor_sources
+from .scope3 import disclosed_totals_incl_financed
+from ..services.ghgp import scope3_completeness
+from ..services.boundary import boundary_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
 
 _ASSURANCE_LEVELS = ("none", "limited", "reasonable")
@@ -38,11 +44,19 @@ def sb253_report(db: Session, organisation_id: int, run_id: Optional[int] = None
     scope1_kg = by_scope.get("1", 0.0)
     scope2_loc_kg = s["scope2"]["location_based"]
     scope2_mkt_kg = s["scope2"]["market_based"]
-    scope3_kg = by_scope.get("3", 0.0)
+    disclosed = disclosed_totals_incl_financed(s, run)
 
     blockers = []
     cov = s["coverage"]
     blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
+    # § 38532 requires Scope 3 per the GHG Protocol, which means all 15 categories
+    # screened and each quantified or excluded with a justification — and the GHGP Ch.3
+    # organisational boundary that decides whose emissions these are. Both gate every
+    # other GHGP-based renderer (SECR, ESRS E1, IFRS S2, GRI, CDP); without them an
+    # unresolved boundary or an undeclared Scope 3 category blocked a SECR filing but
+    # waved a California one through.
+    blockers.extend(scope3_completeness(db, run).get("blockers", []))
+    blockers.extend(boundary_completeness(db, run).get("blockers", []))
     if s.get("partial"):
         blockers.append(f"run is PARTIAL — excluded activities: {s['partial_reasons']}")
     if cov["stale"]:
@@ -85,13 +99,30 @@ def sb253_report(db: Session, organisation_id: int, run_id: Optional[int] = None
             "scope1": round(scope1_kg / 1000.0, 6),
             "scope2_location_based": round(scope2_loc_kg / 1000.0, 6),
             "scope2_market_based": round(scope2_mkt_kg / 1000.0, 6),
-            "scope3": round(scope3_kg / 1000.0, 6),
+            # Scope 3 per § 38532 = the GHG Protocol's Scope 3, so Cat 15 financed
+            # emissions are IN it and in the totals; the activity-derived figure is
+            # published alongside so the two are never confused. None means the Cat 15
+            # double-count refusal fired (see the blocker), never "zero".
+            "scope3": disclosed["scope3"],
+            "scope3_excl_financed": disclosed["scope3_excl_financed"],
+            "scope3_cat15_financed": {
+                "included_in_scope3_and_totals": (disclosed["financed_evaluated"]
+                                                  and not disclosed["cat15_double_count_blocked"]),
+                "tco2e": disclosed["financed_tco2e"],
+                "as_of": disclosed["financed_as_of"],
+                "double_count_blocked": disclosed["cat15_double_count_blocked"],
+                "note": disclosed["note"],
+            },
             "scope3_phase_in_note": "Scope 3 reporting begins the year after the "
                                     "first Scope 1/2 filing; no assurance required "
                                     "for Scope 3 before the 2030 review.",
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
-            "total_location_based": round(run.total_co2e / 1000.0, 6),
-            "total_market_based": round(run.total_co2e_market / 1000.0, 6),
+            "total_location_based": disclosed["total_location_based"],
+            "total_market_based": disclosed["total_market_based"],
+            "total_location_based_excl_financed":
+                disclosed["total_location_based_excl_financed"],
+            "total_market_based_excl_financed":
+                disclosed["total_market_based_excl_financed"],
         },
         "assurance": {
             "level": assurance_level,
