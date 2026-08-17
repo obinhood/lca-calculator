@@ -1,5 +1,7 @@
 import json
 from typing import Optional
+
+from . import derivation as D
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from ..models import (
@@ -37,6 +39,123 @@ def _residual_mix_block(db: Session, run) -> dict:
             g.get("understatement_remaining_consolidated_kg"),
         "blockers": g.get("blockers", []), "warnings": g.get("warnings", []),
     }
+
+
+def _cat15_double_declared(db, run) -> bool:
+    """True when Cat 15 is declared through BOTH activity lines and a PCAF portfolio.
+
+    The same investee emissions then enter twice — once via the equity-stake activity and
+    once via the attribution — so any total combining them is double-counted.
+
+    Matched to `scope3.py`'s gate (`financed_kg > 0 and cats[15]["co2e_kg"] > 0`): only
+    Scope 3 lines, only positive amounts, and only runs carrying the GHGP category
+    dimension. An earlier version tested none of those, so a ZERO-quantity Cat-15 line
+    nulled a CDP filing field. Selects the `details` column alone rather than whole ORM
+    entities, and short-circuits — it used to load every line item three times per call.
+    """
+    from ..models import EmissionLineItem
+    if not run.financed_co2e or not run.ghgp_standard_version:
+        return False
+    rows = db.query(EmissionLineItem.details).filter(
+        EmissionLineItem.run_id == run.id,
+        EmissionLineItem.method == "location",
+        EmissionLineItem.scope == "3",
+        EmissionLineItem.co2e > 0).all()
+    for (details,) in rows:
+        try:
+            if (json.loads(details or "{}")).get("ghgp_category") == 15:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _derivations(run, by_scope, scope2_location, scope2_market, method_split,
+                 primary_kg, total_methods, kwh_contractual, kwh_residual_mix,
+                 kwh_grid_fallback, cat15_double=False) -> dict:
+    """Worked calculations for the headline figures.
+
+    The gross total is the load-bearing one: `run.total_co2e` was FROZEN at compute time,
+    while `by_scope` re-aggregates the run's line items now. Deriving the frozen total
+    from the live re-aggregation therefore does double duty — it shows a reader the
+    arithmetic AND fails loudly if the two ever disagree, which would mean the disclosed
+    headline no longer matches the lines behind it.
+    """
+    rows = [{"scope": f"Scope {s or '?'}", "co2e": v or 0.0} for s, v in by_scope]
+    out = [
+        D.total_of("Gross emissions (location-based)", rows,
+                   label_key="scope", value_key="co2e", unit="kgCO2e",
+                   stated_value=run.total_co2e, independent=True,
+                   basis=f"location-based, {run.gwp_set} GWP-100",
+                   note="Cross-checks the total frozen at compute time against the sum "
+                        "of this run's line items — a mismatch means the disclosed "
+                        "headline has diverged from the lines behind it."),
+    ]
+
+    # Scope 2 dual reporting. Deliberately NOT a sum: the Scope 2 Guidance requires both
+    # bases side by side, and adding them would double-count the same electricity.
+    out.append(D.alternatives(
+        "Scope 2 — dual reported",
+        [("Location-based", scope2_location), ("Market-based", scope2_market)],
+        reported=scope2_location, unit="kgCO2e",
+        note="The GHG Protocol Scope 2 Guidance requires BOTH bases to be disclosed. "
+             "They are alternative measurements of the same electricity and are never "
+             "added together; the gross total above uses the location-based figure."))
+
+    if run.total_removals_co2e is not None:
+        net_removals = run.total_removals_co2e - (run.removals_reversed_co2e or 0.0)
+        out.append(D.difference(
+            "Net removals", [("Removals", run.total_removals_co2e),
+                             ("Reversals", run.removals_reversed_co2e or 0.0)],
+            unit="kgCO2e", stated_value=net_removals))
+        out.append(D.difference(
+            "Emissions net of removals",
+            [("Gross emissions", run.total_co2e or 0.0), ("Net removals", net_removals)],
+            unit="kgCO2e",
+            stated_value=(run.total_co2e or 0.0) - net_removals,
+            note="Shown for information only. GHG Protocol Land Sector & Removals keeps "
+                 "GROSS emissions as the headline — removals are never netted into it."))
+
+    if run.financed_co2e is not None:
+        if cat15_double:
+            out.append(D.blocked(
+                "Disclosed total including financed emissions",
+                "Category 15 is declared through BOTH activity-derived lines and a PCAF "
+                "portfolio. Adding them counts the same investee emissions twice (GHG "
+                "Protocol Scope 3 Standard Ch.9), so no combined total is reported.",
+                reported=None, unit="kgCO2e"))
+        else:
+            out.append(D.total_of(
+                "Disclosed total including financed emissions",
+                [{"k": "Gross emissions (location-based)", "v": run.total_co2e or 0.0},
+                 {"k": "Scope 3 Cat 15 financed (PCAF)", "v": run.financed_co2e}],
+                label_key="k", value_key="v", unit="kgCO2e",
+                stated_value=(run.total_co2e or 0.0) + run.financed_co2e,
+                note="Financed emissions are added for DISCLOSURE only; the inventory "
+                     "total itself is unchanged, because positions are a live ledger."))
+
+    if total_methods:
+        out.append(D.ratio(
+            "Primary-data share", "Supplier-specific + hybrid (kgCO2e)", primary_kg,
+            "All methods (kgCO2e)", total_methods, unit="fraction",
+            stated_value=primary_kg / total_methods,
+            note="Reported as a percentage in method_split; shown here as the underlying "
+                 "quotient. Emissions-weighted, not record-weighted."))
+
+    accounted = round(kwh_contractual + kwh_residual_mix + kwh_grid_fallback, 6)
+    if accounted:
+        out.append(D.total_of(
+            "Electricity accounted for", [
+                {"k": "Contractual instruments", "v": kwh_contractual},
+                {"k": "Residual mix", "v": kwh_residual_mix},
+                {"k": "Grid average fallback", "v": kwh_grid_fallback}],
+            label_key="k", value_key="v", unit="kWh", stated_value=accounted,
+            display_dp=6,
+            note="These three must account for the run's whole electricity load; a "
+                 "shortfall against consumption means some load is priced at neither a "
+                 "contractual rate nor the residual mix."))
+
+    return D.summarise(out)
 
 
 def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional[int] = None):
@@ -113,6 +232,10 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         if (json.loads(details or "{}")).get("scope_source") == "assumed_scope3":
             scope_assumed[cat or "?"] = scope_assumed.get(cat or "?", 0) + 1
 
+    # Computed ONCE: three call sites used to load every line item separately, which was
+    # ~a third of summary()'s runtime on a large run, paid by every renderer.
+    _cat15_double = _cat15_double_declared(db, run)
+
     return {
         "run": {
             "id": run.id,
@@ -133,8 +256,15 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         # DISCLOSED total incl. Scope 3 Cat 15 financed emissions (PCAF), when
         # evaluated. total_co2e itself is never changed (positions are a live ledger).
         "financed_co2e": run.financed_co2e,
-        "total_co2e_incl_financed_kg": ((run.total_co2e or 0.0) + run.financed_co2e
-                                        if run.financed_co2e is not None else None),
+        # None when Category 15 is declared through BOTH activity lines and a PCAF
+        # portfolio: the two count the same investee emissions twice, so the sum is not a
+        # meaningful number. scope3.py has always refused it (blocker B13) — this payload
+        # was adding them anyway, twelve lines from the field that reports the refusal.
+        "total_co2e_incl_financed_kg": (
+            None if _cat15_double
+            else ((run.total_co2e or 0.0) + run.financed_co2e
+                  if run.financed_co2e is not None else None)),
+        "cat15_double_count_blocked": _cat15_double,
         # ISO 14067: biogenic CO2 reported separately, never netted into the above.
         "biogenic_co2e_separate": run.total_biogenic_co2e or 0.0,
         # GHG Protocol Land Sector & Removals: the org's own removals, reported
@@ -196,6 +326,12 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         "coverage": coverage(db, run),
         # Per-activity exclusion reasons captured at compute time (assurer lineage).
         "exclusions": json.loads(run.notes or "[]"),
+        # How each headline figure was arrived at. Built LAST so it checks the payload
+        # the report actually publishes, not a parallel recomputation of it.
+        "derivations": _derivations(
+            run, by_scope, scope2_location, scope2_market, method_split,
+            primary_kg, total_methods, kwh_contractual, kwh_residual_mix,
+            kwh_grid_fallback, cat15_double=_cat15_double),
         "notes": "Quantities are unit-converted to factor units; incompatible units are "
                  "rejected (not guessed). Scope 2 is dual-reported (location + market).",
     }

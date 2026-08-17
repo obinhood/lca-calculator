@@ -108,16 +108,30 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         "run": run_info,
         "gri_305_1_scope1": {
             "gross_tco2e": round(scope1_kg / 1000.0, 6),
-            "biogenic_co2_tco2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
+            # The run accumulates ONE biogenic pool across all scopes, so it cannot be
+            # attributed to Scope 1. Reporting it on the 305-1 line labelled it as
+            # Scope 1 biogenic when it may include Scope 2 or 3 biogenic CO2, and left
+            # 305-2 and 305-3 with no biogenic line at all. It is reported once, at the
+            # top level, on the basis the run actually computed.
+            "biogenic_co2_tco2_separate": None,
+            "biogenic_note": "biogenic CO2 is tracked as a single all-scopes pool by this "
+                             "run and cannot be split across 305-1/2/3 — see "
+                             "biogenic_co2_tco2_all_scopes",
             "gases_included": "per-gas factors: CO2, CH4 (fossil/biogenic), N2O; "
                               "aggregate factors as published",
         },
+        # GRI 305-1/2/3 each ask for biogenic CO2 separately; this run computes one
+        # undifferentiated pool, so it is disclosed once with its basis stated rather
+        # than assigned to a scope it may not belong to.
+        "biogenic_co2_tco2_all_scopes": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
         "gri_305_2_scope2": {
             "location_based_tco2e": round(s["scope2"]["location_based"] / 1000.0, 6),
             "market_based_tco2e": round(s["scope2"]["market_based"] / 1000.0, 6),
+            "biogenic_co2_tco2_separate": None,
         },
         "gri_305_3_scope3": {
             "gross_tco2e": round(scope3_kg / 1000.0, 6),
+            "biogenic_co2_tco2_separate": None,
             "by_ghgp_category_tco2e": category_tco2e(s.get("scope3_ghgp") or {}),
             # GRI 305-3 here reports activity-derived Scope 3; financed emissions
             # (Cat 15) are surfaced but not folded in — flagged so the omission is visible.

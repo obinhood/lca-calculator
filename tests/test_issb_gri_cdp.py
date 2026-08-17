@@ -147,7 +147,12 @@ def test_cdp_export_golden_values(db, seeded):
     assert a["C6.3_scope2_location_tco2e"] == pytest.approx(0.204)
     assert a["C6.3_scope2_market_tco2e"] == pytest.approx(0.204)
     assert a["C6.5_scope3_tco2e"] == pytest.approx(0.120)
-    assert a["C6.10_intensity"]["tco2e_per_unit"] == pytest.approx(0.4712 / 2.0)
+    # CDP C6.10 is gross global combined SCOPE 1 AND 2 per unit revenue — NOT the whole
+    # inventory. This assertion previously read 0.4712/2 (S1+S2+S3), which inflated the
+    # filed ratio by the entire value chain.
+    assert a["C6.10_intensity"]["tco2e_per_unit"] == pytest.approx((0.1472 + 0.204) / 2.0)
+    assert a["C6.10_intensity"]["numerator_tco2e"] == pytest.approx(0.3512)
+    assert "NOT the whole inventory" in a["C6.10_intensity"]["numerator_basis"]
     assert a["C10.1_verification_status"] == "limited_assurance"
     assert r["submission_ready"] is True
     assert "verify mapping" in r["questionnaire_note"]

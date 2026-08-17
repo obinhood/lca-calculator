@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from ..models import EmissionsTarget, CalculationRun
 from ..services.sbti import (
+    financed_comparable, financed_included,
     run_scoped_emissions_kg, linear_pathway, assess_ambition,
 )
 from ..services.boundary import base_year_recalculation
@@ -51,6 +52,9 @@ def sbti_report(db: Session, organisation_id: int, target_id: int,
         elif current.gwp_set != base_run.gwp_set:
             blockers.append(f"current run GWP set {current.gwp_set} != base {base_run.gwp_set}"
                             f" — trajectory across GWP vintages is not comparable")
+        elif (fin := financed_comparable(db, base_run.id, current.id,
+                                         target.scope_coverage)) is not None:
+            blockers.append(fin)
         elif (recalc := base_year_recalculation(db, base_run, current)) is not None:
             # GHG Protocol Ch.5: a change of organisational boundary between the base
             # year and now makes the trajectory meaningless — the base year must be
@@ -84,7 +88,22 @@ def sbti_report(db: Session, organisation_id: int, target_id: int,
         },
         "base": {"run_id": base_run.id, "gwp_set": base_run.gwp_set,
                  "consolidation_approach": base_run.consolidation_approach,
-                 "base_emissions_tco2e": round(base_t, 6)},
+                 "base_emissions_tco2e": round(base_t, 6),
+                 # Whether financed emissions are INSIDE the figures above. For a bank
+                 # that is most of the inventory, so a reader must not have to infer it.
+                 # None = not included (dimension not evaluated, coverage excludes
+                 # Scope 3, or Cat 15 double-declared) — never "zero".
+                 "financed_emissions_included_tco2e": (
+                     None if (_fin_base := financed_included(
+                         db, base_run.id, target.scope_coverage)) is None
+                     else round(_fin_base / 1000.0, 6)),
+                 "financed_emissions_basis": (
+                     "PCAF financed emissions (Scope 3 Category 15) are INCLUDED in the "
+                     "base year and in every actual, because this target covers Scope 3"
+                     if financed_included(db, base_run.id, target.scope_coverage) is not None
+                     else "financed emissions are NOT included — the target's coverage "
+                          "excludes Scope 3, the PCAF dimension was not evaluated on this "
+                          "run, or Category 15 is double-declared")},
         "target_emissions_tco2e": round(target_t, 6),
         "ambition_assessment": ambition,
         "trajectory": trajectory,

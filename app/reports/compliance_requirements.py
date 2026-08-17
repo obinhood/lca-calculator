@@ -115,7 +115,7 @@ REQUIREMENTS: Dict[str, List[Req]] = {
         _p("GRI 302-1", "Energy consumption within the organisation", "gri_302_1_energy"),
         _p("GRI 302-3", "Energy intensity", "gri_302_3_energy_intensity"),
         _p("GRI 305-1-b", "Biogenic CO2 emissions reported separately",
-           "gri_305_1_scope1.biogenic_co2_tco2_separate"),
+           "biogenic_co2_tco2_all_scopes"),
         _p("GRI 305-1-e / 305-2-d / 305-3-e", "Source of the emission factors and GWPs used",
            "methodology"),
         _p("GRI 305-4-b", "Metrics (denominator) chosen to calculate the intensity ratio",

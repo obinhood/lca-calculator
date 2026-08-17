@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import Derivations from "./Derivations";
 import { api, Settings } from "../api";
 import { CATEGORIES, FRAMEWORKS, Framework, NEEDS_LABEL } from "../frameworks";
 import type { Page } from "../App";
@@ -263,6 +264,8 @@ function Runner({ fw, settings, runId, back }:
           </details>
         </div>
       )}
+
+      {report?.derivations && <Derivations block={report.derivations} />}
 
       {checkError && (
         <div className="callout warn">Could not load the required-data checklist: {checkError}</div>

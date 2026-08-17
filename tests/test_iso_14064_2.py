@@ -43,15 +43,32 @@ def _activity(db, org_id, factor_id, qty):
     return a
 
 
+def _period(db, org_id, label, start, end):
+    from app.models import ReportingPeriod
+    p = ReportingPeriod(organisation_id=org_id, label=label, start_date=start,
+                        end_date=end, frozen=False)
+    db.add(p); db.commit(); db.refresh(p)
+    return p
+
+
 def _two_scenarios(db, org, base_kwh=1000.0, proj_kwh=600.0):
     """Build a baseline run then a project run for the same org, over the SAME activity
-    whose quantity is lowered to model the intervention. Both non-partial, both AR6."""
+    whose quantity is lowered to model the intervention. Both non-partial, both AR6.
+
+    Both runs are scoped to EQUAL-LENGTH reporting periods: a baseline-minus-project delta
+    across unequal periods reports the difference in elapsed time as abatement, which the
+    renderer now blocks."""
     f = _factor(db, 0.17)
     a = _activity(db, org.id, f.id, base_kwh)
-    base = compute_co2e(db, org.id, gwp_set="AR6")          # 1000 * 0.17 = 170 kg
-    a.quantity = proj_kwh
+    a.date = "2024-06-15"
     db.commit()
-    proj = compute_co2e(db, org.id, gwp_set="AR6")          # 600 * 0.17 = 102 kg
+    bp = _period(db, org.id, "Baseline FY24", "2024-01-01", "2024-12-31")
+    base = compute_co2e(db, org.id, gwp_set="AR6", reporting_period_id=bp.id)
+    a.quantity = proj_kwh
+    a.date = "2025-06-15"
+    db.commit()
+    pp = _period(db, org.id, "Project FY25", "2025-01-01", "2025-12-31")
+    proj = compute_co2e(db, org.id, gwp_set="AR6", reporting_period_id=pp.id)
     return base, proj
 
 

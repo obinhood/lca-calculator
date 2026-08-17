@@ -225,6 +225,15 @@ def compute_activity_co2e(quantity: Optional[float], unit: str, factor: Emission
             if mass is None or not math.isfinite(mass):
                 raise FactorValueError(
                     f"factor {factor.id} has a missing/non-finite {g} mass ({mass!r})")
+            # The aggregate `value` column has a non-negative CHECK constraint for exactly
+            # this reason; the per-gas path bypassed it, so a negative gas mass turned a
+            # source into a sink that netted silently into the GROSS total. Removals have
+            # their own separately-reported channel (RemovalRecord) and must go through it.
+            if mass < 0:
+                raise FactorValueError(
+                    f"factor {factor.id} has a NEGATIVE {g} mass ({mass!r}) — a negative "
+                    f"factor would net a removal into the gross emissions total. Record "
+                    f"removals as RemovalRecord rows, which are reported separately.")
         return qty_in_factor_unit * co2e_from_gases(gases, gwp_set)
     if factor.value is None or not math.isfinite(factor.value):
         raise FactorValueError(
