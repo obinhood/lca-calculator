@@ -34,10 +34,10 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import CalculationRun, ReportingPeriod
-from ..services.calc import _parse_iso_date
+from ..models import CalculationRun
 from .summary import summary
 from ..services.residual_mix import residual_mix_comparable
+from ..services.comparability import period_comparable, period_payload
 
 # Things a credible 14064-2 assertion requires that a calculation engine does not produce.
 # Listed so their absence is explicit, never implied complete.
@@ -56,18 +56,6 @@ _NOT_PRODUCED = [
     "(ISO 14064-3) — this is the quantitative core a validator/verifier would check, not a "
     "validated or verified statement",
 ]
-
-
-# How far two period lengths may differ before the delta is refused. Stated as a constant
-# and echoed in the payload, because a silent tolerance lets up to this share of the
-# baseline read as abatement.
-_PERIOD_TOLERANCE_PCT = 0.05
-
-
-def _period_days(p) -> Optional[int]:
-    """Inclusive day count of a reporting period, or None if either date is unparseable."""
-    a, b = _parse_iso_date(p.start_date or ""), _parse_iso_date(p.end_date or "")
-    return (b - a).days + 1 if (a and b) else None
 
 
 def iso_14064_2_report(db: Session, organisation_id: int,
@@ -199,32 +187,11 @@ def iso_14064_2_report(db: Session, organisation_id: int,
     # project run reports the missing nine months as abatement, and a change of GWP set or
     # consolidation approach shows up the same way. Each is a blocker, not a note —
     # a non-comparable delta is not a smaller reduction, it is not a reduction at all.
-    _base_p = (db.get(ReportingPeriod, base.reporting_period_id)
-               if base.reporting_period_id else None)
-    _proj_p = (db.get(ReportingPeriod, proj.reporting_period_id)
-               if proj.reporting_period_id else None)
-    if _base_p is None or _proj_p is None:
-        blockers.append(
-            "baseline and project runs must both be scoped to a reporting period — an "
-            "unscoped run has no period length, so the delta cannot be shown to measure "
-            "a project effect rather than a difference in elapsed time")
-    else:
-        _bl, _pl = _period_days(_base_p), _period_days(_proj_p)
-        if _bl is None or _pl is None:
-            # An unparseable date is a CANNOT-DETERMINE, not a pass: skipping the check
-            # let a 12-month baseline minus a 3-month project run through untouched
-            # because one period was written 01/01/2025 instead of 2025-01-01.
-            _bad = [p.label for p, d in ((_base_p, _bl), (_proj_p, _pl)) if d is None]
-            blockers.append(
-                f"reporting period length cannot be determined for {_bad} — the dates are "
-                f"not ISO (YYYY-MM-DD), so the delta cannot be shown to measure a project "
-                f"effect rather than a difference in elapsed time")
-        elif abs(_bl - _pl) > max(1, round(_PERIOD_TOLERANCE_PCT * max(_bl, _pl))):
-            blockers.append(
-                f"baseline period is {_bl} days and project period is {_pl} days — beyond "
-                f"the {_PERIOD_TOLERANCE_PCT:.0%} tolerance, so the delta would report the "
-                f"difference in elapsed time as abatement. Re-scope both runs to "
-                f"comparable periods.")
+    _period_blocker = period_comparable(db, base, proj, label_a="baseline",
+                                        label_b="project", quantity="the delta",
+                                        measures="a project effect")
+    if _period_blocker:
+        blockers.append(_period_blocker)
     if base.gwp_set != proj.gwp_set:
         blockers.append(
             f"baseline uses {base.gwp_set} and the project run uses {proj.gwp_set} — a "
@@ -253,14 +220,11 @@ def iso_14064_2_report(db: Session, organisation_id: int,
 
     return {
         "framework": "ISO 14064-2 (GHG project quantification)",
-        "period_comparability": {
-            "baseline_days": _period_days(_base_p) if _base_p else None,
-            "project_days": _period_days(_proj_p) if _proj_p else None,
-            "tolerance_pct": _PERIOD_TOLERANCE_PCT * 100.0,
-            "note": "Baseline and project periods must be within this tolerance of each "
-                    "other; a longer baseline would otherwise report the extra elapsed "
-                    "time as abatement.",
-        },
+        "period_comparability": period_payload(
+            db, base, proj, key_a="baseline", key_b="project",
+            note="Baseline and project periods must be within this tolerance of each "
+                 "other; a longer baseline would otherwise report the extra elapsed "
+                 "time as abatement."),
         "disclosure_ready": not blockers,
         "blockers": blockers,
         "assertion_status": "unverified_quantification",

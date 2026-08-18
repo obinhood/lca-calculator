@@ -10,6 +10,7 @@ import pytest
 
 from app.models import (
     Organisation, ActivityRecord, EmissionFactor, ReportingEntity, EmissionsTarget,
+    ReportingPeriod,
 )
 from app.services.calc import compute_co2e
 from app.services.boundary import base_year_recalculation
@@ -38,12 +39,19 @@ def _factor(db, value=0.5):
     return f
 
 
-def _act(db, org_id, factor_id, kwh=1000.0, entity_id=None):
-    a = ActivityRecord(organisation_id=org_id, date="2025-06-01", category="gas",
+def _act(db, org_id, factor_id, kwh=1000.0, entity_id=None, date="2025-06-01"):
+    a = ActivityRecord(organisation_id=org_id, date=date, category="gas",
                        subcategory="", description="", quantity=kwh, unit="kWh",
                        geo="GB", factor_id=factor_id, entity_id=entity_id)
     db.add(a); db.commit(); db.refresh(a)
     return a
+
+
+def _period(db, org_id, label, start, end):
+    p = ReportingPeriod(organisation_id=org_id, label=label, start_date=start,
+                        end_date=end, frozen=False)
+    db.add(p); db.commit(); db.refresh(p)
+    return p
 
 
 def _target(db, org_id, base_run_id):
@@ -57,16 +65,22 @@ def _target(db, org_id, base_run_id):
 # --- Comparable: organic growth ----------------------------------------------
 
 def test_organic_growth_does_not_trigger_recalculation(db):
-    """Same entities, more activity — the trajectory IS comparable."""
+    """Same entities, more activity — the trajectory IS comparable.
+
+    Each run is scoped to its own 365-day period (base year 2020, current 2025) so the
+    trajectory's period gates pass and the only thing under test is the boundary.
+    """
     org = _org(db)
-    _act(db, org.id, _factor(db).id, kwh=1000)
-    base = compute_co2e(db, org.id)
-    _act(db, org.id, _factor(db).id, kwh=500)          # organic growth
-    current = compute_co2e(db, org.id)
+    bp = _period(db, org.id, "FY20", "2020-01-01", "2020-12-31")
+    cp = _period(db, org.id, "FY25", "2025-01-01", "2025-12-31")
+    _act(db, org.id, _factor(db).id, kwh=1000, date="2020-06-01")
+    base = compute_co2e(db, org.id, reporting_period_id=bp.id)
+    _act(db, org.id, _factor(db).id, kwh=1500, date="2025-06-01")      # organic growth
+    current = compute_co2e(db, org.id, reporting_period_id=cp.id)
     assert base_year_recalculation(db, base, current) is None
-    t = _target(db, org.id, base.id)
+    t = _target(db, org.id, base.id)                                   # base_year 2020
     r = sbti_report(db, org.id, t.id, current_run_id=current.id, current_year=2025)
-    assert r["ok"] is True and r["trajectory"] is not None
+    assert r["ok"] is True and r["trajectory"] is not None, r["blockers"]
 
 
 # --- Structural changes: not comparable --------------------------------------

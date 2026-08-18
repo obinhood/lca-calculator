@@ -25,6 +25,8 @@ from sqlalchemy.orm import Session
 
 from ..models import CalculationRun, EmissionsTarget, MarketInstrument, AssuranceEngagement
 from ..services.boundary import boundary_completeness
+from ..services.residual_mix import residual_mix_comparable
+from ..services.comparability import period_comparable, period_payload
 from .summary import summary
 from .secr import _energy_kwh
 
@@ -128,8 +130,15 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
         actions_gaps.append("no zero-carbon electricity procurement (REC/PPA/supplier-specific) "
                             "recorded — a primary Environment 'Actions' evidence item")
 
-    # Measured reduction vs a baseline run (the strongest Actions evidence).
+    # Measured reduction vs a baseline run (the strongest Actions evidence) — and the
+    # single figure in this pack most likely to be quoted back as an achievement. It is
+    # the same two-immutable-runs subtraction GRI 305-5 makes, so it carries the same
+    # comparability gates: a "reduction" that spans a GWP vintage, a residual-mix
+    # methodology change, or a shorter reporting period is an artefact of the method, and
+    # submitting it as evidence of action is a misrepresentation, not a weak KPI. Each is
+    # a blocker on the pack, not a gap in a pillar.
     trend = None
+    trend_comparability = None
     if baseline_run_id is not None:
         base = _own_run(db, organisation_id, baseline_run_id)
         if base is None:
@@ -137,6 +146,22 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
         elif (base.total_co2e or 0.0) <= 0:
             actions_gaps.append("baseline run has no emissions to compare against")
         else:
+            if base.gwp_set != run.gwp_set:
+                blockers.append(
+                    f"trend_vs_baseline: the baseline run used {base.gwp_set} GWP but this "
+                    f"run used {run.gwp_set} — a trend across GWP vintages is a change of "
+                    f"metric, not a measured reduction; recompute both on one vintage")
+            if (_rm := residual_mix_comparable(db, base, run)):
+                blockers.append(f"trend_vs_baseline: {_rm}")
+            if (_pc := period_comparable(db, base, run, label_a="baseline",
+                                         label_b="current", quantity="the trend",
+                                         measures="a measured reduction")):
+                blockers.append(f"trend_vs_baseline: {_pc}")
+            trend_comparability = period_payload(
+                db, base, run, key_a="baseline", key_b="current",
+                note="A trend is only evidence of action if the two runs cover the same "
+                     "length of time; a 12-month baseline against a 3-month current run "
+                     "shows a 75% 'reduction' that is entirely elapsed time.")
             delta = (run.total_co2e or 0.0) - base.total_co2e
             pct = 100.0 * delta / base.total_co2e
             trend = {
@@ -146,6 +171,12 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
                 "change_tco2e": round(delta / 1000.0, 6),
                 "change_pct": round(pct, 2),
                 "direction": "reduction" if delta < 0 else ("increase" if delta > 0 else "flat"),
+                "baseline_gwp_set": base.gwp_set,
+                "current_gwp_set": run.gwp_set,
+                "comparability_note": "Valid only where the two runs share a GWP set, a "
+                                      "residual-mix methodology and a comparable period "
+                                      "length — each gated as a blocker; read `blockers` "
+                                      "before quoting this as evidence.",
             }
             if delta < 0:
                 actions_evidence.append(
@@ -235,6 +266,7 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
             "data_quality_score": s["data_quality"]["emissions_weighted_score"],
         },
         "trend_vs_baseline": trend,
+        "trend_period_comparability": trend_comparability,
         "all_gaps": sorted({g for p in pillars.values() for g in p["gaps"]}),
         "not_assessed": [
             "Labour & Human Rights theme (no data model)",
