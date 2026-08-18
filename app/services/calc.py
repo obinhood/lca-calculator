@@ -388,12 +388,26 @@ class _InstrumentPool:
                 "instruments_skipped_gwp_vintage": self.skipped_vintage}
 
 
-def _financed_fingerprint(positions) -> str:
-    parts = sorted(
-        f"{p.id}:{p.outstanding_amount}:{p.attribution_denominator}:"
-        f"{p.investee_scope1_tco2e}:{p.investee_scope2_tco2e}:{p.investee_scope3_tco2e}:"
-        f"{p.as_of_date}" for p in positions)
-    return "fp-v1:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+FINANCED_FINGERPRINT_VERSION = "v2"
+
+
+def _financed_fingerprint(positions, version: str = FINANCED_FINGERPRINT_VERSION) -> str:
+    """Hash of the position attributes that FEED a frozen Cat 15 figure.
+
+    Versioned because the attribute set grew: v2 adds `currency`, which became an input
+    to a DISCLOSED figure once the IFRS S2 exposure coverage started converting it (a
+    position restated from USD to JPY changes the filed % covered). A run frozen under v1
+    is still compared under v1 — bumping the format for every existing filing would read
+    as "the positions changed since it was filed" on runs where nothing changed.
+    """
+    def _row(p):
+        row = (f"{p.id}:{p.outstanding_amount}:{p.attribution_denominator}:"
+               f"{p.investee_scope1_tco2e}:{p.investee_scope2_tco2e}:"
+               f"{p.investee_scope3_tco2e}:{p.as_of_date}")
+        return row if version == "v1" else f"{row}:{p.currency}"
+
+    parts = sorted(_row(p) for p in positions)
+    return f"fp-{version}:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 # GHG Protocol Land Sector and Removals Guidance — the removals dimension version.
@@ -1091,8 +1105,22 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 run.financed_fingerprint = None
             else:
                 by_id = {p.id: p for p in all_positions}
+                # Positions are held in their own currencies; IFRS S2 B58-B63's "% of
+                # gross exposure covered" measures them against ONE declared gross
+                # exposure. The conversion is frozen HERE, at the run's own as_of year,
+                # because the renderer may not join the live fx_rates table (a corrected
+                # rate must not move a filed run's disclosed percentage). Where no rate
+                # is loaded, the refusal reason is frozen instead — never a guessed rate.
+                from .pcaf import freeze_exposure_conversion
+                _decl15 = by_cat.get(15)
+                _exp_ccy = getattr(_decl15, "gross_exposure_currency", None)
+                _exp_date = _parse_iso_date(as_of or "")
+                _exp_year = _exp_date.year if _exp_date else None
                 for ln in pf["lines"]:
                     p = by_id.get(ln["position_id"])
+                    _exp_fx = freeze_exposure_conversion(
+                        db, p.currency if p else None,
+                        p.outstanding_amount if p else None, _exp_ccy, _exp_year)
                     # Freeze the FULL attribution lineage: an assurer must be able to
                     # walk outstanding / denominator x investee emissions = financed,
                     # and the exposure is needed for IFRS S2 B58-B63's % covered.
@@ -1109,7 +1137,8 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                             "investee_scope3_tco2e": p.investee_scope3_tco2e if p else None,
                             "position_as_of_date": p.as_of_date if p else None,
                             "unit_note": "kg (PCAF tCO2e x1000)",
-                            "pcaf_standard": "PCAF Part A Financed Emissions (Dec 2022)"})))
+                            "pcaf_standard": "PCAF Part A Financed Emissions (Dec 2022)",
+                            **_exp_fx})))
                 run.financed_co2e = pf["financed_emissions_tco2e"]["total"] * 1000.0
                 run.financed_as_of = as_of
                 run.financed_include_scope3 = financed_include_scope3

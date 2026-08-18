@@ -429,3 +429,315 @@ def test_the_sbti_payload_discloses_that_financed_emissions_are_included(db):
     r = sbti_report(db, org.id, target_id=t.id)
     assert r["base"]["financed_emissions_included_tco2e"] == pytest.approx(500.0)
     assert "INCLUDED" in r["base"]["financed_emissions_basis"]
+
+
+# --- money summed across currencies -------------------------------------------------
+# Three disclosed ratios divided a sum of amounts in DIFFERENT currencies by a figure in
+# one. The sum is not a quantity, so neither is the ratio: a JPY position counted equal
+# to a USD one produced "133% of gross exposure covered" against a true ~67%.
+
+def _fx(db, base, quote, year, rate):
+    from app.models import FxRate
+    row = FxRate(base_currency=base, quote_currency=quote, year=year, rate=rate)
+    db.add(row); db.commit(); db.refresh(row)
+    return row
+
+
+def _fpos(db, org_id, currency, outstanding, denom=10_000_000.0, s1=5000.0,
+          revenue=None, as_of="2025-01-01"):
+    p = FinancedPosition(organisation_id=org_id, investee_name=f"{currency} investee",
+                         asset_class="listed_equity", currency=currency,
+                         outstanding_amount=outstanding, attribution_denominator=denom,
+                         investee_scope1_tco2e=s1, investee_scope2_tco2e=0.0,
+                         investee_scope3_tco2e=0.0, investee_revenue_millions=revenue,
+                         data_quality_score=2, as_of_date=as_of)
+    db.add(p); db.commit(); db.refresh(p)
+    return p
+
+
+def _cat15_run(db, org, gross_total=1_500_000.0, gross_currency="USD"):
+    """A period-scoped, screened run whose Cat 15 screen declares a gross exposure."""
+    from app.models import Scope3CategoryDeclaration
+    from tests.scope3_util import ready_run
+    _run, p = ready_run(db, org.id)
+    d = db.query(Scope3CategoryDeclaration).filter_by(
+        organisation_id=org.id, reporting_period_id=p.id, category=15).first()
+    d.gross_exposure_total = gross_total
+    d.gross_exposure_currency = gross_currency
+    db.commit()
+    return compute_co2e(db, org.id, reporting_period_id=p.id), p
+
+
+def _financed(db, run):
+    from app.reports.scope3 import scope3_by_ghgp_category
+    return scope3_by_ghgp_category(db, run)["categories"]["15"]["financed_emissions"]
+
+
+def test_mixed_currency_exposure_is_refused_not_summed_into_133_pct_coverage(db):
+    """The audit's own case: 1,000,000 JPY + 1,000,000 USD of covered exposure against a
+    1,500,000 USD declared gross returned exposure_covered 2,000,000 and
+    pct_gross_exposure_covered 133.33 — a share of a gross exposure that cannot exceed
+    100% by construction, and a figure no reader could reconcile. With no JPY->USD rate
+    loaded the ratio is refused, and the per-currency exposure (which needs no rate) is
+    disclosed in its place."""
+    org = _org(db, "MultiCcyBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    fin = _financed(db, run)
+
+    assert fin["exposure_covered_by_currency"] == {"JPY": 1_000_000.0, "USD": 1_000_000.0}
+    assert fin["exposure_covered"] is None                    # was 2,000,000.0
+    assert fin["pct_gross_exposure_covered"] is None           # was 133.33
+    assert "JPY->USD" in fin["pct_gross_exposure_covered_refused_reason"]
+    assert "guessed rate" in fin["pct_gross_exposure_covered_refused_reason"]
+    # The emissions themselves are unaffected: the attribution factor is a same-currency
+    # ratio, so only the disclosed coverage ratio was ever wrong.
+    assert fin["tco2e"] == pytest.approx(1000.0)               # 2 x (0.1 x 5000)
+
+
+def test_a_loaded_rate_converts_the_exposure_instead_of_refusing_it(db):
+    """With the rate on file the ratio is computed, not approximated: 1,000,000 JPY at
+    0.0065 = 6,500 USD, so 1,006,500 of 1,500,000 USD is covered — ~67%, not 133%."""
+    org = _org(db, "RatedBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    rate_row = _fx(db, "JPY", "USD", 2025, 0.0065)
+    run, _p = _cat15_run(db, org)
+    fin = _financed(db, run)
+
+    assert fin["exposure_covered"] == pytest.approx(1_006_500.0)
+    assert fin["exposure_covered_currency"] == "USD"
+    assert fin["pct_gross_exposure_covered"] == pytest.approx(67.1)
+    assert fin["pct_gross_exposure_covered_refused_reason"] is None
+    # WHICH rate row was applied is part of the answer — fx_rates is append-only.
+    conv = fin["exposure_conversions"]
+    assert len(conv) == 1
+    assert (conv[0]["from"], conv[0]["to"], conv[0]["rate"]) == ("JPY", "USD", 0.0065)
+    assert conv[0]["fx_rate_id"] == rate_row.id and conv[0]["fx_year"] == 2025
+
+
+def test_a_later_fx_correction_does_not_move_a_filed_percentage(db):
+    """scope3.py's reproduction contract: the conversion is frozen onto the run, so
+    correcting the rate afterwards (an INSERT, since fx_rates is append-only) cannot
+    restate a filing that has already gone out."""
+    org = _org(db, "FrozenFxBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    _fx(db, "JPY", "USD", 2025, 0.0065)
+    run, _p = _cat15_run(db, org)
+    before = _financed(db, run)["pct_gross_exposure_covered"]
+
+    _fx(db, "JPY", "USD", 2025, 0.0100)          # corrected rate, filed run untouched
+    assert _financed(db, run)["pct_gross_exposure_covered"] == pytest.approx(before)
+
+
+def test_issb_s2_blocks_when_the_coverage_ratio_had_to_be_refused(db):
+    """¶B58-B63 wants financed emissions WITH the gross exposure and the % covered. An
+    absent percentage already blocked when the gross was missing; a gross that the
+    positions cannot be compared against is the same defect, and the S2 payload must not
+    read as disclosure-ready without it."""
+    from app.reports.issb_s2 import issb_s2_report
+    org = _org(db, "S2MixedBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    r = issb_s2_report(db, org.id, run_id=run.id)
+    assert r["disclosure_ready"] is False
+    assert any("% of gross exposure covered cannot be reported" in b for b in r["blockers"])
+
+    # With the rate loaded the same filing is ready again.
+    _fx(db, "JPY", "USD", 2025, 0.0065)
+    run2, _p2 = _cat15_run(db, org)
+    r2 = issb_s2_report(db, org.id, run_id=run2.id)
+    assert not [b for b in r2["blockers"] if "gross exposure" in b]
+    assert r2["disclosure_ready"] is True
+
+
+def test_restating_a_position_currency_flags_the_filed_run_as_changed(db):
+    """The currency is now an input to a DISCLOSED figure, so it belongs in the staleness
+    fingerprint: restating a position from USD to JPY changes the % covered, and a filed
+    run must not keep quoting the old one as still matching the ledger."""
+    from app.services.ghgp import scope3_completeness
+    org = _org(db, "RestatedCcyBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    pos = _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    assert not [b for b in scope3_completeness(db, run)["blockers"] if "changed since" in b]
+
+    pos.currency = "JPY"                          # same amount, different money
+    db.commit()
+    assert [b for b in scope3_completeness(db, run)["blockers"] if "changed since" in b]
+
+
+def test_a_legacy_fingerprint_is_compared_under_its_own_version(db):
+    """Anti-cliff: adding `currency` to the hash must not read as an edit on every run
+    frozen before it — a v1 fingerprint is re-derived as v1."""
+    from app.services.calc import _financed_fingerprint
+    from app.services.ghgp import scope3_completeness
+    org = _org(db, "LegacyFpBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    positions = db.query(FinancedPosition).filter_by(organisation_id=org.id).all()
+    run.financed_fingerprint = _financed_fingerprint(positions, "v1")   # as a v1 run froze it
+    db.commit()
+    assert not [b for b in scope3_completeness(db, run)["blockers"] if "changed since" in b]
+
+
+def test_single_currency_exposure_needs_no_rate_and_is_unchanged(db):
+    """The fix must not withhold a ratio that was always well-defined: one currency, no
+    conversion, no refusal."""
+    org = _org(db, "OneCcyBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    fin = _financed(db, run)
+
+    assert fin["exposure_covered"] == pytest.approx(1_000_000.0)
+    assert fin["exposure_covered_currency"] == "USD"
+    assert fin["pct_gross_exposure_covered"] == pytest.approx(66.67)
+    assert fin["exposure_conversions"] is None
+    assert fin["exposure_covered_refused_reason"] is None
+    assert fin["pct_gross_exposure_covered_refused_reason"] is None
+
+
+def test_pai3_value_weights_across_currencies_are_refused_without_a_rate(db):
+    """PAI 3 weights each investee's intensity by its outstanding amount. Weighting
+    1,000,000 JPY equally with 1,000,000 EUR over-weights the JPY investee ~150x, which
+    is a different indicator from the one SFDR defines."""
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "PaiBank")
+    _fpos(db, org.id, "EUR", 1_000_000.0, s1=1000.0, revenue=50.0)    # intensity 20
+    _fpos(db, org.id, "JPY", 1_000_000.0, s1=5000.0, revenue=100.0)   # intensity 50
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=2.0)
+    pai3 = r["pai_3_ghg_intensity_of_investees"]
+
+    assert pai3["value_weighted_tco2e_per_eur_million_revenue"] is None   # was 35.0
+    assert "JPY->EUR" in pai3["refused_reason"]
+    assert any("PAI 3 refused" in b for b in r["blockers"])
+    assert r["ok"] is False
+
+
+def test_pai3_weights_convert_to_eur_when_a_rate_is_loaded(db):
+    """1,000,000 JPY at 0.006 is 6,000 EUR of weight, not 1,000,000 — so the JPY
+    investee's intensity moves the average by 0.6%, not by half of it."""
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "PaiRatedBank")
+    _fpos(db, org.id, "EUR", 1_000_000.0, s1=1000.0, revenue=50.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0, s1=5000.0, revenue=100.0)
+    _fx(db, "JPY", "EUR", 2025, 0.006)
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=2.0)
+    pai3 = r["pai_3_ghg_intensity_of_investees"]
+
+    # (1,000,000 x 20 + 6,000 x 50) / 1,006,000
+    assert pai3["value_weighted_tco2e_per_eur_million_revenue"] == pytest.approx(
+        (1_000_000 * 20.0 + 6_000 * 50.0) / 1_006_000, abs=1e-5)
+    assert pai3["weighting_currency"] == "EUR"
+    assert pai3["weighting_conversions"][0]["rate"] == 0.006
+    assert pai3["refused_reason"] is None
+
+
+def test_pai3_single_currency_average_is_unchanged(db):
+    """One currency: the weights are a ratio, so the average is invariant to which
+    currency it is and no rate is needed."""
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "PaiOneCcy")
+    _fpos(db, org.id, "GBP", 1_000_000.0, s1=1000.0, revenue=50.0)
+    _fpos(db, org.id, "GBP", 3_000_000.0, s1=5000.0, revenue=100.0)
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=2.0)
+    pai3 = r["pai_3_ghg_intensity_of_investees"]
+    assert pai3["value_weighted_tco2e_per_eur_million_revenue"] == pytest.approx(
+        (1_000_000 * 20.0 + 3_000_000 * 50.0) / 4_000_000)
+    assert pai3["weighting_currency"] == "GBP"
+    assert pai3["weighting_conversions"] is None
+
+
+def test_pai2_denominator_currency_is_checked_not_assumed_to_be_eur(db):
+    """PAI 2 is stated per EUR million invested. A portfolio value supplied in USD was
+    divided in and labelled EUR regardless — a 10% wrong headline indicator."""
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "Pai2Bank")
+    _fpos(db, org.id, "EUR", 1_000_000.0, s1=1000.0, revenue=50.0)
+
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=10.0,
+                        portfolio_value_currency="USD")
+    assert r["pai_2_carbon_footprint"] is None
+    assert any("PAI 2 refused" in b and "USD" in b for b in r["blockers"])
+
+    _fx(db, "USD", "EUR", 2025, 0.9)
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=10.0,
+                        portfolio_value_currency="USD")
+    pai2 = r["pai_2_carbon_footprint"]
+    assert pai2["portfolio_value_currency"] == "USD"
+    assert pai2["portfolio_value_millions_eur"] == pytest.approx(9.0)
+    # 100 tCO2e financed (0.1 x 1000) over 9 EUR million, not over 10.
+    assert pai2["tco2e_per_eur_million_invested"] == pytest.approx(100.0 / 9.0, abs=1e-5)
+    assert pai2["portfolio_value_fx"]["rate"] == 0.9
+
+
+def test_pai2_in_eur_is_unchanged_and_needs_no_rate(db):
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "Pai2Eur")
+    _fpos(db, org.id, "EUR", 1_000_000.0, s1=1000.0, revenue=50.0)
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=10.0)
+    pai2 = r["pai_2_carbon_footprint"]
+    assert pai2["tco2e_per_eur_million_invested"] == pytest.approx(10.0)
+    assert pai2["portfolio_value_millions_eur"] == pytest.approx(10.0)
+    assert pai2["portfolio_value_fx"] is None
+
+
+# --- E1-5: a share whose numerator and denominator are on different boundaries -------
+
+def test_esrs_renewable_share_is_on_the_same_boundary_as_the_energy_total(db):
+    """The instrument pool is consumed in GROSS kWh (a REC covers physical MWh), while
+    E1-5's total_mwh follows the consolidation scope. For a 40%-held JV that put a 1.0 MWh
+    gross numerator over a 0.4 MWh consolidated denominator — a 250% renewable share
+    sitting inside a filed CSRD payload."""
+    from app.models import ReportingEntity, MarketInstrument
+    from app.reports.esrs_e1 import esrs_e1_report
+    org = Organisation(name="JVCo", consolidation_approach="equity_share")
+    db.add(org); db.commit(); db.refresh(org)
+    jv = ReportingEntity(organisation_id=org.id, name="JV",
+                         accounting_category="joint_venture_incorporated",
+                         equity_share_pct=40.0, joint_financial_control=True,
+                         in_consolidated_accounting_group=False)
+    db.add(jv); db.commit(); db.refresh(jv)
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0,
+         entity_id=jv.id)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=1000.0,
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    db.commit()
+    run = compute_co2e(db, org.id)
+    energy = esrs_e1_report(db, org.id, run_id=run.id,
+                            net_revenue_millions=1.0)["e1_5_energy_consumption"]
+
+    assert energy["by_carrier_mwh"]["electricity"] == pytest.approx(0.4)   # 40% of 1 MWh
+    # The physical instrument volume is still disclosed — labelled as gross.
+    assert energy["electricity_renewable_contractual_gross_mwh"] == pytest.approx(1.0)
+    # ...but the figure reported beside the consolidated total is on that basis.
+    assert energy["electricity_renewable_contractual_mwh"] == pytest.approx(0.4)
+    assert energy["electricity_renewable_share_pct"] == pytest.approx(100.0)  # was 250.0
+
+
+def test_esrs_renewable_share_unchanged_for_a_wholly_owned_org(db):
+    """No partial entity, no weighting: the gross and consolidated figures coincide."""
+    from app.models import MarketInstrument
+    from app.reports.esrs_e1 import esrs_e1_report
+    org = _org(db, "WhollyOwned")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=700.0,
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    db.commit()
+    run = compute_co2e(db, org.id)
+    energy = esrs_e1_report(db, org.id, run_id=run.id,
+                            net_revenue_millions=1.0)["e1_5_energy_consumption"]
+    assert energy["electricity_renewable_contractual_mwh"] == pytest.approx(0.7)
+    assert energy["electricity_renewable_contractual_gross_mwh"] == pytest.approx(0.7)
+    assert energy["electricity_renewable_share_pct"] == pytest.approx(70.0)

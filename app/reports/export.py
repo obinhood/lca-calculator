@@ -139,7 +139,13 @@ def _b_sfdr(db, org, p):
     inc = p.get("include_scope3")
     return sfdr_pai_report(db, org,
                            portfolio_value_millions=_p(p, "portfolio_value_millions", _float),
-                           include_scope3=(True if inc in (None, "") else _bool(inc)))
+                           include_scope3=(True if inc in (None, "") else _bool(inc)),
+                           # PAI 2 is per EUR million: the denominator's currency travels
+                           # with an export, or the exported figure claims a unit it
+                           # cannot substantiate.
+                           portfolio_value_currency=_p(p, "portfolio_value_currency",
+                                                       _str, "EUR"),
+                           fx_year=_p(p, "fx_year", _int))
 
 def _b_sbti(db, org, p):
     from .sbti import sbti_report
