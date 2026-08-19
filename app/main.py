@@ -1648,14 +1648,25 @@ def get_ecovadis_readiness(run_id: Optional[int] = None,
 @app.get("/reports/sfdr_pai")
 def get_sfdr_pai_report(portfolio_value_millions: Optional[float] = None,
                         include_scope3: bool = True,
+                        portfolio_value_currency: str = "EUR",
+                        fx_year: Optional[int] = None,
                         org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """PAI 1/2/3 over the PCAF portfolio.
+
+    ``portfolio_value_currency`` is the currency of ``portfolio_value_millions``: PAI 2 is
+    stated per EUR million, so a non-EUR value needs a loaded FX rate (``fx_year`` picks
+    the rate year; the portfolio's latest as-of year is used otherwise). Without one the
+    indicator is refused, never relabelled as EUR.
+    """
     from .reports.sfdr_pai import sfdr_pai_report
     if portfolio_value_millions is not None and (
             not math.isfinite(portfolio_value_millions) or portfolio_value_millions <= 0):
         raise HTTPException(status_code=400, detail="portfolio_value_millions must be finite > 0")
     return JSONResponse(with_guidance(sfdr_pai_report(db, org.id,
                                                       portfolio_value_millions=portfolio_value_millions,
-                                                      include_scope3=include_scope3)))
+                                                      include_scope3=include_scope3,
+                                                      portfolio_value_currency=portfolio_value_currency,
+                                                      fx_year=fx_year)))
 
 
 # --- Nature (TNFD LEAP + SBTN) -----------------------------------------------

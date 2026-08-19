@@ -5,6 +5,10 @@ Attribution factor = outstanding / denominator (EVIC, total equity+debt, or
 property value depending on asset class — same currency, dimensionless ratio).
 Portfolio totals are reported by asset class with an emissions-weighted PCAF
 data-quality score (1 best .. 5 proxy).
+
+The attribution factor is currency-SAFE by construction: numerator and denominator are
+the same position's own currency, so the ratio is dimensionless. Anything that sums
+MONEY across positions is not — see the exposure helpers at the bottom of this module.
 """
 from typing import List, Optional
 
@@ -96,3 +100,91 @@ def portfolio_financed(db: Session, organisation_id: int, include_scope3: bool =
         "note": "Attribution factor = outstanding / denominator by asset class; "
                 "financed = attribution x investee emissions.",
     }
+
+
+# --- money across positions -------------------------------------------------------
+# Each position is held in its OWN currency, so a SUM of positions is only a quantity
+# once every amount is in one currency. Ignoring `currency` is not a neutral
+# simplification — it is a conversion at rate 1.0, and it disclosed a portfolio of
+# 1,000,000 JPY + 1,000,000 USD as 2,000,000 of covered exposure against a 1,500,000
+# USD gross: a "133% of gross exposure covered" that a reader cannot even recognise as
+# impossible when the true figure is ~67%.
+#
+# Doctrine, identical to services/applicability._convert: where the conversion cannot be
+# performed, REFUSE the figure and say why. A guessed rate produces a wrong number that
+# reads as an authoritative one, which is strictly worse than an absent one.
+
+def amounts_by_currency(items) -> dict:
+    """``{currency: total}`` from ``(currency, amount)`` pairs.
+
+    A missing/blank currency keys as None — "unknown", which is never silently folded
+    into the target currency (an unknown is never a match).
+    """
+    out: dict = {}
+    for ccy, amount in items:
+        key = (ccy or "").strip().upper() or None
+        out[key] = out.get(key, 0.0) + (amount or 0.0)
+    return out
+
+
+def fx_lineage(db: Session, have: Optional[str], want: Optional[str],
+               year: Optional[int]) -> dict:
+    """The FX lineage for converting `have`->`want` in `year`, or a refusal reason.
+
+    Returns ``{"rate", "fx_rate_id", "fx_rate_inverted", "fx_year"}`` on success and
+    ``{"reason": ...}`` when the conversion cannot be performed. The rate id is part of
+    the answer: fx_rates is append-only (a correction INSERTs a row), so recording WHICH
+    row was applied is what lets a converted figure be re-derived years later.
+    """
+    have = (have or "").strip().upper() or None
+    want = (want or "").strip().upper() or None
+    if have is None:
+        return {"reason": f"the amount records no currency, and the total is in {want} — "
+                          f"it cannot be converted"}
+    if want is None:
+        return {"reason": "no target currency"}
+    if have == want:
+        return {"rate": 1.0, "fx_rate_id": None, "fx_rate_inverted": False,
+                "fx_year": year}
+    if year is None:
+        # spend.py refuses for the same reason: a rate is chosen for the year the money
+        # describes, and "whatever is on file" can flip a disclosed figure.
+        return {"reason": f"no year is available to choose a {have}->{want} rate for — "
+                          f"the conversion cannot be dated"}
+    from .spend import _fx_rate
+    hit = _fx_rate(db, have, want, year)
+    if hit is None:
+        return {"reason": f"no {have}->{want} FX rate is loaded for {year} — the figure "
+                          f"is refused rather than converted at a guessed rate "
+                          f"(POST /reference/fx_rates)"}
+    rate, fx_id, inverted = hit
+    return {"rate": rate, "fx_rate_id": fx_id, "fx_rate_inverted": inverted,
+            "fx_year": year}
+
+
+def freeze_exposure_conversion(db: Session, currency: Optional[str],
+                               amount: Optional[float], declared_currency: Optional[str],
+                               year: Optional[int]) -> dict:
+    """Frozen keys converting ONE position's exposure into the declared gross currency.
+
+    IFRS S2 ¶B58-B63's "% of gross exposure covered" divides a sum of position exposures
+    by the DECLARED gross exposure, so the two have to be in one currency. The conversion
+    is frozen onto the run here — never done at render time — because the Scope 3
+    renderer's reproduction contract forbids joining the live FX table: re-rendering a
+    filed run must return the same percentage even after a rate is corrected.
+    """
+    want = (declared_currency or "").strip().upper() or None
+    if want is None:
+        # Nothing to convert TO. The renderer falls back to the single-currency case.
+        return {"exposure_declared_currency": None}
+    fx = fx_lineage(db, currency, want, year)
+    if "reason" in fx:
+        return {"exposure_declared_currency": want,
+                "outstanding_in_declared_currency": None,
+                "exposure_fx_unavailable_reason": fx["reason"]}
+    return {"exposure_declared_currency": want,
+            "outstanding_in_declared_currency": (amount or 0.0) * fx["rate"],
+            "exposure_fx_rate": fx["rate"],
+            "exposure_fx_rate_id": fx["fx_rate_id"],
+            "exposure_fx_rate_inverted": fx["fx_rate_inverted"],
+            "exposure_fx_year": fx["fx_year"]}

@@ -954,7 +954,8 @@ def scope3_completeness(db: Session, run) -> dict:
 
     # --- Category 15: PCAF financed emissions (frozen onto the run) ---
     from ..models import FinancedPosition, RunFinancedLine
-    from ..services.calc import _financed_fingerprint, financed_included_positions
+    from ..services.calc import (_financed_fingerprint, financed_included_positions,
+                                 FINANCED_FINGERPRINT_VERSION)
     n_financed_lines = db.query(RunFinancedLine).filter(
         RunFinancedLine.run_id == run.id).count()
     # B13 — the run holds BOTH activity-derived Cat-15 lines and PCAF financed lines.
@@ -988,7 +989,14 @@ def scope3_completeness(db: Session, run) -> dict:
             # was filed. Fingerprint the as_of-included set, so a position dated AFTER
             # the cutoff (not in the figure) does not false-flag a correct run.
             included = financed_included_positions(positions, run.financed_as_of)
-            if run.financed_fingerprint and _financed_fingerprint(included) != run.financed_fingerprint:
+            # Compared under the version the RUN was frozen with: v1 runs predate
+            # `currency` entering the hash, and re-hashing them under v2 would flag every
+            # existing filing as edited. An unrecognised prefix falls through to the
+            # current version and mismatches — conservative, never silently equal.
+            _fp_version = (run.financed_fingerprint or "").split(":", 1)[0][3:] \
+                or FINANCED_FINGERPRINT_VERSION
+            if run.financed_fingerprint and \
+                    _financed_fingerprint(included, _fp_version) != run.financed_fingerprint:
                 blockers.append("the financed positions feeding this run's Cat 15 changed since it "
                                 "was filed — the frozen figure no longer matches; recompute")
 
