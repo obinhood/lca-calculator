@@ -65,7 +65,15 @@ class ActivityRecord(Base):
     # SHA-256 of the uploaded file content; used to reject accidental re-uploads
     # of the same file (double-counted emissions on a retry/double-click).
     upload_hash = Column(String, nullable=True, index=True)
-    scope = Column(String)  # 1,2,3 - set later
+    # GHG Protocol scope ("1"|"2"|"3"). EXPLICIT PREPARER DECLARATION ONLY — compute_co2e
+    # must never write a derived scope back here (same doctrine as ghgp_category below).
+    # A write-back was re-read as scope_source="explicit" on the next run, which made a
+    # machine guess indistinguishable from a declaration, silently dropped the
+    # assumed-scope caveat from a run whose data had not changed, and put the activity
+    # permanently beyond the reach of a later SCOPE_RULES correction.
+    # NULL (the normal case) = derive per run from the category; the derived value is
+    # frozen on EmissionLineItem.scope with details["scope_source"] beside it.
+    scope = Column(String)
     mapping_confidence = Column(Float)  # 0-1
     factor_id = Column(Integer, ForeignKey("emission_factors.id"), nullable=True)
     # Human-review gate (Gap 6): coarse resolver matches are SUGGESTED, not bound.

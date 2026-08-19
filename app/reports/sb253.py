@@ -93,6 +93,10 @@ def sb253_report(db: Session, organisation_id: int, run_id: Optional[int] = None
         "framework": "California SB 253 (CCDAA)",
         "filing_ready": not blockers,
         "blockers": blockers,
+        # SB 253 files Scope 1/2 first and phases Scope 3 in a year later, with assurance
+        # only on Scope 1/2 — so which scope an activity lands in changes both WHEN it is
+        # filed and whether it is assured. None when nothing was assumed.
+        "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "reporting_period_id": run.reporting_period_id,
         "emissions_tco2e": {

@@ -135,6 +135,15 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             blockers.append("IFRS S2 Cat 15 (¶B58-B63): financed emissions disclosed without "
                             "gross exposure — set gross_exposure_total on the Cat 15 Scope 3 "
                             "declaration so the % of exposure covered can be reported")
+        elif _cat15_financed.get("pct_gross_exposure_covered") is None:
+            # A declared denominator the numerator cannot be compared to is the same
+            # defect as an absent one: the positions could not be totalled in the declared
+            # currency, so the ratio was refused instead of approximated.
+            blockers.append(
+                "IFRS S2 Cat 15 (¶B58-B63): the % of gross exposure covered cannot be "
+                "reported — "
+                + (_cat15_financed.get("pct_gross_exposure_covered_refused_reason")
+                   or "the covered exposure could not be totalled in the declared currency"))
 
     ef_sources = run_factor_sources(db, run)
     dq = s.get("data_quality") or {}
@@ -164,6 +173,10 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
         "jurisdiction_profile": {"key": jurisdiction, **profile},
         "disclosure_ready": not blockers,
         "blockers": blockers,
+        # ¶29(a) requires Scope 1, 2 and 3 disclosed SEPARATELY; where a category was
+        # unrecognised that separation rests on a machine guess, so the caveat travels
+        # with the figures. None when nothing was assumed.
+        "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "reporting_period_id": run.reporting_period_id,
         "ghg_emissions_tco2e": {

@@ -2,6 +2,8 @@
 
 Each test reproduces the audit's own failing scenario and pins the corrected behaviour.
 """
+import json
+
 import pytest
 
 from app.models import (ActivityRecord, CalculationRun, EmissionFactor,
@@ -411,6 +413,347 @@ def test_the_sbti_report_actually_applies_the_financed_comparability_gate(db):
     assert "financed_emissions_basis" in r["base"]
 
 
+def _scoped(db, org_id, label, start, end, gwp_set="AR6"):
+    """A run scoped to a fresh reporting period — the period decides which activities the
+    run covers, so the two runs of a comparison are genuinely different windows."""
+    p = _period(db, org_id, label, start, end)
+    return compute_co2e(db, org_id, gwp_set=gwp_set, reporting_period_id=p.id), p
+
+
+def _elec_factor(db, geo="GB", per_gas=False):
+    kw = (dict(value=None, kg_co2=0.168337, kg_ch4=0.00001, kg_n2o=0.000005,
+               ch4_origin="fossil") if per_gas else dict(value=0.2))
+    f = EmissionFactor(source="T", version="1", geography=geo, year=2025,
+                       category="electricity", subcategory="", unit="kWh",
+                       gwp_set="AR6", **kw)
+    db.add(f); db.commit(); db.refresh(f)
+    return f
+
+
+def _elec_act(db, org_id, factor, kwh, date, geo="GB"):
+    a = ActivityRecord(organisation_id=org_id, date=date, category="electricity",
+                       subcategory="", description="", quantity=kwh, unit="kWh",
+                       geo=geo, factor_id=factor.id)
+    db.add(a); db.commit(); db.refresh(a)
+    return a
+
+
+# --- GRI 305-5: a raw difference of two runs' totals is not a reduction --------------
+
+def test_gri_305_5_blocks_a_period_length_mismatch(db):
+    """A 366-day base minus a 90-day reporting run reports the missing nine months as
+    abatement. Both totals are correct for the span they cover, so nothing in the
+    arithmetic can see it — the audit's reproduction, now gated."""
+    from app.reports.gri import gri_report
+    org = _org(db, "GriPeriodCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 1000.0, "2024-06-15")            # 200 kg in FY24
+    base, _ = _scoped(db, org.id, "FY24", "2024-01-01", "2024-12-31")
+    _elec_act(db, org.id, f, 250.0, "2025-02-15")             # 50 kg in Q1-25
+    run, _ = _scoped(db, org.id, "Q1-25", "2025-01-01", "2025-03-31")
+
+    r = gri_report(db, org.id, run_id=run.id, base_run_id=base.id,
+                   intensity_denominator=1.0, intensity_denominator_period_days=90)
+    assert r["disclosure_ready"] is False
+    assert any("305-5" in b and "elapsed time as abatement" in b
+               for b in r["blockers"]), r["blockers"]
+    # The delta is still published — with both windows beside it, so the artefact is
+    # visible rather than suppressed.
+    assert r["gri_305_5_reductions"]["reduction_location_based_tco2e"] == pytest.approx(0.15)
+    pc = r["gri_305_5_period_comparability"]
+    assert (pc["base_days"], pc["reporting_days"]) == (366, 90)
+    assert pc["tolerance_pct"] == pytest.approx(5.0)
+
+
+def test_gri_305_5_blocks_a_consolidation_approach_change(db):
+    """A change of consolidation approach moves both totals on its own: the delta reports
+    a boundary change as abatement."""
+    from app.reports.gri import gri_report
+    org = _org(db, "GriApproachCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 1000.0, "2024-06-15")
+    base, _ = _scoped(db, org.id, "FY24", "2024-01-01", "2024-12-31")
+    org.consolidation_approach = "equity_share"
+    db.commit()
+    _elec_act(db, org.id, f, 500.0, "2025-06-15")
+    run, _ = _scoped(db, org.id, "FY25", "2025-01-01", "2025-12-31")
+
+    r = gri_report(db, org.id, run_id=run.id, base_run_id=base.id,
+                   intensity_denominator=1.0, intensity_denominator_period_days=365)
+    assert r["disclosure_ready"] is False
+    assert any("305-5" in b and "consolidation approach changed" in b
+               for b in r["blockers"]), r["blockers"]
+    assert r["gri_305_5_reductions"]["base_consolidation_approach"] == "operational_control"
+    assert r["gri_305_5_reductions"]["reporting_consolidation_approach"] == "equity_share"
+
+
+def test_gri_305_5_blocks_an_entity_population_change(db):
+    """An acquisition between the two runs is a structural change, not a negative
+    reduction — and a divestment would read as abatement no-one achieved."""
+    from app.models import ReportingEntity
+    from app.reports.gri import gri_report
+    org = _org(db, "GriEntityCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 1000.0, "2024-06-15")
+    base, _ = _scoped(db, org.id, "FY24", "2024-01-01", "2024-12-31")
+    sub = ReportingEntity(organisation_id=org.id, name="NewCo",
+                          accounting_category="subsidiary",
+                          in_consolidated_accounting_group=True, equity_share_pct=100.0,
+                          financial_control=True, operational_control=True)
+    db.add(sub); db.commit(); db.refresh(sub)
+    a = _elec_act(db, org.id, f, 500.0, "2025-06-15")
+    a.entity_id = sub.id
+    db.commit()
+    run, _ = _scoped(db, org.id, "FY25", "2025-01-01", "2025-12-31")
+
+    r = gri_report(db, org.id, run_id=run.id, base_run_id=base.id,
+                   intensity_denominator=1.0, intensity_denominator_period_days=365)
+    assert r["disclosure_ready"] is False
+    assert any("305-5" in b and "entity population changed" in b
+               for b in r["blockers"]), r["blockers"]
+
+
+def test_gri_305_5_still_publishes_a_comparable_reduction(db):
+    """The gate must not block every organisation: two 365ish-day runs on one boundary,
+    one GWP set and one residual-mix methodology ARE comparable."""
+    from app.reports.gri import gri_report
+    org = _org(db, "GriComparableCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 1000.0, "2024-06-15")            # 200 kg
+    base, _ = _scoped(db, org.id, "FY24", "2024-01-01", "2024-12-31")
+    _elec_act(db, org.id, f, 500.0, "2025-06-15")             # 100 kg
+    run, _ = _scoped(db, org.id, "FY25", "2025-01-01", "2025-12-31")
+
+    r = gri_report(db, org.id, run_id=run.id, base_run_id=base.id,
+                   intensity_denominator=1.0, intensity_denominator_period_days=365)
+    assert not any("305-5" in b for b in r["blockers"]), r["blockers"]
+    assert r["gri_305_5_reductions"]["reduction_location_based_tco2e"] == pytest.approx(0.1)
+    pc = r["gri_305_5_period_comparability"]
+    assert (pc["base_days"], pc["reporting_days"]) == (366, 365)   # inside 5% tolerance
+    assert pc["base_period"]["label"] == "FY24"
+
+
+# --- GRI 305-4 / 302-3: an intensity denominator covers a period --------------------
+
+def test_gri_intensity_requires_the_denominators_period(db):
+    """A bare float has no period, so nothing could check it against the numerator. The
+    denominator's span is now a required input, not an assumption."""
+    from app.reports.gri import gri_report
+    org = _org(db, "GriDenomCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 1000.0, "2025-02-15")
+    run, _ = _scoped(db, org.id, "Q1-25", "2025-01-01", "2025-03-31")
+
+    r = gri_report(db, org.id, run_id=run.id, intensity_denominator=1.0)
+    assert r["disclosure_ready"] is False
+    assert any("intensity_denominator_period_days is required" in b
+               for b in r["blockers"]), r["blockers"]
+
+
+def test_gri_intensity_blocks_an_annual_denominator_over_a_quarter_of_emissions(db):
+    """The audit's arithmetic: a quarter-scoped run divided by an annual denominator is a
+    ratio ~4x too low, with both inputs individually correct."""
+    from app.reports.gri import gri_report
+    org = _org(db, "GriQuarterCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 1000.0, "2025-02-15")
+    run, _ = _scoped(db, org.id, "Q1-25", "2025-01-01", "2025-03-31")
+
+    r = gri_report(db, org.id, run_id=run.id, intensity_denominator=4.0,
+                   intensity_denominator_unit="GBP million (annual revenue)",
+                   intensity_denominator_period_days=365)
+    assert r["disclosure_ready"] is False
+    assert any("factor of about 4" in b for b in r["blockers"]), r["blockers"]
+    # The ratio is still shown, with both spans, so the mismatch is legible next to it.
+    basis = r["gri_305_4_intensity"]["period_basis"]
+    assert basis["denominator_period_days"] == 365
+    assert basis["numerator_period"]["days"] == 90
+    assert r["gri_302_3_energy_intensity"]["period_basis"]["numerator_period"]["days"] == 90
+
+
+def test_gri_intensity_echoes_both_spans_when_they_match(db):
+    """A denominator for the same period as the run passes and is disclosed as such."""
+    from app.reports.gri import gri_report
+    org = _org(db, "GriMatchedCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 1000.0, "2025-06-15")
+    run, _ = _scoped(db, org.id, "FY25", "2025-01-01", "2025-12-31")
+
+    r = gri_report(db, org.id, run_id=run.id, intensity_denominator=4.0,
+                   intensity_denominator_period_days=365)
+    assert not any("intensity" in b for b in r["blockers"]), r["blockers"]
+    assert r["gri_305_4_intensity"]["tco2e_per_unit"] == pytest.approx(0.2 / 4.0)
+    basis = r["gri_305_4_intensity"]["period_basis"]
+    assert basis["numerator_period"]["label"] == "FY25"
+    assert basis["denominator_period_days"] == 365
+
+
+# --- EcoVadis: the trend gets the gates GRI 305-5 already had -----------------------
+
+def test_ecovadis_trend_blocks_a_cross_gwp_comparison(db):
+    """A 'measured reduction' spanning a GWP vintage change is a change of metric. Filed
+    as Actions evidence it is a misrepresentation, not a weak KPI — so it blocks."""
+    from app.reports.ecovadis import ecovadis_readiness
+    org = _org(db, "EcoGwpCo")
+    f = _elec_factor(db, per_gas=True)
+    _elec_act(db, org.id, f, 1000.0, "2025-06-15")
+    base = compute_co2e(db, org.id, gwp_set="AR5")
+    cur = compute_co2e(db, org.id, gwp_set="AR6")
+
+    r = ecovadis_readiness(db, org.id, run_id=cur.id, baseline_run_id=base.id)
+    assert r["assessment_ready"] is False
+    assert any("trend_vs_baseline" in b and "GWP" in b for b in r["blockers"]), r["blockers"]
+    assert r["trend_vs_baseline"]["baseline_gwp_set"] == "AR5"
+    assert r["trend_vs_baseline"]["current_gwp_set"] == "AR6"
+
+
+def test_ecovadis_trend_blocks_a_residual_mix_methodology_change(db):
+    """Uncovered Scope 2 load starting to price at the residual mix moves the market-based
+    total on its own — the same trap gri.py already refused on 305-5."""
+    from app.models import ResidualMixRate
+    from app.reports.ecovadis import ecovadis_readiness
+    org = _org(db, "EcoResidualCo")
+    f = _elec_factor(db, geo="DE")
+    _elec_act(db, org.id, f, 1000.0, "2025-06-15", geo="DE")
+    base = compute_co2e(db, org.id)                            # no rate on file
+    db.add(ResidualMixRate(market="DE", year=2025, kg_co2e_per_kwh=0.55,
+                           publisher="AIB_RESIDUAL_MIX", status="published",
+                           gas_basis="co2e"))
+    db.commit()
+    cur = compute_co2e(db, org.id)                             # prices at the residual
+    assert cur.total_co2e_market != base.total_co2e_market
+
+    r = ecovadis_readiness(db, org.id, run_id=cur.id, baseline_run_id=base.id)
+    assert r["assessment_ready"] is False
+    assert any("trend_vs_baseline" in b and "not comparable" in b
+               for b in r["blockers"]), r["blockers"]
+
+
+def test_ecovadis_trend_blocks_a_period_length_mismatch(db):
+    """A 366-day baseline against a 90-day current run is a 75% 'reduction' of pure
+    elapsed time — the strongest-looking evidence in the pack and entirely an artefact."""
+    from app.reports.ecovadis import ecovadis_readiness
+    org = _org(db, "EcoPeriodCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 1000.0, "2024-06-15")
+    base, _ = _scoped(db, org.id, "FY24", "2024-01-01", "2024-12-31")
+    _elec_act(db, org.id, f, 250.0, "2025-02-15")
+    cur, _ = _scoped(db, org.id, "Q1-25", "2025-01-01", "2025-03-31")
+
+    r = ecovadis_readiness(db, org.id, run_id=cur.id, baseline_run_id=base.id)
+    assert r["assessment_ready"] is False
+    assert any("trend_vs_baseline" in b and "elapsed time" in b
+               for b in r["blockers"]), r["blockers"]
+    assert r["trend_vs_baseline"]["direction"] == "reduction"   # still shown...
+    tc = r["trend_period_comparability"]                       # ...with both windows
+    assert (tc["baseline_days"], tc["current_days"]) == (366, 90)
+
+
+# --- SBTi: two runs and two year labels, none of them previously tied together ------
+
+def _target(db, org_id, base_run_id, base_year=2025, **kw):
+    from app.models import EmissionsTarget
+    t = EmissionsTarget(organisation_id=org_id, name="NT", target_type="near_term",
+                        scope_coverage="1+2", base_run_id=base_run_id,
+                        base_year=base_year, target_year=2035,
+                        target_reduction_pct=0.42, ambition="1.5C", **kw)
+    db.add(t); db.commit(); db.refresh(t)
+    return t
+
+
+def test_sbti_blocks_a_trajectory_across_incomparable_period_lengths(db):
+    """The trajectory subtracts a base-year total from a current total exactly as GRI
+    305-5 does; a 90-day current run against a 366-day base year books three quarters of
+    the year as progress and reports on_track."""
+    from app.reports.sbti import sbti_report
+    org = _org(db, "SbtiPeriodCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 10_000.0, "2024-06-15")
+    base, _ = _scoped(db, org.id, "FY24", "2024-01-01", "2024-12-31")
+    _elec_act(db, org.id, f, 2_500.0, "2025-02-15")
+    cur, _ = _scoped(db, org.id, "Q1-25", "2025-01-01", "2025-03-31")
+    t = _target(db, org.id, base.id, base_year=2024)
+
+    r = sbti_report(db, org.id, t.id, current_run_id=cur.id, current_year=2025)
+    assert r["ok"] is False
+    assert any("elapsed time" in b for b in r["blockers"]), r["blockers"]
+    assert r["trajectory"] is None                    # never silently "on track"
+    pc = r["period_comparability"]
+    assert (pc["base_year_days"], pc["current_days"]) == (366, 90)
+
+
+def test_sbti_blocks_a_current_year_the_current_run_does_not_cover(db):
+    """current_year decides WHERE on the pathway the run is judged and was tied to
+    nothing: a 2025 run placed at 2030 collects five years of allowance the organisation
+    has not lived through."""
+    from app.reports.sbti import sbti_report
+    org = _org(db, "SbtiYearCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 10_000.0, "2024-06-15")
+    base, _ = _scoped(db, org.id, "FY24", "2024-01-01", "2024-12-31")
+    _elec_act(db, org.id, f, 9_000.0, "2025-06-15")
+    cur, _ = _scoped(db, org.id, "FY25", "2025-01-01", "2025-12-31")
+    t = _target(db, org.id, base.id, base_year=2024)
+
+    r = sbti_report(db, org.id, t.id, current_run_id=cur.id, current_year=2030)
+    assert r["ok"] is False
+    assert any("current_year 2030 is outside" in b for b in r["blockers"]), r["blockers"]
+    assert r["trajectory"] is None
+    # The year that DOES match the run's period places the trajectory normally.
+    ok = sbti_report(db, org.id, t.id, current_run_id=cur.id, current_year=2025)
+    assert ok["ok"] is True, ok["blockers"]
+    assert ok["trajectory"]["current_reporting_period"]["label"] == "FY25"
+
+
+def test_sbti_blocks_a_base_year_the_base_run_does_not_cover(db):
+    """Nothing tied target.base_year to the base run, so a base_year four years early
+    stretched the pathway from a year the base figures never measured."""
+    from app.reports.sbti import sbti_report
+    org = _org(db, "SbtiBaseYearCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 10_000.0, "2025-06-15")
+    base, _ = _scoped(db, org.id, "FY25", "2025-01-01", "2025-12-31")
+    t = _target(db, org.id, base.id, base_year=2020)            # base run covers 2025
+
+    r = sbti_report(db, org.id, t.id)
+    assert r["ok"] is False
+    assert any("target base_year 2020 is outside" in b for b in r["blockers"]), r["blockers"]
+
+
+def test_sbti_discloses_the_period_behind_each_figure(db):
+    """The payload disclosed no period for either run, so a base_year that did not match
+    the base run was undetectable by a reader as well as by the engine."""
+    from app.reports.sbti import sbti_report
+    org = _org(db, "SbtiDisclosingCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 10_000.0, "2025-06-15")
+    base, _ = _scoped(db, org.id, "FY25", "2025-01-01", "2025-12-31")
+    t = _target(db, org.id, base.id, base_year=2025)
+
+    r = sbti_report(db, org.id, t.id)
+    assert r["ok"] is True, r["blockers"]
+    assert r["base"]["reporting_period"]["label"] == "FY25"
+    assert r["base"]["reporting_period"]["days"] == 365
+    # No current run supplied -> no comparison to describe, and none is implied.
+    assert r["period_comparability"] is None
+
+
+def test_sbti_blocks_an_unscoped_base_run_because_the_base_year_cannot_be_checked(db):
+    """An unscoped run has no period, so base_year is unverifiable — a cannot-determine,
+    which for an anchor of the whole pathway is a blocker, not a pass."""
+    from app.reports.sbti import sbti_report
+    org = _org(db, "SbtiUnscopedCo")
+    f = _elec_factor(db)
+    _elec_act(db, org.id, f, 10_000.0, "2025-06-15")
+    base = compute_co2e(db, org.id)                            # no reporting period
+    t = _target(db, org.id, base.id, base_year=2025)
+
+    r = sbti_report(db, org.id, t.id)
+    assert r["ok"] is False
+    assert any("cannot be tied to the base run" in b for b in r["blockers"]), r["blockers"]
+    assert r["base"]["reporting_period"] is None
+
+
 def test_the_sbti_payload_discloses_that_financed_emissions_are_included(db):
     """The figure changed by most of a bank's inventory; a reader must not have to infer
     it. `financed_included` was written for this and was never called by any report."""
@@ -429,3 +772,541 @@ def test_the_sbti_payload_discloses_that_financed_emissions_are_included(db):
     r = sbti_report(db, org.id, target_id=t.id)
     assert r["base"]["financed_emissions_included_tco2e"] == pytest.approx(500.0)
     assert "INCLUDED" in r["base"]["financed_emissions_basis"]
+
+
+# --- money summed across currencies -------------------------------------------------
+# Three disclosed ratios divided a sum of amounts in DIFFERENT currencies by a figure in
+# one. The sum is not a quantity, so neither is the ratio: a JPY position counted equal
+# to a USD one produced "133% of gross exposure covered" against a true ~67%.
+
+def _fx(db, base, quote, year, rate):
+    from app.models import FxRate
+    row = FxRate(base_currency=base, quote_currency=quote, year=year, rate=rate)
+    db.add(row); db.commit(); db.refresh(row)
+    return row
+
+
+def _fpos(db, org_id, currency, outstanding, denom=10_000_000.0, s1=5000.0,
+          revenue=None, as_of="2025-01-01"):
+    p = FinancedPosition(organisation_id=org_id, investee_name=f"{currency} investee",
+                         asset_class="listed_equity", currency=currency,
+                         outstanding_amount=outstanding, attribution_denominator=denom,
+                         investee_scope1_tco2e=s1, investee_scope2_tco2e=0.0,
+                         investee_scope3_tco2e=0.0, investee_revenue_millions=revenue,
+                         data_quality_score=2, as_of_date=as_of)
+    db.add(p); db.commit(); db.refresh(p)
+    return p
+
+
+def _cat15_run(db, org, gross_total=1_500_000.0, gross_currency="USD"):
+    """A period-scoped, screened run whose Cat 15 screen declares a gross exposure."""
+    from app.models import Scope3CategoryDeclaration
+    from tests.scope3_util import ready_run
+    _run, p = ready_run(db, org.id)
+    d = db.query(Scope3CategoryDeclaration).filter_by(
+        organisation_id=org.id, reporting_period_id=p.id, category=15).first()
+    d.gross_exposure_total = gross_total
+    d.gross_exposure_currency = gross_currency
+    db.commit()
+    return compute_co2e(db, org.id, reporting_period_id=p.id), p
+
+
+def _financed(db, run):
+    from app.reports.scope3 import scope3_by_ghgp_category
+    return scope3_by_ghgp_category(db, run)["categories"]["15"]["financed_emissions"]
+
+
+def test_mixed_currency_exposure_is_refused_not_summed_into_133_pct_coverage(db):
+    """The audit's own case: 1,000,000 JPY + 1,000,000 USD of covered exposure against a
+    1,500,000 USD declared gross returned exposure_covered 2,000,000 and
+    pct_gross_exposure_covered 133.33 — a share of a gross exposure that cannot exceed
+    100% by construction, and a figure no reader could reconcile. With no JPY->USD rate
+    loaded the ratio is refused, and the per-currency exposure (which needs no rate) is
+    disclosed in its place."""
+    org = _org(db, "MultiCcyBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    fin = _financed(db, run)
+
+    assert fin["exposure_covered_by_currency"] == {"JPY": 1_000_000.0, "USD": 1_000_000.0}
+    assert fin["exposure_covered"] is None                    # was 2,000,000.0
+    assert fin["pct_gross_exposure_covered"] is None           # was 133.33
+    assert "JPY->USD" in fin["pct_gross_exposure_covered_refused_reason"]
+    assert "guessed rate" in fin["pct_gross_exposure_covered_refused_reason"]
+    # The emissions themselves are unaffected: the attribution factor is a same-currency
+    # ratio, so only the disclosed coverage ratio was ever wrong.
+    assert fin["tco2e"] == pytest.approx(1000.0)               # 2 x (0.1 x 5000)
+
+
+def test_a_loaded_rate_converts_the_exposure_instead_of_refusing_it(db):
+    """With the rate on file the ratio is computed, not approximated: 1,000,000 JPY at
+    0.0065 = 6,500 USD, so 1,006,500 of 1,500,000 USD is covered — ~67%, not 133%."""
+    org = _org(db, "RatedBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    rate_row = _fx(db, "JPY", "USD", 2025, 0.0065)
+    run, _p = _cat15_run(db, org)
+    fin = _financed(db, run)
+
+    assert fin["exposure_covered"] == pytest.approx(1_006_500.0)
+    assert fin["exposure_covered_currency"] == "USD"
+    assert fin["pct_gross_exposure_covered"] == pytest.approx(67.1)
+    assert fin["pct_gross_exposure_covered_refused_reason"] is None
+    # WHICH rate row was applied is part of the answer — fx_rates is append-only.
+    conv = fin["exposure_conversions"]
+    assert len(conv) == 1
+    assert (conv[0]["from"], conv[0]["to"], conv[0]["rate"]) == ("JPY", "USD", 0.0065)
+    assert conv[0]["fx_rate_id"] == rate_row.id and conv[0]["fx_year"] == 2025
+
+
+def test_a_later_fx_correction_does_not_move_a_filed_percentage(db):
+    """scope3.py's reproduction contract: the conversion is frozen onto the run, so
+    correcting the rate afterwards (an INSERT, since fx_rates is append-only) cannot
+    restate a filing that has already gone out."""
+    org = _org(db, "FrozenFxBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    _fx(db, "JPY", "USD", 2025, 0.0065)
+    run, _p = _cat15_run(db, org)
+    before = _financed(db, run)["pct_gross_exposure_covered"]
+
+    _fx(db, "JPY", "USD", 2025, 0.0100)          # corrected rate, filed run untouched
+    assert _financed(db, run)["pct_gross_exposure_covered"] == pytest.approx(before)
+
+
+def test_issb_s2_blocks_when_the_coverage_ratio_had_to_be_refused(db):
+    """¶B58-B63 wants financed emissions WITH the gross exposure and the % covered. An
+    absent percentage already blocked when the gross was missing; a gross that the
+    positions cannot be compared against is the same defect, and the S2 payload must not
+    read as disclosure-ready without it."""
+    from app.reports.issb_s2 import issb_s2_report
+    org = _org(db, "S2MixedBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    r = issb_s2_report(db, org.id, run_id=run.id)
+    assert r["disclosure_ready"] is False
+    assert any("% of gross exposure covered cannot be reported" in b for b in r["blockers"])
+
+    # With the rate loaded the same filing is ready again.
+    _fx(db, "JPY", "USD", 2025, 0.0065)
+    run2, _p2 = _cat15_run(db, org)
+    r2 = issb_s2_report(db, org.id, run_id=run2.id)
+    assert not [b for b in r2["blockers"] if "gross exposure" in b]
+    assert r2["disclosure_ready"] is True
+
+
+def test_restating_a_position_currency_flags_the_filed_run_as_changed(db):
+    """The currency is now an input to a DISCLOSED figure, so it belongs in the staleness
+    fingerprint: restating a position from USD to JPY changes the % covered, and a filed
+    run must not keep quoting the old one as still matching the ledger."""
+    from app.services.ghgp import scope3_completeness
+    org = _org(db, "RestatedCcyBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    pos = _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    assert not [b for b in scope3_completeness(db, run)["blockers"] if "changed since" in b]
+
+    pos.currency = "JPY"                          # same amount, different money
+    db.commit()
+    assert [b for b in scope3_completeness(db, run)["blockers"] if "changed since" in b]
+
+
+def test_a_legacy_fingerprint_is_compared_under_its_own_version(db):
+    """Anti-cliff: adding `currency` to the hash must not read as an edit on every run
+    frozen before it — a v1 fingerprint is re-derived as v1."""
+    from app.services.calc import _financed_fingerprint
+    from app.services.ghgp import scope3_completeness
+    org = _org(db, "LegacyFpBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    positions = db.query(FinancedPosition).filter_by(organisation_id=org.id).all()
+    run.financed_fingerprint = _financed_fingerprint(positions, "v1")   # as a v1 run froze it
+    db.commit()
+    assert not [b for b in scope3_completeness(db, run)["blockers"] if "changed since" in b]
+
+
+def test_single_currency_exposure_needs_no_rate_and_is_unchanged(db):
+    """The fix must not withhold a ratio that was always well-defined: one currency, no
+    conversion, no refusal."""
+    org = _org(db, "OneCcyBank")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    _fpos(db, org.id, "USD", 1_000_000.0)
+    run, _p = _cat15_run(db, org)
+    fin = _financed(db, run)
+
+    assert fin["exposure_covered"] == pytest.approx(1_000_000.0)
+    assert fin["exposure_covered_currency"] == "USD"
+    assert fin["pct_gross_exposure_covered"] == pytest.approx(66.67)
+    assert fin["exposure_conversions"] is None
+    assert fin["exposure_covered_refused_reason"] is None
+    assert fin["pct_gross_exposure_covered_refused_reason"] is None
+
+
+def test_pai3_value_weights_across_currencies_are_refused_without_a_rate(db):
+    """PAI 3 weights each investee's intensity by its outstanding amount. Weighting
+    1,000,000 JPY equally with 1,000,000 EUR over-weights the JPY investee ~150x, which
+    is a different indicator from the one SFDR defines."""
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "PaiBank")
+    _fpos(db, org.id, "EUR", 1_000_000.0, s1=1000.0, revenue=50.0)    # intensity 20
+    _fpos(db, org.id, "JPY", 1_000_000.0, s1=5000.0, revenue=100.0)   # intensity 50
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=2.0)
+    pai3 = r["pai_3_ghg_intensity_of_investees"]
+
+    assert pai3["value_weighted_tco2e_per_eur_million_revenue"] is None   # was 35.0
+    assert "JPY->EUR" in pai3["refused_reason"]
+    assert any("PAI 3 refused" in b for b in r["blockers"])
+    assert r["ok"] is False
+
+
+def test_pai3_weights_convert_to_eur_when_a_rate_is_loaded(db):
+    """1,000,000 JPY at 0.006 is 6,000 EUR of weight, not 1,000,000 — so the JPY
+    investee's intensity moves the average by 0.6%, not by half of it."""
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "PaiRatedBank")
+    _fpos(db, org.id, "EUR", 1_000_000.0, s1=1000.0, revenue=50.0)
+    _fpos(db, org.id, "JPY", 1_000_000.0, s1=5000.0, revenue=100.0)
+    _fx(db, "JPY", "EUR", 2025, 0.006)
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=2.0)
+    pai3 = r["pai_3_ghg_intensity_of_investees"]
+
+    # (1,000,000 x 20 + 6,000 x 50) / 1,006,000
+    assert pai3["value_weighted_tco2e_per_eur_million_revenue"] == pytest.approx(
+        (1_000_000 * 20.0 + 6_000 * 50.0) / 1_006_000, abs=1e-5)
+    assert pai3["weighting_currency"] == "EUR"
+    assert pai3["weighting_conversions"][0]["rate"] == 0.006
+    assert pai3["refused_reason"] is None
+
+
+def test_pai3_single_currency_average_is_unchanged(db):
+    """One currency: the weights are a ratio, so the average is invariant to which
+    currency it is and no rate is needed."""
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "PaiOneCcy")
+    _fpos(db, org.id, "GBP", 1_000_000.0, s1=1000.0, revenue=50.0)
+    _fpos(db, org.id, "GBP", 3_000_000.0, s1=5000.0, revenue=100.0)
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=2.0)
+    pai3 = r["pai_3_ghg_intensity_of_investees"]
+    assert pai3["value_weighted_tco2e_per_eur_million_revenue"] == pytest.approx(
+        (1_000_000 * 20.0 + 3_000_000 * 50.0) / 4_000_000)
+    assert pai3["weighting_currency"] == "GBP"
+    assert pai3["weighting_conversions"] is None
+
+
+def test_pai2_denominator_currency_is_checked_not_assumed_to_be_eur(db):
+    """PAI 2 is stated per EUR million invested. A portfolio value supplied in USD was
+    divided in and labelled EUR regardless — a 10% wrong headline indicator."""
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "Pai2Bank")
+    _fpos(db, org.id, "EUR", 1_000_000.0, s1=1000.0, revenue=50.0)
+
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=10.0,
+                        portfolio_value_currency="USD")
+    assert r["pai_2_carbon_footprint"] is None
+    assert any("PAI 2 refused" in b and "USD" in b for b in r["blockers"])
+
+    _fx(db, "USD", "EUR", 2025, 0.9)
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=10.0,
+                        portfolio_value_currency="USD")
+    pai2 = r["pai_2_carbon_footprint"]
+    assert pai2["portfolio_value_currency"] == "USD"
+    assert pai2["portfolio_value_millions_eur"] == pytest.approx(9.0)
+    # 100 tCO2e financed (0.1 x 1000) over 9 EUR million, not over 10.
+    assert pai2["tco2e_per_eur_million_invested"] == pytest.approx(100.0 / 9.0, abs=1e-5)
+    assert pai2["portfolio_value_fx"]["rate"] == 0.9
+
+
+def test_pai2_in_eur_is_unchanged_and_needs_no_rate(db):
+    from app.reports.sfdr_pai import sfdr_pai_report
+    org = _org(db, "Pai2Eur")
+    _fpos(db, org.id, "EUR", 1_000_000.0, s1=1000.0, revenue=50.0)
+    r = sfdr_pai_report(db, org.id, portfolio_value_millions=10.0)
+    pai2 = r["pai_2_carbon_footprint"]
+    assert pai2["tco2e_per_eur_million_invested"] == pytest.approx(10.0)
+    assert pai2["portfolio_value_millions_eur"] == pytest.approx(10.0)
+    assert pai2["portfolio_value_fx"] is None
+
+
+# --- E1-5: a share whose numerator and denominator are on different boundaries -------
+
+def test_esrs_renewable_share_is_on_the_same_boundary_as_the_energy_total(db):
+    """The instrument pool is consumed in GROSS kWh (a REC covers physical MWh), while
+    E1-5's total_mwh follows the consolidation scope. For a 40%-held JV that put a 1.0 MWh
+    gross numerator over a 0.4 MWh consolidated denominator — a 250% renewable share
+    sitting inside a filed CSRD payload."""
+    from app.models import ReportingEntity, MarketInstrument
+    from app.reports.esrs_e1 import esrs_e1_report
+    org = Organisation(name="JVCo", consolidation_approach="equity_share")
+    db.add(org); db.commit(); db.refresh(org)
+    jv = ReportingEntity(organisation_id=org.id, name="JV",
+                         accounting_category="joint_venture_incorporated",
+                         equity_share_pct=40.0, joint_financial_control=True,
+                         in_consolidated_accounting_group=False)
+    db.add(jv); db.commit(); db.refresh(jv)
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0,
+         entity_id=jv.id)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=1000.0,
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    db.commit()
+    run = compute_co2e(db, org.id)
+    energy = esrs_e1_report(db, org.id, run_id=run.id,
+                            net_revenue_millions=1.0)["e1_5_energy_consumption"]
+
+    assert energy["by_carrier_mwh"]["electricity"] == pytest.approx(0.4)   # 40% of 1 MWh
+    # The physical instrument volume is still disclosed — labelled as gross.
+    assert energy["electricity_renewable_contractual_gross_mwh"] == pytest.approx(1.0)
+    # ...but the figure reported beside the consolidated total is on that basis.
+    assert energy["electricity_renewable_contractual_mwh"] == pytest.approx(0.4)
+    assert energy["electricity_renewable_share_pct"] == pytest.approx(100.0)  # was 250.0
+
+
+def test_esrs_renewable_share_unchanged_for_a_wholly_owned_org(db):
+    """No partial entity, no weighting: the gross and consolidated figures coincide."""
+    from app.models import MarketInstrument
+    from app.reports.esrs_e1 import esrs_e1_report
+    org = _org(db, "WhollyOwned")
+    _act(db, org.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    db.add(MarketInstrument(organisation_id=org.id, instrument_type="rec",
+                            kg_co2e_per_kwh=0.0, coverage_kwh=700.0,
+                            start_date="2025-01-01", end_date="2025-12-31"))
+    db.commit()
+    run = compute_co2e(db, org.id)
+    energy = esrs_e1_report(db, org.id, run_id=run.id,
+                            net_revenue_millions=1.0)["e1_5_energy_consumption"]
+    assert energy["electricity_renewable_contractual_mwh"] == pytest.approx(0.7)
+    assert energy["electricity_renewable_contractual_gross_mwh"] == pytest.approx(0.7)
+    assert energy["electricity_renewable_share_pct"] == pytest.approx(70.0)
+# --- derived scope written back onto the live activity ------------------------------
+#
+# The audit's reproduction: an activity whose category this build does not recognise
+# (`purchased_steam_xyz` — purchased steam is Scope 2) is defaulted to Scope 3 and
+# FLAGGED. compute_co2e then wrote that guess onto ActivityRecord.scope, so the next run
+# over IDENTICAL data re-read it as an explicit preparer declaration: the caveat vanished
+# from a disclosed scope split (ESRS E1-6, IFRS S2 29(a), CDP C6) and no later SCOPE_RULES
+# entry could ever reach the activity again.
+
+def _steam(db, org_id):
+    """1,000 kWh of purchased steam on an UNRECOGNISED category — Scope 2 in reality."""
+    f = _factor(db, 0.3, category="purchased_steam_xyz", unit="kWh")
+    return f, _act(db, org_id, f, 1000.0)
+
+
+def test_the_assumed_scope_caveat_survives_a_second_run_over_identical_data(db):
+    """Run twice, change nothing. The second run must still say the scope was guessed."""
+    org = _org(db, "SteamCo")
+    _f, a = _steam(db, org.id)
+
+    first = summary(db, org.id, compute_co2e(db, org.id).id)
+    assert first["scope_assumptions"] is not None
+    assert first["scope_assumptions"]["assumed_scope3_by_category"] == {"purchased_steam_xyz": 1}
+    assert first["by_scope"] == [{"scope": "3", "co2e": pytest.approx(300.0)}]
+
+    second = summary(db, org.id, compute_co2e(db, org.id).id)
+    assert second["scope_assumptions"] == first["scope_assumptions"]     # was None
+    assert second["by_scope"] == first["by_scope"]
+
+    # The mechanism: nothing was written back, so a machine guess can never be re-read as
+    # a preparer's declaration.
+    db.refresh(a)
+    assert a.scope is None
+    from app.models import EmissionLineItem
+    # Both runs' frozen lineage — not just the summary — records the guess AS a guess.
+    sources = {json.loads(li.details)["scope_source"]
+               for li in db.query(EmissionLineItem).filter(
+                   EmissionLineItem.method == "location").all()}
+    assert sources == {"assumed_scope3"}                                # was {"explicit"} too
+
+
+def test_a_scope_rules_correction_still_reaches_an_already_calculated_activity(db, monkeypatch):
+    """The second consequence: the write-back made the misclassification permanent —
+    `a.scope` was tested BEFORE the category rule, so adding the category to SCOPE_RULES
+    had no effect on any activity that had already been through a run."""
+    from app.services import calc as calc_mod
+    org = _org(db, "FixableCo")
+    _f, a = _steam(db, org.id)
+    compute_co2e(db, org.id)                                   # first run guesses Scope 3
+
+    monkeypatch.setitem(calc_mod.SCOPE_RULES, "purchased_steam_xyz", "2")
+    s = summary(db, org.id, compute_co2e(db, org.id).id)
+
+    assert s["by_scope"] == [{"scope": "2", "co2e": pytest.approx(300.0)}]
+    assert s["scope_assumptions"] is None                       # correctly classified now
+    assert s["scope2"]["location_based"] == pytest.approx(300.0)
+    db.refresh(a)
+    assert a.scope is None
+
+
+def test_an_explicit_preparer_declaration_stays_distinguishable_from_a_guess(db):
+    """Removing the write-back must not remove the explicit path: a preparer who DECLARES
+    the scope is honoured, recorded as `explicit`, and raises no assumption caveat."""
+    from app.models import EmissionLineItem
+    org = _org(db, "DeclaringCo")
+    _f, a = _steam(db, org.id)
+    a.scope = "2"                                              # preparer's own declaration
+    db.commit()
+
+    run = compute_co2e(db, org.id)
+    s = summary(db, org.id, run.id)
+    assert s["by_scope"] == [{"scope": "2", "co2e": pytest.approx(300.0)}]
+    assert s["scope_assumptions"] is None
+    line = db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id, EmissionLineItem.method == "location").one()
+    assert json.loads(line.details)["scope_source"] == "explicit"
+
+
+def test_the_assumed_scope_caveat_reaches_the_filing_payloads(db):
+    """The block was produced by summary() and dropped by every renderer that consumes it,
+    so the caveat never reached a filing. Each framework below discloses the scope split
+    (or, for ETS, the Scope 1 figure an assumed-out source understates)."""
+    from app.reports.compliance_extra import ets_mrv_report
+    from app.reports.ecovadis import ecovadis_readiness
+    from app.reports.esrs_e1 import esrs_e1_report
+    from app.reports.gri import gri_report
+    from app.reports.issb_s2 import issb_s2_report
+    from app.reports.sb253 import sb253_report
+    from app.reports.secr import secr_report
+    org = _org(db, "FilingCo")
+    _steam(db, org.id)
+    run = compute_co2e(db, org.id)
+    rid = run.id
+
+    payloads = {
+        "cdp": cdp_export(db, org.id, run_id=rid, intensity_denominator=1.0),
+        "esrs_e1": esrs_e1_report(db, org.id, run_id=rid, net_revenue_millions=1.0),
+        "issb_s2": issb_s2_report(db, org.id, run_id=rid),
+        "gri": gri_report(db, org.id, run_id=rid, intensity_denominator=1.0),
+        "secr": secr_report(db, org.id, run_id=rid, intensity_denominator=1.0),
+        "sb253": sb253_report(db, org.id, run_id=rid),
+        "ecovadis": ecovadis_readiness(db, org.id, run_id=rid, intensity_denominator=1.0),
+        "ets": ets_mrv_report(db, org.id, "UK ETS", run_id=rid),
+    }
+    for name, p in payloads.items():
+        assert p.get("scope_assumptions") is not None, f"{name} dropped the caveat"
+        assert p["scope_assumptions"]["assumed_scope3_by_category"] == {
+            "purchased_steam_xyz": 1}, name
+        assert "purchased energy (Scope 2)" in p["scope_assumptions"]["note"], name
+
+    # And a clean run states the absence rather than omitting the key.
+    clean = _org(db, "CleanScopeCo")
+    _act(db, clean.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    clean_run = compute_co2e(db, clean.id)
+    assert cdp_export(db, clean.id, run_id=clean_run.id,
+                      intensity_denominator=1.0)["scope_assumptions"] is None
+
+    # The PDF is the artefact that actually gets filed — the caveat has to be ON THE PAGE,
+    # not merely in the JSON a preparer may never read.
+    import io
+
+    from pypdf import PdfReader
+
+    from app.reports.export import to_csv, to_pdf
+    pdf = to_pdf(payloads["esrs_e1"], framework_label="CSRD ESRS E1",
+                 organisation="FilingCo", generated_at="2026-01-01T00:00:00+00:00")
+    text = "".join(p.extract_text() for p in PdfReader(io.BytesIO(pdf)).pages)
+    assert "Assumed scope classification" in text
+    assert "purchased_steam_xyz" in text
+    assert "purchased energy" in text
+    assert "scope_assumptions" in to_csv(payloads["esrs_e1"])
+
+    # ...and the plain-text report, which PRINTS the scope split it qualifies.
+    from app.main import get_plain_report
+    txt = get_plain_report(run_id=rid, org=org, db=db).body.decode()
+    assert "By scope:" in txt
+    assert "ASSUMED SCOPE 3" in txt and "purchased_steam_xyz=1" in txt
+
+
+# --- live-vs-frozen: the category behind a filed run's breakdown --------------------
+
+def test_a_post_run_category_edit_cannot_move_a_filed_runs_breakdown(db):
+    """`by_category` and the assumed-scope caveat were the last aggregations in summary.py
+    reading through a live join to ActivityRecord.category, so renaming a category after
+    the run silently re-cut a FILED run's breakdown."""
+    org = _org(db, "EditCo")
+    _f, a = _steam(db, org.id)
+    run = compute_co2e(db, org.id)
+    before = summary(db, org.id, run.id)
+
+    a.category = "renamed_after_filing"
+    db.commit()
+
+    after = summary(db, org.id, run.id)
+    assert after["by_category"] == before["by_category"]
+    assert after["by_category"] == [
+        {"category": "purchased_steam_xyz", "co2e": pytest.approx(300.0)}]
+    assert after["scope_assumptions"] == before["scope_assumptions"]
+    # The frozen total is unaffected either way — the defect was WHICH ROW it sat in.
+    assert after["total_co2e"] == pytest.approx(300.0)
+
+
+# --- live-vs-frozen: the carrier and unit behind a filed energy figure ---------------
+
+def _energy_run(db):
+    """One reported carrier (electricity, in the kWh total) and one omitted one (LPG)."""
+    org = _org(db, "EnergyEditCo")
+    elec = _factor(db, 0.2, category="electricity", unit="kWh")
+    lpg = _factor(db, 1.5, category="lpg", unit="L")
+    a_elec = _act(db, org.id, elec, 1000.0)
+    a_lpg = _act(db, org.id, lpg, 500.0)
+    return org, a_elec, a_lpg, compute_co2e(db, org.id)
+
+
+def test_a_post_run_category_or_unit_edit_cannot_move_a_filed_energy_figure(db):
+    """`_energy_kwh` took its quantity from the frozen detail but its CARRIER and UNIT from
+    a live join to ActivityRecord, so editing either after the run re-cut a FILED SECR /
+    ESOS / ESRS E1-5 kWh figure, and moved a carrier in or out of `carriers_omitted` (the
+    completeness caveat), without the immutable run changing at all."""
+    from app.reports.secr import _energy_kwh
+    org, a_elec, a_lpg, run = _energy_run(db)
+    before = _energy_kwh(db, run)
+    assert before["total_kwh"] == pytest.approx(1000.0)
+    assert before["carriers_omitted"] == {"lpg": 1}
+
+    # Every post-filing edit that used to reach the figure: restate the reported carrier's
+    # UNIT, rename it out of the allowlist, and rename the omitted carrier INTO it.
+    a_elec.category = "electricity_uk"
+    a_elec.unit = "MWh"
+    a_lpg.category = "diesel"
+    db.commit()
+
+    after = _energy_kwh(db, run)
+    assert after["total_kwh"] == pytest.approx(1000.0)   # not 0, not 1_000_000, not 6_000
+    assert after["electricity"] == pytest.approx(1000.0)
+    assert after["diesel"] == 0.0            # LPG's 500 L never joins the diesel carrier
+    assert after["carriers_omitted"] == before["carriers_omitted"]
+    assert after["notes"] == before["notes"]
+
+
+def test_an_energy_line_frozen_before_the_carrier_freeze_still_reads_the_activity(db):
+    """The fallback is keyed on the KEY's absence, never on a falsy value: a line frozen
+    before the carrier/unit freeze has no better source than the live activity, while a
+    line that froze a NULL category must not silently fall back to a live rename."""
+    from app.models import EmissionLineItem
+    from app.reports.secr import _energy_kwh
+    org, a_elec, _a_lpg, run = _energy_run(db)
+    line = db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id, EmissionLineItem.activity_id == a_elec.id,
+        EmissionLineItem.method == "location").one()
+
+    d = json.loads(line.details)
+    del d["activity_category"], d["activity_unit"]        # a pre-freeze run
+    line.details = json.dumps(d)
+    db.commit()
+    assert _energy_kwh(db, run)["total_kwh"] == pytest.approx(1000.0)
+
+    # Frozen NULL: the carrier is unknown, so it is neither reported nor named as an
+    # omitted one — and a live category is NOT substituted for it.
+    d["activity_category"], d["activity_unit"] = None, "kWh"
+    line.details = json.dumps(d)
+    db.commit()
+    frozen_null = _energy_kwh(db, run)
+    assert frozen_null["total_kwh"] == 0.0
+    assert "electricity" not in (frozen_null.get("carriers_omitted") or {})
+    assert None not in (frozen_null.get("carriers_omitted") or {})

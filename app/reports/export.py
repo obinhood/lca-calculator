@@ -67,7 +67,9 @@ def _b_gri(db, org, p):
     return gri_report(db, org, run_id=_p(p, "run_id", _int),
                       base_run_id=_p(p, "base_run_id", _int),
                       intensity_denominator=_p(p, "intensity_denominator", _float),
-                      intensity_denominator_unit=_p(p, "intensity_denominator_unit", _str))
+                      intensity_denominator_unit=_p(p, "intensity_denominator_unit", _str),
+                      intensity_denominator_period_days=_p(
+                          p, "intensity_denominator_period_days", _int))
 
 def _b_cdp(db, org, p):
     from .cdp import cdp_export
@@ -139,7 +141,13 @@ def _b_sfdr(db, org, p):
     inc = p.get("include_scope3")
     return sfdr_pai_report(db, org,
                            portfolio_value_millions=_p(p, "portfolio_value_millions", _float),
-                           include_scope3=(True if inc in (None, "") else _bool(inc)))
+                           include_scope3=(True if inc in (None, "") else _bool(inc)),
+                           # PAI 2 is per EUR million: the denominator's currency travels
+                           # with an export, or the exported figure claims a unit it
+                           # cannot substantiate.
+                           portfolio_value_currency=_p(p, "portfolio_value_currency",
+                                                       _str, "EUR"),
+                           fx_year=_p(p, "fx_year", _int))
 
 def _b_sbti(db, org, p):
     from .sbti import sbti_report
@@ -438,6 +446,18 @@ def to_pdf(payload: dict, *, framework_label: str, organisation: str,
                 and k not in ("framework", "report_scope", "methodology",
                               "methodology_statement", "disclosure_ready", "filing_ready", "ok")]
         _table(rows[:40], "Reported values")
+
+    # --- Assumed scopes. This is the document that gets FILED, so the caveat has to be
+    # printed beside the figures it qualifies: where a category was unrecognised, which
+    # scope those emissions sit in is a machine guess, not a preparer's classification.
+    _sa = payload.get("scope_assumptions")
+    if isinstance(_sa, dict) and _sa.get("assumed_scope3_by_category"):
+        story.append(Paragraph("Assumed scope classification", h2))
+        story.append(Paragraph(
+            "Unrecognised categories defaulted to Scope 3 (activity count): "
+            + ", ".join(f"<b>{k}</b> — {v}" for k, v in
+                        sorted(_sa["assumed_scope3_by_category"].items())), body))
+        story.append(Paragraph(f"<i>{_sa.get('note', '')}</i>", body))
 
     # --- How each figure was arrived at. The point of the section is reperformance:
     # an assurer should be able to rebuild every number from what is printed here.

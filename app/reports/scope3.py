@@ -19,6 +19,76 @@ from ..services.ghgp import (
     CATEGORIES, GHGP_TAXONOMIES, UNASSIGNED_SOURCES, scope3_completeness,
     boundary_policy_for_run, boundary_policy_drift,
 )
+from ..services.pcaf import amounts_by_currency
+
+
+def _covered_exposure(covered: list, gross_currency) -> dict:
+    """Total the covered positions' exposure in ONE currency, or refuse to total it.
+
+    `covered` is the frozen details of the positions that carry investee emissions.
+    Positions are held in their own currencies, so this is only a quantity once they are
+    in one: summing them raw disclosed 1,000,000 JPY + 1,000,000 USD as 2,000,000 of
+    covered exposure, and 133% of a 1,500,000 USD gross.
+
+    Conversion uses ONLY what the run froze (services/pcaf.freeze_exposure_conversion) —
+    this module may not join the live fx_rates table, so a run frozen without a loaded
+    rate refuses here forever rather than acquiring a different number later.
+    """
+    by_ccy = amounts_by_currency(
+        (d.get("currency"), d.get("outstanding_amount") or 0.0) for d in covered)
+    out = {"exposure_covered_by_currency": {(c or "?"): round(v, 2)
+                                            for c, v in sorted(
+                                                by_ccy.items(),
+                                                key=lambda kv: (kv[0] is None, kv[0] or ""))},
+           "exposure_covered": None, "exposure_covered_currency": None,
+           "exposure_covered_refused_reason": None, "exposure_conversions": None}
+    want = (gross_currency or "").strip().upper() or None
+    present = list(by_ccy)
+
+    if not present:
+        out["exposure_covered"] = 0.0
+        out["exposure_covered_currency"] = want
+        return out
+    if present == [want] or (want is None and len(present) == 1 and present[0] is not None):
+        # Single currency, consistent with the declared gross (or no gross currency
+        # declared): the raw sum IS the exposure, and no rate is needed or invented.
+        out["exposure_covered"] = round(by_ccy[present[0]], 2)
+        out["exposure_covered_currency"] = present[0]
+        return out
+    if want is None:
+        out["exposure_covered_refused_reason"] = (
+            f"the covered positions span "
+            f"{', '.join(sorted(str(c or 'no currency') for c in present))} and the Cat 15 "
+            f"screen declares no gross_exposure_currency — there is no currency to state a "
+            f"total in, so one is not invented")
+        return out
+
+    # Mixed, or single-but-not-the-declared currency: use the frozen conversions.
+    total, conversions = 0.0, []
+    for d in covered:
+        amount = d.get("outstanding_in_declared_currency")
+        if amount is None or d.get("exposure_declared_currency") != want:
+            held = d.get("currency") or "no currency"
+            out["exposure_covered_refused_reason"] = (
+                d.get("exposure_fx_unavailable_reason")
+                or (f"position {d.get('position_id')} is in {held} and the declared gross "
+                    f"exposure is in {want}, but this run froze no {want} conversion for it "
+                    f"(runs frozen before the exposure FX conversion existed carry none) — "
+                    f"recompute with the rate loaded"))
+            return out
+        total += amount
+        if d.get("exposure_fx_rate") is not None and d.get("currency") != want:
+            conversions.append({"position_id": d.get("position_id"),
+                                "from": d.get("currency"), "to": want,
+                                "amount": d.get("outstanding_amount"),
+                                "rate": d.get("exposure_fx_rate"),
+                                "fx_rate_id": d.get("exposure_fx_rate_id"),
+                                "fx_rate_inverted": d.get("exposure_fx_rate_inverted"),
+                                "fx_year": d.get("exposure_fx_year")})
+    out["exposure_covered"] = round(total, 2)
+    out["exposure_covered_currency"] = want
+    out["exposure_conversions"] = conversions or None
+    return out
 
 
 def _financed_block(db, run, declaration=None) -> dict:
@@ -28,7 +98,7 @@ def _financed_block(db, run, declaration=None) -> dict:
         return {}
     kg = sum(r.co2e for r in rows)
     by_asset, primary_kg = {}, 0.0
-    covered_exposure = 0.0     # outstanding of positions that HAVE investee emissions
+    covered = []               # positions that HAVE investee emissions, frozen details
     for r in rows:
         d = json.loads(r.details or "{}")
         ac = d.get("asset_class", "?")
@@ -39,9 +109,25 @@ def _financed_block(db, run, declaration=None) -> dict:
         # emissions — a position with none contributes exposure but no emissions.
         if (d.get("investee_scope1_tco2e") is not None
                 or d.get("investee_scope2_tco2e") is not None):
-            covered_exposure += d.get("outstanding_amount") or 0.0
+            covered.append(d)
     gross_exposure = getattr(declaration, "gross_exposure_total", None) if declaration else None
     gross_currency = getattr(declaration, "gross_exposure_currency", None) if declaration else None
+    exp = _covered_exposure(covered, gross_currency)
+    covered_exposure = exp["exposure_covered"]
+    # The ratio is disclosable only when numerator and denominator are ONE currency. A
+    # refused numerator refuses the percentage with it — the reason travels, so a reader
+    # sees why the figure is absent instead of a plausible wrong one.
+    pct, pct_reason = None, None
+    if gross_exposure in (None, 0):
+        pct_reason = "no gross exposure is declared on the Cat 15 screen"
+    elif covered_exposure is None:
+        pct_reason = exp["exposure_covered_refused_reason"]
+    elif (exp["exposure_covered_currency"] and gross_currency
+            and exp["exposure_covered_currency"] != gross_currency.strip().upper()):
+        pct_reason = (f"covered exposure is in {exp['exposure_covered_currency']} and the "
+                      f"declared gross exposure in {gross_currency} — not comparable")
+    else:
+        pct = round(100.0 * covered_exposure / gross_exposure, 2)
     return {
         "tco2e": round(kg / 1000.0, 6),
         "positions": len(rows),
@@ -57,9 +143,16 @@ def _financed_block(db, run, declaration=None) -> dict:
         # IFRS S2 ¶B58-B63: gross exposure and the % of it these emissions cover.
         "gross_exposure_total": gross_exposure,
         "gross_exposure_currency": gross_currency,
-        "exposure_covered": round(covered_exposure, 2),
-        "pct_gross_exposure_covered": (round(100.0 * covered_exposure / gross_exposure, 2)
-                                       if gross_exposure else None),
+        "exposure_covered": covered_exposure,
+        "exposure_covered_currency": exp["exposure_covered_currency"],
+        # Always present, always correct, and needs no rate: the per-currency exposure is
+        # the raw fact behind the total, so a refused total still tells the reader what
+        # the portfolio holds.
+        "exposure_covered_by_currency": exp["exposure_covered_by_currency"],
+        "exposure_covered_refused_reason": exp["exposure_covered_refused_reason"],
+        "exposure_conversions": exp["exposure_conversions"],
+        "pct_gross_exposure_covered": pct,
+        "pct_gross_exposure_covered_refused_reason": pct_reason,
     }
 
 

@@ -754,6 +754,15 @@ def get_plain_report(run_id: Optional[int] = None,
     lines.append("\nBy scope:")
     for row in s["by_scope"]:
         lines.append(f"  Scope {row['scope']}: {row['co2e']:.2f} kgCO2e")
+    # This renderer PRINTS the scope split, so it must print the caveat when part of that
+    # split was guessed from an unrecognised category — otherwise the plain-text report is
+    # the one place the assumption becomes invisible.
+    _sa = s.get("scope_assumptions")
+    if _sa:
+        lines.append("  ASSUMED SCOPE 3 (unrecognised category, activity count): "
+                     + ", ".join(f"{c}={n}" for c, n in sorted(
+                         _sa["assumed_scope3_by_category"].items())))
+        lines.append("  " + _sa["note"])
     lines.append("\nBy category:")
     for row in s["by_category"]:
         lines.append(f"  {row.get('category','?')}: {row.get('co2e',0.0):.2f} kgCO2e")
@@ -1639,14 +1648,25 @@ def get_ecovadis_readiness(run_id: Optional[int] = None,
 @app.get("/reports/sfdr_pai")
 def get_sfdr_pai_report(portfolio_value_millions: Optional[float] = None,
                         include_scope3: bool = True,
+                        portfolio_value_currency: str = "EUR",
+                        fx_year: Optional[int] = None,
                         org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """PAI 1/2/3 over the PCAF portfolio.
+
+    ``portfolio_value_currency`` is the currency of ``portfolio_value_millions``: PAI 2 is
+    stated per EUR million, so a non-EUR value needs a loaded FX rate (``fx_year`` picks
+    the rate year; the portfolio's latest as-of year is used otherwise). Without one the
+    indicator is refused, never relabelled as EUR.
+    """
     from .reports.sfdr_pai import sfdr_pai_report
     if portfolio_value_millions is not None and (
             not math.isfinite(portfolio_value_millions) or portfolio_value_millions <= 0):
         raise HTTPException(status_code=400, detail="portfolio_value_millions must be finite > 0")
     return JSONResponse(with_guidance(sfdr_pai_report(db, org.id,
                                                       portfolio_value_millions=portfolio_value_millions,
-                                                      include_scope3=include_scope3)))
+                                                      include_scope3=include_scope3,
+                                                      portfolio_value_currency=portfolio_value_currency,
+                                                      fx_year=fx_year)))
 
 
 # --- Nature (TNFD LEAP + SBTN) -----------------------------------------------
@@ -2108,16 +2128,28 @@ def get_gri_report(run_id: Optional[int] = None,
                    base_run_id: Optional[int] = None,
                    intensity_denominator: Optional[float] = None,
                    intensity_denominator_unit: Optional[str] = None,
+                   intensity_denominator_period_days: Optional[int] = None,
                    org: Organisation = Depends(current_org),
                    db: Session = Depends(get_db)):
-    """GRI 305/302 content-index payload (305-5 needs base_run_id)."""
+    """GRI 305/302 content-index payload (305-5 needs base_run_id).
+
+    `intensity_denominator_period_days` is required alongside a denominator: 305-4/302-3
+    divide a period-scoped total by it, so a denominator covering a different span yields
+    a ratio wrong by that ratio of spans.
+    """
     if intensity_denominator is not None and (
             not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
         raise HTTPException(status_code=400,
                             detail="intensity_denominator must be a finite number > 0")
-    return JSONResponse(with_guidance(gri_report(db, org.id, run_id=run_id, base_run_id=base_run_id,
-                                   intensity_denominator=intensity_denominator,
-                                   intensity_denominator_unit=intensity_denominator_unit)))
+    if intensity_denominator_period_days is not None and intensity_denominator_period_days <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="intensity_denominator_period_days must be a positive number of days")
+    return JSONResponse(with_guidance(gri_report(
+        db, org.id, run_id=run_id, base_run_id=base_run_id,
+        intensity_denominator=intensity_denominator,
+        intensity_denominator_unit=intensity_denominator_unit,
+        intensity_denominator_period_days=intensity_denominator_period_days)))
 
 
 @app.get("/reports/iso_14064_2")

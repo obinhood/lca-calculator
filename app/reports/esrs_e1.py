@@ -108,18 +108,39 @@ def _e1_7(db: Session, run: CalculationRun, as_of: Optional[str] = None) -> dict
     }
 
 
-def _renewable_contractual_mwh(db: Session, run: CalculationRun) -> float:
+def _renewable_contractual_mwh(db: Session, run: CalculationRun) -> dict:
     """MWh covered by renewable contractual instruments (REC/PPA) in this run,
-    read from the FROZEN market-line allocations."""
+    read from the FROZEN market-line allocations, on BOTH bases.
+
+    The instrument pool is consumed in GROSS kWh by design — a REC covers physical MWh,
+    not your equity share of them (services/calc.py) — so ``gross_mwh`` is the instrument
+    volume. But ESRS E1-5 follows the CONSOLIDATION scope, and the ``total_mwh`` beside
+    this figure is entity-share weighted: a gross numerator over a consolidated
+    denominator is a renewable share on two different boundaries, which for a 40%-held
+    entity reads as 2.5x the covered share and can exceed 100%. ``consolidated_mwh``
+    applies the SAME frozen share_factor the energy total uses.
+    """
     rows = db.query(EmissionLineItem.details).filter(
         EmissionLineItem.run_id == run.id, EmissionLineItem.method == "market").all()
-    kwh = 0.0
+    gross_kwh = cons_kwh = 0.0
+    lines_without_share = 0
     for (details,) in rows:
         d = json.loads(details or "{}")
-        for alloc in d.get("allocations", []):
-            if alloc.get("instrument_type") in ("rec", "ppa"):
-                kwh += alloc.get("kwh_covered", 0.0) or 0.0
-    return kwh / 1000.0
+        share = (d.get("consolidation") or {}).get("share_factor")
+        covered = sum(alloc.get("kwh_covered", 0.0) or 0.0
+                      for alloc in d.get("allocations", [])
+                      if alloc.get("instrument_type") in ("rec", "ppa"))
+        if not covered:
+            continue
+        if share is None:
+            # A run frozen before the boundary dimension existed. 1.0 is what
+            # _energy_kwh assumes for the same rows, so the two stay on one basis.
+            lines_without_share += 1
+            share = 1.0
+        gross_kwh += covered
+        cons_kwh += covered * share
+    return {"gross_mwh": gross_kwh / 1000.0, "consolidated_mwh": cons_kwh / 1000.0,
+            "lines_without_share": lines_without_share}
 
 
 def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
@@ -171,17 +192,33 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     # SAME basis as the E1-6 emissions beside it — otherwise the payload implies
     # a wrong intensity (gross kWh over consolidated tCO2e).
     energy_kwh = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
-    renewable_mwh = _renewable_contractual_mwh(db, run)
+    renew = _renewable_contractual_mwh(db, run)
     total_mwh = energy_kwh["total_kwh"] / 1000.0
+    electricity_mwh = energy_kwh["electricity"] / 1000.0
+    # Weighted onto the SAME (consolidation) basis as total_mwh and the E1-6 emissions —
+    # the gross instrument volume is disclosed beside it, labelled, never as the share.
+    renewable_mwh = renew["consolidated_mwh"]
+    renewable_share = (round(100.0 * renewable_mwh / electricity_mwh, 2)
+                       if electricity_mwh > 0 else None)
     energy = {
         "total_mwh": round(total_mwh, 6),
         "by_carrier_mwh": {c: round(energy_kwh[c] / 1000.0, 6)
                            for c in ("electricity", "gas", "diesel")},
         "electricity_renewable_contractual_mwh": round(renewable_mwh, 6),
+        # The physical instrument volume (a REC covers gross MWh). NOT the numerator of
+        # the share — dividing it by the consolidated electricity above mixes boundaries.
+        "electricity_renewable_contractual_gross_mwh": round(renew["gross_mwh"], 6),
+        "electricity_renewable_share_pct": renewable_share,
+        "basis": "entity-share weighted (GHG Protocol Ch.3), the same basis as total_mwh "
+                 "and the E1-6 emissions — so the renewable share reconciles",
+        "renewable_lines_without_frozen_share": renew["lines_without_share"],
         "note": ("Scope 1/2 own-operations energy only. Renewable split covers "
                  "contractual instruments (REC/PPA) from the run's volume-matched "
                  "allocations; supplier fuel-mix data beyond instruments is not yet "
-                 "captured. " + " ".join(energy_kwh["notes"])),
+                 "captured. The instrument pool is consumed in GROSS kWh, so the covered "
+                 "volume is weighted by each line's frozen entity share before it is "
+                 "reported against the consolidated electricity total. "
+                 + " ".join(energy_kwh["notes"])),
     }
 
     # E1-6 Scope 3 by the 15 GHG Protocol categories (ESRS ¶51 / AR 46), from the
@@ -248,6 +285,9 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
         "framework": "CSRD ESRS E1",
         "disclosure_ready": not blockers,
         "blockers": blockers,
+        # E1-6 mandates gross emissions BY SCOPE, so an assumed scope is a caveat on a
+        # DISCLOSED figure, not an internal detail. None when nothing was assumed.
+        "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "reporting_period_id": run.reporting_period_id,
         "e1_6_gross_ghg_emissions_tco2e": {
