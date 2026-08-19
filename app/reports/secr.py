@@ -25,6 +25,7 @@ from ..services.units import convert, UnitConversionError
 from ..services.boundary import boundary_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
 from .summary import summary, run_factor_sources
+from ..services.frozen import parse_detail
 
 # Energy content used to express transport fuel as kWh for the SECR energy
 # figure. DEMO constant (net CV, DEFRA-style); replace with the licensed
@@ -94,7 +95,7 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
     # Scope 1/2, which was simply false, in a filed CSRD disclosure.
     omitted: dict = {}
     for _aid, _live_cat, _live_unit, _live_qty, details in rows:
-        _d = json.loads(details or "{}")
+        _d = parse_detail(details)
         # `in`, not a truthiness test: a run frozen before the category/unit freeze has
         # no better source than the live activity, but a run that froze a NULL category
         # must stay distinguishable from one that froze no category at all.

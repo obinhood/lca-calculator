@@ -23,6 +23,7 @@ import math
 from typing import Optional, Tuple
 
 from sqlalchemy.orm import Session
+from .frozen import parse_detail
 
 # The taxonomy version frozen onto every run and every Scope 3 line.
 GHGP_STANDARD_VERSION = "ghgp-scope3-2011"
@@ -570,7 +571,7 @@ def boundary_policy_drift(db: Session, run) -> dict:
             EmissionLineItem.run_id == run.id,
             EmissionLineItem.method == "location",
             EmissionLineItem.scope == "3").all():
-        d = json.loads(details or "{}")
+        d = parse_detail(details)
         cat = d.get("ghgp_category")
         if cat is None:
             continue
@@ -651,7 +652,7 @@ def scope3_completeness(db: Session, run) -> dict:
     for details, co2e in db.query(EmissionLineItem.details, EmissionLineItem.co2e)\
             .filter(EmissionLineItem.run_id == run.id,
                     EmissionLineItem.method == "location").all():
-        d = json.loads(details or "{}")
+        d = parse_detail(details)
         src = d.get("ghgp_category_source") or ""
         if src in UNASSIGNED_SOURCES:
             unassigned_sources[src] = unassigned_sources.get(src, 0) + 1
@@ -710,7 +711,7 @@ def scope3_completeness(db: Session, run) -> dict:
             if d.materiality_threshold_pct is None:
                 missing.append("materiality_threshold_pct")
             try:
-                crit = json.loads(d.criteria or "{}")
+                crit = parse_detail(d.criteria)
             except ValueError:
                 crit = {}
             absent = [k for k in SEVEN_CRITERIA if k not in crit or crit.get(k) is None]
@@ -736,7 +737,7 @@ def scope3_completeness(db: Session, run) -> dict:
         if rel == sectors.DOMINANT and d.status in ("not_applicable", "not_material",
                                                     "not_measured"):
             try:
-                _crit = json.loads(d.criteria or "{}")
+                _crit = parse_detail(d.criteria)
             except ValueError:
                 _crit = {}
             _sg = _crit.get("sector_guidance") or {}

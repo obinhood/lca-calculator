@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from ..models import EmissionLineItem
+from .frozen import parse_detail
 
 SBTI_MIN_ANNUAL_RATE = {"1.5C": 0.042, "WB2C": 0.025}
 # SBTi net-zero / long-term: minimum ~90% absolute reduction (residual offset).
@@ -80,7 +81,7 @@ def _cat15_double_declared(db: Session, run_id: int) -> bool:
         EmissionLineItem.co2e > 0).all()
     for (details,) in rows:
         try:
-            if (json.loads(details or "{}")).get("ghgp_category") == 15:
+            if parse_detail(details).get("ghgp_category") == 15:
                 return True
         except ValueError:
             continue
