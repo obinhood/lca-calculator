@@ -1813,7 +1813,10 @@ def create_engagement(run_id: int = Query(...), standard: str = Query(...),
                       org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import AssuranceEngagement, CalculationRun
     from .services.calc import _utcnow_iso
-    if standard not in ("ISAE_3410", "ISO_14064_3", "ISSA_5000"):
+    from .services.assurance_standards import (
+        VALID_STANDARDS, standard_permitted, run_period_start,
+    )
+    if standard not in VALID_STANDARDS:
         raise HTTPException(status_code=400, detail="standard must be ISAE_3410|ISO_14064_3|ISSA_5000")
     if level not in ("limited", "reasonable"):
         raise HTTPException(status_code=400, detail="level must be limited|reasonable")
@@ -1823,12 +1826,24 @@ def create_engagement(run_id: int = Query(...), standard: str = Query(...),
                                           CalculationRun.organisation_id == org.id).first()
     if run is None:
         raise HTTPException(status_code=404, detail="run_id not found for this organisation")
+    # ISAE 3410 is withdrawn with effect from 2026-12-15 and cannot govern a period
+    # beginning on or after it. Checked against the run's OWN period, not today: an
+    # engagement over FY2025 remains an ISAE 3410 engagement whenever it is opened.
+    # An unknown period warns rather than refuses — most runs are not period-scoped,
+    # and blocking them all would be a far larger error than the one being prevented.
+    period_start = run_period_start(db, run)
+    verdict = standard_permitted(standard, period_start)
+    if not verdict["permitted"]:
+        raise HTTPException(status_code=400, detail=verdict["reason"])
     eng = AssuranceEngagement(organisation_id=org.id, run_id=run_id, standard=standard,
                               level=level, assuror_name=assuror_name,
                               period_label=period_label, materiality_pct=materiality_pct,
                               status="planned", created_at=_utcnow_iso())
     db.add(eng); db.commit(); db.refresh(eng)
-    return {"id": eng.id, "run_id": run_id, "standard": standard, "level": level}
+    out = {"id": eng.id, "run_id": run_id, "standard": standard, "level": level}
+    if verdict.get("warning"):
+        out["warning"] = verdict["warning"]
+    return out
 
 
 def _own_engagement(db: Session, org: Organisation, engagement_id: int):

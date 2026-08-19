@@ -17,7 +17,7 @@ narrative and, for most frameworks, independent assurance. Both are reported alo
 """
 from typing import Any, Dict, List, Optional
 
-from .compliance_requirements import REQUIREMENTS
+from .compliance_requirements import REQUIREMENTS, requirements_for
 
 # ---------------------------------------------------------------------------------------
 # Numeric / categorical thresholds: what the standard expects vs what the run achieved.
@@ -213,7 +213,11 @@ def _evaluate_threshold(payload: dict, spec: dict) -> dict:
 
 def evaluate(framework_key: str, payload: dict) -> dict:
     """Required-data checklist + threshold gaps for one report."""
-    reqs = REQUIREMENTS.get(framework_key)
+    # Assurance requirements are resolved against the PERIOD BEING ASSURED, which
+    # the readiness payload carries; every other framework's list is static and
+    # requirements_for() returns it unchanged.
+    period_start = ((payload or {}).get("assurance_standard") or {}).get("period_start")
+    reqs = requirements_for(framework_key, period_start=period_start)
     if reqs is None:
         return {"assessable": False,
                 "note": f"no required-data checklist is defined for {framework_key!r}"}

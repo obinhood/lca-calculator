@@ -14,6 +14,7 @@ from ..models import (
     CalculationRun, EmissionLineItem, AssuranceEngagement, AssuranceFinding,
 )
 from ..reports.summary import summary
+from .assurance_standards import applicable_standards, run_period_start
 
 
 def readiness_assessment(db: Session, run: CalculationRun) -> dict:
@@ -57,7 +58,15 @@ def readiness_assessment(db: Session, run: CalculationRun) -> dict:
         f"{n_traceable}/{n_lines} line items carry a frozen factor id")
 
     ready = all(c["pass"] for c in checks)
+    # WHICH standard the engagement falls under is decided by the period being
+    # assured, not by today's date: ISAE 3410 is withdrawn with effect from
+    # 2026-12-15 and superseded by ISSA 5000. Resolving it here (from the run's own
+    # frozen period link) keeps a historical run citing the standard that actually
+    # governed it, instead of every past engagement silently restating itself the
+    # moment the clock passes the cutoff.
+    period_start = run_period_start(db, run)
     return {"ready": ready, "checks": checks,
+            "assurance_standard": applicable_standards(period_start),
             "note": "Automated readiness against assurance criteria; does not "
                     "constitute assurance — an accredited assuror must perform the "
                     "engagement."}

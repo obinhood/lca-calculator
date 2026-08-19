@@ -187,10 +187,14 @@ REQUIREMENTS: Dict[str, List[Req]] = {
         _u("ISO 14068-1 §9", "Public carbon-neutrality declaration with claim wording"),
         _a("ISO 14068-1 §10", "Independent validation/verification of the neutrality claim"),
     ],
+    # The IAASB rows here are RESOLVED BY PERIOD, not listed statically -- see
+    # `requirements_for()` at the foot of this module. ISAE 3410 is withdrawn with
+    # effect from 15 Dec 2026, so citing its paragraphs unconditionally would state a
+    # withdrawn standard as a live obligation for every period after that date. This
+    # base list therefore holds only the period-independent row; the assurance-standard
+    # rows are appended per period.
     "assurance_readiness": [
         _p("ISO 14064-1 §9", "Inventory documented and traceable to source", "ready"),
-        _u("ISAE 3410 ¶17", "Agreed level of assurance and materiality with the practitioner"),
-        _a("ISAE 3410 ¶69", "Assurance report / opinion issued"),
     ],
 
     # -------------------------------------------------------- Compliance & carbon pricing
@@ -349,3 +353,59 @@ REQUIREMENTS: Dict[str, List[Req]] = {
         _u("EcoVadis themes", "Labour & Human Rights, Ethics, Sustainable Procurement themes"),
     ],
 }
+
+
+# ---------------------------------------------------------------------------------
+# Period-resolved requirements
+#
+# Most frameworks' requirement lists are static. Assurance is not: the applicable
+# IAASB standard is determined by the PERIOD BEING ASSURED (ISAE 3410 withdrawn with
+# effect from 15 Dec 2026, superseded by ISSA 5000), so the rows have to be resolved
+# rather than hard-coded. Keying it off today's date would silently restate the
+# obligations of every historical engagement the moment the clock passed the cutoff.
+
+_ISAE_3410_ROWS = [
+    _u("ISAE 3410 \u00b617", "Agreed level of assurance and materiality with the practitioner"),
+    _a("ISAE 3410 \u00b669", "Assurance report / opinion issued"),
+]
+
+_ISSA_5000_ROWS = [
+    _u("ISSA 5000 \u00b6\u00b6 40-49", "Agreed engagement terms, assurance level and materiality "
+                                        "with the practitioner"),
+    _a("ISSA 5000 \u00b6\u00b6 197-206", "Assurance report / conclusion issued"),
+]
+
+# Neither standard resolved: state BOTH with the condition that selects them, so the
+# checklist stays complete and the reader can settle it once the period is known. The
+# alternative -- picking one -- would be a guess presented as a requirement.
+_UNRESOLVED_ROWS = [
+    _u("ISAE 3410 \u00b617 (periods beginning before 2026-12-15)",
+       "Agreed level of assurance and materiality with the practitioner"),
+    _a("ISAE 3410 \u00b669 (periods beginning before 2026-12-15)",
+       "Assurance report / opinion issued"),
+    _u("ISSA 5000 \u00b6\u00b6 40-49 (periods beginning on or after 2026-12-15)",
+       "Agreed engagement terms, assurance level and materiality with the practitioner"),
+    _a("ISSA 5000 \u00b6\u00b6 197-206 (periods beginning on or after 2026-12-15)",
+       "Assurance report / conclusion issued"),
+]
+
+
+def requirements_for(framework_key: str, period_start=None):
+    """Requirement rows for a framework, resolved against the assured period.
+
+    Identical to ``REQUIREMENTS[framework_key]`` for every framework except
+    ``assurance_readiness``, whose IAASB rows depend on when the period begins.
+    ``period_start`` of None means unknown, which yields both standards' rows
+    labelled with their conditions -- never a silent default to either.
+    """
+    base = REQUIREMENTS.get(framework_key)
+    if base is None or framework_key != "assurance_readiness":
+        return base
+
+    from ..services.assurance_standards import applicable_standards
+    verdict = applicable_standards(period_start)
+    if not verdict["determinable"]:
+        return list(base) + _UNRESOLVED_ROWS
+    if "ISSA_5000" in verdict["applicable"] and "ISAE_3410" in verdict["withdrawn"]:
+        return list(base) + _ISSA_5000_ROWS
+    return list(base) + _ISAE_3410_ROWS
