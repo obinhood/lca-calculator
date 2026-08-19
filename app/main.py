@@ -1,5 +1,6 @@
 import hashlib
 import json as _json
+from io import BytesIO as io_BytesIO
 import math
 import secrets
 from typing import Optional
@@ -2001,6 +2002,230 @@ def get_engagement_lineage(engagement_id: int, x_api_key: Optional[str] = Header
                          "quantity": a.quantity, "unit": a.unit, "source_file": a.source_file},
         } for li, a in rows],
     }
+
+
+def _csv_str(value) -> str:
+    """A CSV cell as a clean string; blank/NaN become "" rather than the text "nan".
+
+    pandas represents an empty cell as NaN, which is TRUTHY, so ``value or ""``
+    yields "nan" and sails through every emptiness check downstream.
+    """
+    if value is None:
+        return ""
+    s = str(value).strip()
+    return "" if s.lower() in ("nan", "nat", "none") else s
+
+
+# --- Hourly Scope 2 (proposed GHG Protocol revision: temporal matching) -------
+# A PARALLEL method beside the annual location/market figures. Nothing here feeds
+# compute_co2e, so an organisation with no hourly data is unaffected in every way.
+
+@app.post("/hourly/certificates")
+def create_granular_certificate(
+        issuer: str = Query(...), certificate_ref: str = Query(...),
+        production_start: str = Query(...), production_end: str = Query(...),
+        kwh: float = Query(...), grid_region: str = Query(...),
+        technology: Optional[str] = None, production_device_id: Optional[str] = None,
+        kg_co2e_per_kwh: float = 0.0,
+        org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """Register an hourly energy attribute certificate (EnergyTag-shaped)."""
+    from .models import GranularCertificate
+    from .services.calc import _utcnow_iso
+    from .services.hourly_scope2 import _parse_hour
+    if not math.isfinite(kwh) or kwh <= 0:
+        raise HTTPException(status_code=400, detail="kwh must be a positive finite number")
+    if not math.isfinite(kg_co2e_per_kwh) or kg_co2e_per_kwh < 0:
+        raise HTTPException(status_code=400, detail="kg_co2e_per_kwh must be >= 0")
+    s, e = _parse_hour(production_start), _parse_hour(production_end)
+    if s is None or e is None:
+        raise HTTPException(status_code=400,
+                            detail="production_start/end must be ISO-8601 datetimes")
+    if e <= s:
+        raise HTTPException(status_code=400, detail="production_end must be after production_start")
+    dup = db.query(GranularCertificate).filter(
+        GranularCertificate.issuer == issuer,
+        GranularCertificate.certificate_ref == certificate_ref).first()
+    if dup is not None:
+        # Global uniqueness is the anti-double-counting guard: the same certificate
+        # loaded twice under two ids would be matched twice.
+        raise HTTPException(status_code=409,
+                            detail=f"certificate {issuer}/{certificate_ref} already registered")
+    c = GranularCertificate(
+        organisation_id=org.id, issuer=issuer, certificate_ref=certificate_ref,
+        production_start=production_start, production_end=production_end, kwh=kwh,
+        technology=technology, grid_region=grid_region,
+        production_device_id=production_device_id,
+        kg_co2e_per_kwh=kg_co2e_per_kwh, created_at=_utcnow_iso())
+    db.add(c); db.commit(); db.refresh(c)
+    return {"id": c.id, "issuer": c.issuer, "certificate_ref": c.certificate_ref,
+            "kwh": c.kwh, "grid_region": c.grid_region}
+
+
+@app.post("/hourly/certificates/{certificate_id}/retire")
+def retire_granular_certificate(certificate_id: int, reporting_period_id: int = Query(...),
+                                org: Organisation = Depends(current_org),
+                                db: Session = Depends(get_db)):
+    """Retire a certificate against ONE reporting period.
+
+    Retirement is the double-counting guard and it is one-way: a certificate already
+    retired against a different period cannot be re-retired, because that is exactly
+    the claim the guard exists to prevent.
+    """
+    from .models import GranularCertificate, ReportingPeriod
+    from .services.calc import _utcnow_iso
+    c = db.query(GranularCertificate).filter(
+        GranularCertificate.id == certificate_id,
+        GranularCertificate.organisation_id == org.id).first()
+    if c is None:
+        raise HTTPException(status_code=404, detail="certificate not found for this organisation")
+    p = db.query(ReportingPeriod).filter(
+        ReportingPeriod.id == reporting_period_id,
+        ReportingPeriod.organisation_id == org.id).first()
+    if p is None:
+        raise HTTPException(status_code=404, detail="reporting period not found for this organisation")
+    if c.retired_for_period_id is not None and c.retired_for_period_id != reporting_period_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"certificate already retired against period {c.retired_for_period_id}; "
+                   f"retiring it again would be the double count this guard prevents")
+    c.retired_for_period_id = reporting_period_id
+    c.retired_at = c.retired_at or _utcnow_iso()
+    db.commit()
+    return {"id": c.id, "retired_for_period_id": c.retired_for_period_id,
+            "retired_at": c.retired_at}
+
+
+@app.post("/hourly/loads")
+def upload_hourly_load(file: UploadFile = File(...),
+                       org: Organisation = Depends(current_org),
+                       db: Session = Depends(get_db)):
+    """Upload metered hourly consumption. CSV: hour_start,kwh,grid_region[,metering_point].
+
+    A row that cannot be parsed is REJECTED and reported, never coerced to zero — an
+    hour silently scored as zero load would count as perfectly matched.
+    """
+    from .models import HourlyLoad
+    from .services.calc import _utcnow_iso
+    from .services.hourly_scope2 import _parse_hour
+    raw = file.file.read()
+    try:
+        df = pd.read_csv(io_BytesIO(raw))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"could not parse CSV: {exc}")
+    df.columns = [c.strip().lower() for c in df.columns]
+    required = {"hour_start", "kwh", "grid_region"}
+    missing = required - set(df.columns)
+    if missing:
+        raise HTTPException(status_code=400,
+                            detail=f"CSV is missing required column(s): {sorted(missing)}")
+    accepted, rejected = 0, []
+    for i, row in df.iterrows():
+        hour = _csv_str(row.get("hour_start"))
+        if _parse_hour(hour) is None:
+            rejected.append({"row": int(i), "reason": "unparseable hour_start", "value": hour})
+            continue
+        try:
+            kwh = float(row.get("kwh"))
+        except (TypeError, ValueError):
+            rejected.append({"row": int(i), "reason": "non-numeric kwh"})
+            continue
+        if not math.isfinite(kwh) or kwh < 0:
+            rejected.append({"row": int(i), "reason": "kwh must be finite and >= 0"})
+            continue
+        # pandas reads an empty cell as NaN, and NaN is TRUTHY — so `x or ""`
+        # yields the string "nan", which passes an emptiness check and would store a
+        # load row against a region called "nan" that can never match a certificate.
+        # This is the same trap services/ingestion.py documents.
+        region = _csv_str(row.get("grid_region"))
+        if not region:
+            rejected.append({"row": int(i), "reason": "missing grid_region"})
+            continue
+        point = _csv_str(row.get("metering_point")) or "default"
+        existing = db.query(HourlyLoad).filter(
+            HourlyLoad.organisation_id == org.id, HourlyLoad.metering_point == point,
+            HourlyLoad.hour_start == hour, HourlyLoad.entity_id.is_(None)).first()
+        if existing is not None:
+            existing.kwh, existing.grid_region = kwh, region
+        else:
+            db.add(HourlyLoad(organisation_id=org.id, metering_point=point,
+                              hour_start=hour, kwh=kwh, grid_region=region,
+                              source_file=file.filename, created_at=_utcnow_iso()))
+        accepted += 1
+    db.commit()
+    return {"accepted": accepted, "rejected": len(rejected), "rejections": rejected[:50],
+            "note": "Rejected rows are NOT stored as zero-load hours; they are absent, "
+                    "and the matching report counts the resulting hour gap."}
+
+
+@app.post("/reference/hourly_grid_intensity")
+def add_hourly_grid_intensity(grid_region: str = Query(...), hour_start: str = Query(...),
+                              kg_co2e_per_kwh_average: float = Query(...),
+                              source: str = Query(...),
+                              kg_co2e_per_kwh_residual: Optional[float] = None,
+                              version: str = "1",
+                              org: Organisation = Depends(current_org),
+                              db: Session = Depends(get_db)):
+    """Reference intensity for one region-hour: grid average and residual mix."""
+    from .models import HourlyGridIntensity
+    from .services.calc import _utcnow_iso
+    from .services.hourly_scope2 import _parse_hour
+    if _parse_hour(hour_start) is None:
+        raise HTTPException(status_code=400, detail="hour_start must be an ISO-8601 datetime")
+    for nm, v in (("kg_co2e_per_kwh_average", kg_co2e_per_kwh_average),
+                  ("kg_co2e_per_kwh_residual", kg_co2e_per_kwh_residual)):
+        if v is not None and (not math.isfinite(v) or v < 0):
+            raise HTTPException(status_code=400, detail=f"{nm} must be finite and >= 0")
+    if (kg_co2e_per_kwh_residual is not None
+            and kg_co2e_per_kwh_residual + 1e-9 < kg_co2e_per_kwh_average):
+        # Residual strips out attributes other purchasers already claimed, so it can
+        # never be below the average. A lower value is proof of a wrong row.
+        raise HTTPException(
+            status_code=400,
+            detail="residual intensity below the grid average is arithmetically "
+                   "impossible — the residual mix has other purchasers' clean "
+                   "attributes removed and is always >= the average")
+    row = HourlyGridIntensity(
+        grid_region=grid_region, hour_start=hour_start,
+        kg_co2e_per_kwh_average=kg_co2e_per_kwh_average,
+        kg_co2e_per_kwh_residual=kg_co2e_per_kwh_residual,
+        source=source, version=version, created_at=_utcnow_iso())
+    db.add(row); db.commit(); db.refresh(row)
+    return {"id": row.id, "grid_region": row.grid_region, "hour_start": row.hour_start}
+
+
+@app.post("/hourly/deliverability_links")
+def create_deliverability_link(from_region: str = Query(...), to_region: str = Query(...),
+                               basis: str = Query(...), rationale: Optional[str] = None,
+                               org: Organisation = Depends(current_org),
+                               db: Session = Depends(get_db)):
+    """Declare that certificates from one region are physically deliverable to another."""
+    from .models import DeliverabilityLink
+    from .services.calc import _utcnow_iso
+    if from_region.strip().upper() == to_region.strip().upper():
+        raise HTTPException(status_code=400,
+                            detail="same-region supply is deliverable implicitly; no link needed")
+    link = DeliverabilityLink(organisation_id=org.id, from_region=from_region,
+                              to_region=to_region, basis=basis, rationale=rationale,
+                              created_at=_utcnow_iso())
+    db.add(link); db.commit(); db.refresh(link)
+    return {"id": link.id, "from_region": link.from_region, "to_region": link.to_region}
+
+
+@app.get("/reports/hourly_scope2")
+def get_hourly_scope2(reporting_period_id: int, include_hours: bool = False,
+                      org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """Hourly temporal matching for one reporting period.
+
+    The CFE score, the matched/unmatched split, hourly market-based emissions, hour
+    coverage, and every reason a certificate did not count. A PARALLEL method: the
+    annual location and market figures on the run are untouched.
+    """
+    from .services.hourly_scope2 import match
+    result = match(db, org.id, reporting_period_id)
+    if not include_hours:
+        result.pop("hours", None)
+    return JSONResponse(with_guidance(result))
 
 
 @app.get("/assurance/evidence_pack")
