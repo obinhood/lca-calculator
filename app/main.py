@@ -1813,7 +1813,10 @@ def create_engagement(run_id: int = Query(...), standard: str = Query(...),
                       org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import AssuranceEngagement, CalculationRun
     from .services.calc import _utcnow_iso
-    if standard not in ("ISAE_3410", "ISO_14064_3", "ISSA_5000"):
+    from .services.assurance_standards import (
+        VALID_STANDARDS, standard_permitted, run_period_start,
+    )
+    if standard not in VALID_STANDARDS:
         raise HTTPException(status_code=400, detail="standard must be ISAE_3410|ISO_14064_3|ISSA_5000")
     if level not in ("limited", "reasonable"):
         raise HTTPException(status_code=400, detail="level must be limited|reasonable")
@@ -1823,12 +1826,24 @@ def create_engagement(run_id: int = Query(...), standard: str = Query(...),
                                           CalculationRun.organisation_id == org.id).first()
     if run is None:
         raise HTTPException(status_code=404, detail="run_id not found for this organisation")
+    # ISAE 3410 is withdrawn with effect from 2026-12-15 and cannot govern a period
+    # beginning on or after it. Checked against the run's OWN period, not today: an
+    # engagement over FY2025 remains an ISAE 3410 engagement whenever it is opened.
+    # An unknown period warns rather than refuses — most runs are not period-scoped,
+    # and blocking them all would be a far larger error than the one being prevented.
+    period_start = run_period_start(db, run)
+    verdict = standard_permitted(standard, period_start)
+    if not verdict["permitted"]:
+        raise HTTPException(status_code=400, detail=verdict["reason"])
     eng = AssuranceEngagement(organisation_id=org.id, run_id=run_id, standard=standard,
                               level=level, assuror_name=assuror_name,
                               period_label=period_label, materiality_pct=materiality_pct,
                               status="planned", created_at=_utcnow_iso())
     db.add(eng); db.commit(); db.refresh(eng)
-    return {"id": eng.id, "run_id": run_id, "standard": standard, "level": level}
+    out = {"id": eng.id, "run_id": run_id, "standard": standard, "level": level}
+    if verdict.get("warning"):
+        out["warning"] = verdict["warning"]
+    return out
 
 
 def _own_engagement(db: Session, org: Organisation, engagement_id: int):
@@ -1986,6 +2001,42 @@ def get_engagement_lineage(engagement_id: int, x_api_key: Optional[str] = Header
                          "quantity": a.quantity, "unit": a.unit, "source_file": a.source_file},
         } for li, a in rows],
     }
+
+
+@app.get("/assurance/evidence_pack")
+def get_evidence_pack(run_id: Optional[int] = None, max_lines: int = 5000,
+                      uncertainty_iterations: int = 10000,
+                      org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """The assurance working-paper file for one run, assembled and hash-stamped.
+
+    Inventory statement, reporting period, organisational boundary, transaction
+    detail with full factor lineage, factor register, mapping decisions,
+    completeness controls, data quality and uncertainty, methodology versions, and
+    readiness with the applicable assurance standard — all from frozen run state,
+    so the same run yields the same ``content_hash`` years later.
+
+    ``evidence_gaps`` names, with reasons, what an ISAE 3410 / ISSA 5000 file
+    expects that this platform cannot produce — reviewer identity, override
+    before/after values, GL coding. A pack that omitted them would read as
+    complete to the one person who most needs to know it is not.
+    """
+    from .services.evidence_pack import build_evidence_pack
+    if not (1 <= max_lines <= 100000):
+        raise HTTPException(status_code=400, detail="max_lines must be 1..100000")
+    if not (1000 <= uncertainty_iterations <= 200000):
+        raise HTTPException(status_code=400,
+                            detail="uncertainty_iterations must be 1000..200000")
+    if run_id is not None:
+        run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                              CalculationRun.organisation_id == org.id).first()
+    else:
+        run = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
+            .order_by(CalculationRun.id.desc()).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found for this organisation")
+    return JSONResponse(build_evidence_pack(
+        db, run, max_lines=max_lines, uncertainty_iterations=uncertainty_iterations))
 
 
 @app.get("/reports/assurance_readiness")

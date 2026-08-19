@@ -110,19 +110,30 @@ FRAMEWORKS = {
         "name": "ISAE 3410 (assurance on GHG statements)",
         "category": "Assurance", "jurisdiction": "global (IAASB)",
         "authority": "IAASB", "platform_support": "built", "endpoint": "/assurance/engagements",
-        "applies_to": "Assurance engagements on greenhouse-gas statements.",
+        "applies_to": "Assurance engagements on greenhouse-gas statements for periods "
+                      "beginning BEFORE 2026-12-15. WITHDRAWN with effect from that date.",
         "key_points": [
+            "WITHDRAWN by the IAASB with effect from 2026-12-15, superseded by ISSA 5000. "
+            "It still governs engagements over periods that began before that date — "
+            "applicability follows the period assured, never today's date.",
             "Distinguish limited vs reasonable assurance in procedures and wording.",
             "Determine materiality; design procedures to detect material misstatement.",
             "Evidence must trace each reported figure to source records and factors.",
+            "The platform refuses to open an ISAE 3410 engagement over a period "
+            "beginning on or after 2026-12-15.",
         ],
     },
     "issa_5000": {
         "name": "ISSA 5000 (general sustainability assurance)",
         "category": "Assurance", "jurisdiction": "global (IAASB)",
         "authority": "IAASB", "platform_support": "built", "endpoint": "/assurance/engagements",
-        "applies_to": "Overarching sustainability-information assurance (incl. GHG).",
+        "applies_to": "Overarching sustainability-information assurance (incl. GHG). "
+                      "Effective for periods beginning on or after 2026-12-15.",
         "key_points": [
+            "Effective for sustainability information reported for periods beginning on "
+            "or after 2026-12-15, or as at a date on or after it; supersedes ISAE 3410.",
+            "Early application to earlier periods is permitted, so the platform never "
+            "refuses ISSA 5000 on the grounds that a period is too early.",
             "Framework-agnostic; applies to CSRD/ISSB-aligned disclosures.",
             "Escalating rigour from limited to reasonable assurance.",
         ],
