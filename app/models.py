@@ -1178,3 +1178,123 @@ class NatureTarget(Base):
     target_year = Column(Integer, nullable=False)
     validated = Column(Boolean, nullable=False, default=False)   # SBTN-validated target
     created_at = Column(String)
+
+
+# --- Hourly Scope 2 (GHG Protocol Scope 2 revision: temporal matching) -------
+# A PARALLEL method beside annual location- and market-based accounting, never a
+# replacement: no existing figure moves. The revision under consultation would
+# require energy attribute certificates to be matched to consumption HOURLY and
+# within physically deliverable boundaries, so the three tables below carry the
+# hour dimension the annual model has no place for.
+
+class GranularCertificate(Base):
+    """An hourly-timestamped energy attribute certificate (EnergyTag-shaped).
+
+    Retirement is the anti-double-counting mechanism and it is structural, not a
+    check: a certificate carries the ONE period it was retired against, and the
+    matcher will not consider a certificate retired against a different period.
+    (issuer, certificate_ref) is globally unique so the same certificate cannot be
+    loaded twice under two ids and matched twice.
+
+    `kg_co2e_per_kwh` is usually 0 for renewables but is stored rather than
+    assumed — a carbon-free-energy claim covering nuclear or biomass is not
+    automatically zero-carbon, and hard-coding zero would quietly convert an
+    attribute claim into an emissions claim.
+    """
+    __tablename__ = "granular_certificates"
+    __table_args__ = (
+        UniqueConstraint("issuer", "certificate_ref", name="uq_gc_issuer_ref"),
+        CheckConstraint("kwh > 0", name="ck_gc_kwh_pos"),
+        CheckConstraint("kg_co2e_per_kwh >= 0", name="ck_gc_intensity_nonneg"),
+        CheckConstraint("production_end > production_start", name="ck_gc_window"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    issuer = Column(String, nullable=False)
+    certificate_ref = Column(String, nullable=False)
+    # ISO-8601 UTC instants bounding the production window. End is EXCLUSIVE, so an
+    # hourly certificate is [13:00, 14:00) and two consecutive hours cannot overlap.
+    production_start = Column(String, nullable=False)
+    production_end = Column(String, nullable=False)
+    kwh = Column(Float, nullable=False)
+    technology = Column(String, nullable=True)        # solar | wind | hydro | nuclear | ...
+    grid_region = Column(String, nullable=False)      # bidding zone / market the device sits in
+    production_device_id = Column(String, nullable=True)
+    kg_co2e_per_kwh = Column(Float, nullable=False, default=0.0)
+    retired_at = Column(String, nullable=True)
+    retired_for_period_id = Column(Integer, ForeignKey("reporting_periods.id"), nullable=True)
+    created_at = Column(String)
+
+
+class HourlyLoad(Base):
+    """Metered electricity consumption for one hour, one entity, one grid region.
+
+    A MISSING hour is missing — never a zero. The matcher reports hour coverage and
+    refuses to present a partial period's CFE score as a whole-period figure,
+    because an unmetered hour silently scored as fully matched (load 0, matched 0)
+    would inflate every score toward 100%.
+    """
+    __tablename__ = "hourly_loads"
+    __table_args__ = (
+        UniqueConstraint("organisation_id", "entity_id", "metering_point", "hour_start",
+                         name="uq_hourly_load_point_hour"),
+        CheckConstraint("kwh >= 0", name="ck_hourly_load_nonneg"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    entity_id = Column(Integer, ForeignKey("reporting_entities.id"), nullable=True)
+    metering_point = Column(String, nullable=False, default="default")
+    hour_start = Column(String, nullable=False)       # ISO-8601 UTC, start of the hour
+    kwh = Column(Float, nullable=False)
+    grid_region = Column(String, nullable=False)
+    source_file = Column(String, nullable=True)
+    created_at = Column(String)
+
+
+class HourlyGridIntensity(Base):
+    """Average and residual grid intensity for one region-hour.
+
+    Both are stored because they answer different questions and must never be
+    substituted for one another: the average prices a location-based hour, the
+    RESIDUAL prices unmatched market-based load once other purchasers' attributes
+    are stripped out. Residual is always >= average; the annual engine already
+    encodes that rule and it holds hour by hour too.
+    """
+    __tablename__ = "hourly_grid_intensities"
+    __table_args__ = (
+        UniqueConstraint("grid_region", "hour_start", "source", "version",
+                         name="uq_hourly_intensity_region_hour_source"),
+        CheckConstraint("kg_co2e_per_kwh_average >= 0", name="ck_hgi_avg_nonneg"),
+    )
+    id = Column(Integer, primary_key=True)
+    grid_region = Column(String, nullable=False)
+    hour_start = Column(String, nullable=False)       # ISO-8601 UTC
+    kg_co2e_per_kwh_average = Column(Float, nullable=False)
+    kg_co2e_per_kwh_residual = Column(Float, nullable=True)
+    source = Column(String, nullable=False)
+    version = Column(String, nullable=False, default="1")
+    created_at = Column(String)
+
+
+class DeliverabilityLink(Base):
+    """A declared physical-deliverability relationship between two grid regions.
+
+    The proposed Scope 2 revision confines certificates to load they could actually
+    reach. Same-region is always deliverable and needs no row; this table records
+    the DECLARED exceptions (an interconnector, a combined bidding zone), so every
+    cross-region match rests on a stated policy rather than on the matcher's
+    goodwill. Direction matters: a link is from the certificate's region TO the
+    load's region.
+    """
+    __tablename__ = "deliverability_links"
+    __table_args__ = (
+        UniqueConstraint("organisation_id", "from_region", "to_region",
+                         name="uq_deliverability_pair"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    from_region = Column(String, nullable=False)      # where the certificate was produced
+    to_region = Column(String, nullable=False)        # where the load sits
+    basis = Column(String, nullable=False)            # interconnector | single_bidding_zone | ...
+    rationale = Column(Text, nullable=True)
+    created_at = Column(String)

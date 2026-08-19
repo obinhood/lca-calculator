@@ -37,6 +37,15 @@ FRAMEWORKS = {
             "Market-based uses contractual instruments in a hierarchy: energy attribute certificates / PPAs / supplier-specific rates, then residual mix, then grid average.",
             "Instrument MWh must not exceed metered consumption (volume matching); the remainder falls to residual mix / grid.",
             "Disclose when no residual-mix factor exists (double-counting risk).",
+            "REVISION IN CONSULTATION (not yet in force): the proposed update would "
+            "require certificates to be matched to consumption HOURLY and within "
+            "physically deliverable boundaries, plus a marginal-emissions-impact "
+            "metric. First consultation closed 2026-01-31; a revised draft is "
+            "expected during 2026 and the final text in late 2027.",
+            "The platform computes hourly matching as a PARALLEL method at "
+            "/reports/hourly_scope2 — a CFE score, hourly market-based emissions and "
+            "hour coverage. It does NOT feed the annual figures above, because the "
+            "revision is not in force and the current guidance is what applies today.",
         ],
     },
     "ghg_protocol_scope3": {
