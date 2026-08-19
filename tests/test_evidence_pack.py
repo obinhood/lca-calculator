@@ -397,3 +397,62 @@ def test_endpoint_rejects_out_of_range_parameters(env, params):
     r = client.get("/assurance/evidence_pack",
                    params={"run_id": run_id, **params}, headers=hdr_b)
     assert r.status_code == 400
+
+
+# --- one corrupt row must not blank every report ----------------------------
+
+def test_corrupt_line_details_no_longer_break_the_pack(db):
+    """REGRESSION. reports/summary.py called json.loads bare on every line's frozen
+    details, so ONE malformed blob raised and took down /results/summary and every
+    renderer built on it — for the whole organisation, not just the affected line."""
+    _, run = _run(db, n=4, factors=2)
+    line = db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id).order_by(EmissionLineItem.id).first()
+    line.details = "{not json"
+    db.commit()
+
+    pack = build_evidence_pack(db, run, uncertainty_iterations=1000)
+    assert pack["pack"]["content_hash"]
+    # The corrupt line's lineage is unreadable, but the pack still renders.
+    bad = pack["sections"]["4_transaction_detail"]["lines"][0]
+    assert bad["factor_lineage"]["factor_id"] is None
+    # And its co2e is untouched — the total is unaffected.
+    assert bad["co2e_kg"] == line.co2e
+
+
+def test_corruption_is_counted_not_silently_swallowed(db):
+    """Failing soft is only defensible when something is counting."""
+    _, run = _run(db, n=4, factors=2)
+    lines = db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id).order_by(EmissionLineItem.id).all()
+    lines[0].details = "{not json"
+    lines[1].details = "[]"
+    db.commit()
+
+    integ = build_evidence_pack(db, run, uncertainty_iterations=1000)[
+        "sections"]["7_completeness_controls"]["line_detail_integrity"]
+    assert integ["clean"] is False
+    assert integ["lines_unreadable"] == 2
+    assert set(integ["line_ids"]) == {lines[0].id, lines[1].id}
+    assert "totals are unaffected" in integ["note"]
+
+
+def test_clean_run_reports_clean_integrity(db):
+    _, run = _run(db)
+    integ = build_evidence_pack(db, run, uncertainty_iterations=1000)[
+        "sections"]["7_completeness_controls"]["line_detail_integrity"]
+    assert integ["clean"] is True
+    assert integ["lines_unreadable"] == 0
+    assert integ["note"] is None
+
+
+def test_summary_survives_a_corrupt_row(db):
+    """The renderer every other framework depends on."""
+    from app.reports.summary import summary
+    org, run = _run(db, n=3, factors=1)
+    line = db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id).order_by(EmissionLineItem.id).first()
+    line.details = "{not json"
+    db.commit()
+    s = summary(db, organisation_id=org.id, run_id=run.id)
+    assert s["total_co2e"] == run.total_co2e     # totals come from co2e, not details

@@ -10,6 +10,7 @@ from ..models import (
 from ..services.calc import (
     activities_fingerprint, activities_in_scope, FINGERPRINT_VERSION,
 )
+from ..services.frozen import parse_detail, parse_list
 
 
 def _resolve_run(db: Session, organisation_id: Optional[int], run_id: Optional[int]):
@@ -62,11 +63,8 @@ def _cat15_double_declared(db, run) -> bool:
         EmissionLineItem.scope == "3",
         EmissionLineItem.co2e > 0).all()
     for (details,) in rows:
-        try:
-            if (json.loads(details or "{}")).get("ghgp_category") == 15:
-                return True
-        except ValueError:
-            continue
+        if parse_detail(details).get("ghgp_category") == 15:
+            return True
     return False
 
 
@@ -198,7 +196,7 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
 
     for details, line_co2e, activity_id in db.query(li.details, li.co2e, li.activity_id)\
             .filter(li.run_id == run.id, li.method == "location").all():
-        d = json.loads(details or "{}")
+        d = parse_detail(details)
         m = d.get("method_type") or "average_data"
         method_split[m] = method_split.get(m, 0.0) + (line_co2e or 0.0)
         # Surface activities whose scope was ASSUMED (unrecognised category -> Scope 3),
@@ -238,7 +236,7 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
     kwh_market_unverified = 0.0     # covered by an instrument whose market couldn't be checked
     skipped_market = set()          # instruments excluded by a declared market mismatch
     for (details,) in market_lines:
-        d = json.loads(details or "{}")
+        d = parse_detail(details)
         bases[d.get("method_basis", "?")] = bases.get(d.get("method_basis", "?"), 0) + 1
         # Prefer the rank-0-only figure; a run frozen before it existed has no such key
         # and its `kwh_contractual` is the right value for it (it had no residual legs).
@@ -345,7 +343,7 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         },
         "coverage": coverage(db, run),
         # Per-activity exclusion reasons captured at compute time (assurer lineage).
-        "exclusions": json.loads(run.notes or "[]"),
+        "exclusions": parse_list(run.notes),
         # How each headline figure was arrived at. Built LAST so it checks the payload
         # the report actually publishes, not a parallel recomputation of it.
         "derivations": _derivations(
@@ -483,7 +481,7 @@ def _data_quality(db: Session, run: CalculationRun, li):
     by_rating = {"high": 0.0, "medium": 0.0, "low": 0.0}
     lo_w = hi_w = 0.0
     for details, co2e in rows:
-        dq = (json.loads(details or "{}")).get("data_quality")
+        dq = parse_detail(details).get("data_quality")
         if not dq or not co2e:
             continue
         total += co2e
@@ -532,7 +530,7 @@ def run_factor_sources(db: Session, run: CalculationRun) -> list:
     for (details,) in db.query(EmissionLineItem.details)\
             .filter(EmissionLineItem.run_id == run.id,
                     EmissionLineItem.method == "location").all():
-        fid = json.loads(details or "{}").get("factor_id")
+        fid = parse_detail(details).get("factor_id")
         if fid:
             ids.add(fid)
     if not ids:
@@ -556,7 +554,7 @@ def scope3_by_category(db: Session, run: CalculationRun) -> dict:
     out: dict = {}
     pre_freeze = []
     for details, co2e, activity_id in rows:
-        d = json.loads(details or "{}")
+        d = parse_detail(details)
         if "activity_category" in d:
             c = d["activity_category"] or "?"
             out[c] = out.get(c, 0.0) + (co2e or 0.0)
@@ -613,7 +611,7 @@ def coverage(db: Session, run: CalculationRun):
     for (details,) in db.query(EmissionLineItem.details)\
             .filter(EmissionLineItem.run_id == run.id,
                     EmissionLineItem.method == "location").all():
-        d = json.loads(details or "{}")
+        d = parse_detail(details)
         fid, fval = d.get("factor_id"), d.get("factor_value")
         if fid is not None and fval is not None:
             frozen[fid] = fval

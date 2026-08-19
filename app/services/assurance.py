@@ -15,6 +15,7 @@ from ..models import (
 )
 from ..reports.summary import summary
 from .assurance_standards import applicable_standards, run_period_start
+from .frozen import parse_detail, parse_optional
 
 
 def readiness_assessment(db: Session, run: CalculationRun) -> dict:
@@ -28,7 +29,7 @@ def readiness_assessment(db: Session, run: CalculationRun) -> dict:
     loc_lines = db.query(EmissionLineItem.details).filter(
         EmissionLineItem.run_id == run.id, EmissionLineItem.method == "location").all()
     n_lines = len(loc_lines)
-    n_traceable = sum(1 for (d,) in loc_lines if json.loads(d or "{}").get("factor_id"))
+    n_traceable = sum(1 for (d,) in loc_lines if parse_detail(d).get("factor_id"))
 
     checks = []
 
@@ -83,7 +84,7 @@ def engagement_view(db: Session, eng: AssuranceEngagement,
     live_readiness = readiness_assessment(db, run)
     # For a concluded engagement show the readiness FROZEN at conclusion, and flag
     # if the run has since drifted (so a reader isn't misled by a live recompute).
-    snapshot = json.loads(eng.readiness_snapshot) if eng.readiness_snapshot else None
+    snapshot = parse_optional(eng.readiness_snapshot)
     readiness_shown = snapshot if snapshot is not None else live_readiness
     ready_now = live_readiness["ready"]
     ready_permitted = ready_now and not open_material

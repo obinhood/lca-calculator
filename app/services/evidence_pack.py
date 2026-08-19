@@ -29,6 +29,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from .frozen import corrupt_details, parse_detail, parse_list
 from ..models import (
     ActivityRecord, CalculationRun, EmissionFactor, EmissionLineItem,
     Organisation, ReportingPeriod, RunEntityBoundary,
@@ -45,17 +46,8 @@ PACK_VERSION = "evp-v1"
 DEFAULT_MAX_LINES = 5_000
 
 
-def _detail(raw) -> dict:
-    """Parse a frozen line-detail blob; anything unusable yields {} rather than raising.
-
-    Coerces non-object JSON too: `[]` and `null` are valid JSON but not a detail
-    record, and returning them would hand a list to callers doing `.get()`.
-    """
-    try:
-        parsed = json.loads(raw) if raw else {}
-    except (ValueError, TypeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+# One parser for every frozen blob in the platform — see services/frozen.py.
+_detail = parse_detail
 
 
 def _s1_inventory_statement(db: Session, run: CalculationRun) -> dict:
@@ -265,10 +257,7 @@ def _s6_mapping_decisions(db: Session, run: CalculationRun, max_lines: int) -> d
 def _s7_completeness_controls(db: Session, run: CalculationRun, summary_payload: dict) -> dict:
     """Coverage, every excluded activity with its reason, and the Scope 3 statement."""
     cov = summary_payload.get("coverage") or {}
-    try:
-        exclusions = json.loads(run.notes or "[]")
-    except (ValueError, TypeError):
-        exclusions = []
+    exclusions = parse_list(run.notes)
     return {
         "coverage_pct": cov.get("coverage_pct"),
         "coverage_basis": cov.get("coverage_basis"),
@@ -282,6 +271,11 @@ def _s7_completeness_controls(db: Session, run: CalculationRun, summary_payload:
         "excluded_count": len(exclusions),
         "partial": summary_payload.get("partial"),
         "partial_reasons": summary_payload.get("partial_reasons"),
+        # Frozen blobs parse defensively so one corrupt row cannot take down every
+        # report — but failing soft is only defensible when something counts. This
+        # is that count: it stops "the pack rendered" being mistaken for "every
+        # line was legible".
+        "line_detail_integrity": corrupt_details(db, run.id),
         "scope3_completeness": (summary_payload.get("scope3_ghgp") or {}).get("completeness"),
         "activities_fingerprint": run.activities_fingerprint,
     }

@@ -56,6 +56,7 @@ from typing import Optional
 import numpy as np
 from sqlalchemy.orm import Session
 
+from .frozen import parse_detail
 from ..models import (
     CalculationRun, EmissionLineItem, RunFinancedLine, RunRemovalLine,
 )
@@ -145,10 +146,7 @@ def _load_lines(db: Session, run_id: int, method: str) -> list:
     """
     out = []
     for r, basis in _basis_rows(db, run_id, method):
-        try:
-            detail = json.loads(r.details) if r.details else {}
-        except (ValueError, TypeError):
-            detail = {}
+        detail = parse_detail(r.details)
         dq = detail.get("data_quality") or {}
         sigma = dq.get("sigma_log")
         unscored = not isinstance(sigma, (int, float)) or not math.isfinite(sigma) \

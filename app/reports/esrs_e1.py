@@ -33,6 +33,7 @@ from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
 from ..services.removals import removals_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
+from ..services.frozen import parse_detail
 
 NOT_COVERED = [
     "E1-1 transition plan for climate change mitigation",
@@ -125,7 +126,7 @@ def _renewable_contractual_mwh(db: Session, run: CalculationRun) -> dict:
     gross_kwh = cons_kwh = 0.0
     lines_without_share = 0
     for (details,) in rows:
-        d = json.loads(details or "{}")
+        d = parse_detail(details)
         share = (d.get("consolidation") or {}).get("share_factor")
         covered = sum(alloc.get("kwh_covered", 0.0) or 0.0
                       for alloc in d.get("allocations", [])

@@ -20,6 +20,7 @@ from ..services.ghgp import (
     boundary_policy_for_run, boundary_policy_drift,
 )
 from ..services.pcaf import amounts_by_currency
+from ..services.frozen import parse_detail
 
 
 def _covered_exposure(covered: list, gross_currency) -> dict:
@@ -100,7 +101,7 @@ def _financed_block(db, run, declaration=None) -> dict:
     by_asset, primary_kg = {}, 0.0
     covered = []               # positions that HAVE investee emissions, frozen details
     for r in rows:
-        d = json.loads(r.details or "{}")
+        d = parse_detail(r.details)
         ac = d.get("asset_class", "?")
         by_asset[ac] = by_asset.get(ac, 0.0) + r.co2e
         if (d.get("data_quality_score") or 5) <= 2:
@@ -185,7 +186,7 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
             .filter(EmissionLineItem.run_id == run.id,
                     EmissionLineItem.method == "location",
                     EmissionLineItem.scope == "3").all():
-        d = json.loads(details or "{}")
+        d = parse_detail(details)
         kg = co2e or 0.0
         src = d.get("ghgp_category_source") or "unassigned"
         cat = d.get("ghgp_category")
@@ -230,7 +231,7 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
             "justification": d.justification if d else None,
             "screening_estimate_tco2e": d.screening_estimate_tco2e if d else None,
             "materiality_threshold_pct": d.materiality_threshold_pct if d else None,
-            "criteria": json.loads(d.criteria) if (d and d.criteria) else None,
+            "criteria": parse_detail(d.criteria) if (d and d.criteria) else None,
             "method_description": d.method_description if d else None,
             # Temporal basis (Cats 2/11/12) as FROZEN onto the run.
             "temporal_basis": (d.temporal_basis if d else None),

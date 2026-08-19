@@ -15,6 +15,7 @@ NEVER used to discount or credit — the engine refuses to overclaim durability.
 import json
 
 from sqlalchemy.orm import Session
+from .frozen import parse_detail
 
 
 def _net_removals_kg(run) -> float:
@@ -64,7 +65,7 @@ def removals_completeness(db: Session, run) -> dict:
                           if c.serial_number}
 
     for ln in lines:
-        d = json.loads(ln.details or "{}")
+        d = parse_detail(ln.details)
         # R3 — permanence: a land-based removal with no monitoring OR no reversal
         # accounting is not reportable (LSRG Ch.7). Technological is a warning (lower bar).
         if ln.removal_category == "land_based" and ln.record_kind == "removal":
@@ -104,7 +105,7 @@ def removals_completeness(db: Session, run) -> dict:
 
     # Warnings (technological lower bar; missing durability metadata).
     for ln in lines:
-        d = json.loads(ln.details or "{}")
+        d = parse_detail(ln.details)
         if ln.removal_category == "technological" and ln.record_kind == "removal":
             if not (d.get("monitoring_method") or "").strip():
                 warnings.append(f"technological removal (record {ln.removal_record_id}) has no "
