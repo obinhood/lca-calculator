@@ -2,6 +2,7 @@ import pytest
 
 from app.models import (
     EmissionFactor, ActivityRecord, Organisation, EmissionsTarget, CarbonCredit,
+    ReportingPeriod,
 )
 from app.services.calc import compute_co2e
 from app.services.sbti import (
@@ -25,12 +26,19 @@ def _factor(db, category, unit, value, subcategory=""):
     return f
 
 
-def _activity(db, org_id, factor_id, category, quantity, unit):
-    a = ActivityRecord(organisation_id=org_id, date="2025-01-01", category=category,
+def _activity(db, org_id, factor_id, category, quantity, unit, date="2025-01-01"):
+    a = ActivityRecord(organisation_id=org_id, date=date, category=category,
                        subcategory="", description="", quantity=quantity, unit=unit,
                        geo="GB", factor_id=factor_id)
     db.add(a); db.commit(); db.refresh(a)
     return a
+
+
+def _period(db, org_id, label, start, end):
+    p = ReportingPeriod(organisation_id=org_id, label=label, start_date=start,
+                        end_date=end, frozen=False)
+    db.add(p); db.commit(); db.refresh(p)
+    return p
 
 
 # --- SBTi pathway maths ---
@@ -64,26 +72,31 @@ def test_run_scoped_emissions(db):
 
 
 def test_sbti_report_trajectory_on_and_off_track(db):
+    """Both runs are period-scoped and each year label falls inside its own run's period —
+    the trajectory gates require it, since a shorter current run would otherwise report
+    the missing months as progress."""
     org = _org(db)
     f = _factor(db, "gas", "kWh", 0.184)
-    _activity(db, org.id, f.id, "gas", 10000, "kWh")           # 1840 kg S1
-    base_run = compute_co2e(db, org.id)
+    bp = _period(db, org.id, "FY25", "2025-01-01", "2025-12-31")
+    cp = _period(db, org.id, "FY30", "2030-01-01", "2030-12-31")
+    _activity(db, org.id, f.id, "gas", 10000, "kWh", date="2025-06-01")   # 1840 kg S1
+    base_run = compute_co2e(db, org.id, reporting_period_id=bp.id)
     t = EmissionsTarget(organisation_id=org.id, name="NT", target_type="near_term",
                         scope_coverage="1+2", base_run_id=base_run.id, base_year=2025,
                         target_year=2035, target_reduction_pct=0.42, ambition="1.5C")
     db.add(t); db.commit(); db.refresh(t)
-    # A later run reduced to 5000 kWh (920 kg): pathway at 2030 = 1840*(1-0.21)=1453.6
-    a = db.query(ActivityRecord).first(); a.quantity = 5000; db.commit()
-    cur = compute_co2e(db, org.id)
+    # 2030 consumption is 5000 kWh (920 kg): pathway at 2030 = 1840*(1-0.21)=1453.6
+    a30 = _activity(db, org.id, f.id, "gas", 5000, "kWh", date="2030-06-01")
+    cur = compute_co2e(db, org.id, reporting_period_id=cp.id)
     r = sbti_report(db, org.id, t.id, current_run_id=cur.id, current_year=2030)
-    assert r["ok"] is True
+    assert r["ok"] is True, r["blockers"]
     assert r["ambition_assessment"]["meets_minimum"] is True
     assert r["trajectory"]["pathway_allowed_tco2e"] == pytest.approx(1.4536)
     assert r["trajectory"]["actual_tco2e"] == pytest.approx(0.92)
     assert r["trajectory"]["on_track"] is True
-    # Now overshoot: current run back to base -> off track
-    a.quantity = 10000; db.commit()
-    over = compute_co2e(db, org.id)
+    # Now overshoot: 2030 consumption back to the base level -> off track
+    a30.quantity = 10000; db.commit()
+    over = compute_co2e(db, org.id, reporting_period_id=cp.id)
     r2 = sbti_report(db, org.id, t.id, current_run_id=over.id, current_year=2030)
     assert r2["trajectory"]["on_track"] is False
 

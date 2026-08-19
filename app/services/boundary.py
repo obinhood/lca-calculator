@@ -153,6 +153,31 @@ def run_entity_boundary_fingerprint(db: Session, run) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+def boundary_difference(db: Session, run_a, run_b) -> Optional[str]:
+    """The CODE for a structural difference between two runs' organisational boundaries,
+    or None if the two sit on a comparable boundary.
+
+    Codes: 'legacy' (one run predates the boundary dimension, so nothing can be
+    compared), 'approach' (the consolidation approach changed), 'entities' (an entity was
+    acquired, divested, or its ownership/control restated).
+
+    Organic growth — same entities, more activity — is comparable and returns None.
+
+    Detection only, and deliberately wording-free: every renderer that subtracts two runs
+    needs this same test but says something different about it (SBTi re-bases a target,
+    GRI 305-5 refuses a reduction). One detector, several sentences — never two detectors
+    that can drift apart.
+    """
+    if not run_a.boundary_version or not run_b.boundary_version:
+        return "legacy"
+    if run_a.consolidation_approach != run_b.consolidation_approach:
+        return "approach"
+    if (run_entity_boundary_fingerprint(db, run_a)
+            != run_entity_boundary_fingerprint(db, run_b)):
+        return "entities"
+    return None
+
+
 def base_year_recalculation(db: Session, base_run, current_run) -> Optional[str]:
     """A reason the target must be RE-BASED (GHG Protocol Ch.5), or None if the base
     and current runs sit on a COMPARABLE organisational boundary.
@@ -163,20 +188,49 @@ def base_year_recalculation(db: Session, base_run, current_run) -> Optional[str]
     a trajectory measured across it is meaningless (the same failure mode as comparing
     across GWP vintages). Detection only: a filed run is never restated.
     """
-    if not base_run.boundary_version or not current_run.boundary_version:
+    code = boundary_difference(db, base_run, current_run)
+    if code == "legacy":
         return ("the base run or the current run predates the GHGP organisational-boundary "
                 "dimension — recompute both so the trajectory is measured on the same boundary")
-    if base_run.consolidation_approach != current_run.consolidation_approach:
+    if code == "approach":
         return (f"the consolidation approach changed from {base_run.consolidation_approach} "
                 f"(base year) to {current_run.consolidation_approach} (now) — a change to the "
                 f"inventory boundary. GHG Protocol Ch.5: re-base the target; a trajectory is "
                 f"not comparable across consolidation approaches")
-    if (run_entity_boundary_fingerprint(db, base_run)
-            != run_entity_boundary_fingerprint(db, current_run)):
+    if code == "entities":
         return ("the organisational boundary changed between the base year and now — an entity "
                 "was acquired, divested, or its ownership/control restated. GHG Protocol Ch.5: "
                 "this structural change triggers a base-year recalculation; re-base the target "
                 "rather than comparing a trajectory across boundaries (organic growth would not)")
+    return None
+
+
+def boundary_comparable(db: Session, run_a, run_b, *, label_a: str, label_b: str,
+                        quantity: str) -> Optional[str]:
+    """A reason a difference between two runs' totals is not attributable to abatement
+    because their organisational boundaries differ, or None.
+
+    Same detection as `base_year_recalculation`, said in the voice of a renderer that is
+    subtracting two runs rather than tracking a target: a boundary change shows up in the
+    delta as a reduction (a divestment) or an increase (an acquisition) that no
+    decarbonisation caused. `quantity` names the figure at risk ("the 305-5 reduction").
+    """
+    code = boundary_difference(db, run_a, run_b)
+    if code == "legacy":
+        return (f"the {label_a} run or the {label_b} run predates the GHGP "
+                f"organisational-boundary dimension, so their boundaries cannot be shown "
+                f"to match — recompute both before publishing {quantity}")
+    if code == "approach":
+        return (f"the consolidation approach changed from {run_a.consolidation_approach!r} "
+                f"({label_a}) to {run_b.consolidation_approach!r} ({label_b}) — a change to "
+                f"the inventory boundary moves the totals on its own, so {quantity} would "
+                f"report a boundary change as abatement")
+    if code == "entities":
+        return (f"the entity population changed between the {label_a} run and the "
+                f"{label_b} run — an entity was acquired, divested, or its "
+                f"ownership/control restated. {quantity} would report that structural "
+                f"change as abatement (organic growth would not); restate the {label_a} "
+                f"run on the current boundary first (GHG Protocol Ch.5)")
     return None
 
 

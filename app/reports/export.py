@@ -67,7 +67,9 @@ def _b_gri(db, org, p):
     return gri_report(db, org, run_id=_p(p, "run_id", _int),
                       base_run_id=_p(p, "base_run_id", _int),
                       intensity_denominator=_p(p, "intensity_denominator", _float),
-                      intensity_denominator_unit=_p(p, "intensity_denominator_unit", _str))
+                      intensity_denominator_unit=_p(p, "intensity_denominator_unit", _str),
+                      intensity_denominator_period_days=_p(
+                          p, "intensity_denominator_period_days", _int))
 
 def _b_cdp(db, org, p):
     from .cdp import cdp_export

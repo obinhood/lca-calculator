@@ -2128,16 +2128,28 @@ def get_gri_report(run_id: Optional[int] = None,
                    base_run_id: Optional[int] = None,
                    intensity_denominator: Optional[float] = None,
                    intensity_denominator_unit: Optional[str] = None,
+                   intensity_denominator_period_days: Optional[int] = None,
                    org: Organisation = Depends(current_org),
                    db: Session = Depends(get_db)):
-    """GRI 305/302 content-index payload (305-5 needs base_run_id)."""
+    """GRI 305/302 content-index payload (305-5 needs base_run_id).
+
+    `intensity_denominator_period_days` is required alongside a denominator: 305-4/302-3
+    divide a period-scoped total by it, so a denominator covering a different span yields
+    a ratio wrong by that ratio of spans.
+    """
     if intensity_denominator is not None and (
             not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
         raise HTTPException(status_code=400,
                             detail="intensity_denominator must be a finite number > 0")
-    return JSONResponse(with_guidance(gri_report(db, org.id, run_id=run_id, base_run_id=base_run_id,
-                                   intensity_denominator=intensity_denominator,
-                                   intensity_denominator_unit=intensity_denominator_unit)))
+    if intensity_denominator_period_days is not None and intensity_denominator_period_days <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="intensity_denominator_period_days must be a positive number of days")
+    return JSONResponse(with_guidance(gri_report(
+        db, org.id, run_id=run_id, base_run_id=base_run_id,
+        intensity_denominator=intensity_denominator,
+        intensity_denominator_unit=intensity_denominator_unit,
+        intensity_denominator_period_days=intensity_denominator_period_days)))
 
 
 @app.get("/reports/iso_14064_2")

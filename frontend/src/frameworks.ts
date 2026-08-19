@@ -72,9 +72,14 @@ export const FRAMEWORKS: Framework[] = [
     blurb: "GRI content index: emissions, energy, intensity and reductions vs a base year.",
     path: "/reports/gri", params: [
       { name: "base_run_id", label: "Base run ID (for 305-5 reductions)", def: "", width: 130,
-        help: "optional — an earlier run to compare against" },
+        help: "optional — an earlier run to compare against; must share this run's period "
+              + "length, GWP set, consolidation approach and entity population" },
       { name: "intensity_denominator", label: "Intensity denominator", def: "1.0", width: 110 },
-      { name: "intensity_denominator_unit", label: "Unit", def: "unit", width: 110 } ] },
+      { name: "intensity_denominator_unit", label: "Unit", def: "unit", width: 110 },
+      { name: "intensity_denominator_period_days", label: "Denominator period (days)",
+        def: "365", width: 130,
+        help: "the span the denominator covers — must match the run's reporting period, "
+              + "or the intensity ratio is out by the ratio of the two spans" } ] },
   { key: "cdp", label: "CDP Climate", full: "CDP Climate Change questionnaire",
     category: "Corporate reporting", needs: "run",
     blurb: "Export shaped for the CDP questionnaire (emissions, breakdowns, energy, verification).",

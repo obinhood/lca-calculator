@@ -88,8 +88,11 @@ def test_issb_s2_unknown_jurisdiction_blocked(db, seeded):
 
 def test_gri_golden_values(db, seeded):
     org, run = seeded
+    # The denominator carries its own period (the seeded run is FY25, 365 days) — 305-4
+    # over a denominator covering a different span is a ratio out by that ratio.
     r = gri_report(db, org.id, run_id=run.id, intensity_denominator=2.0,
-                   intensity_denominator_unit="FTE (hundreds)")
+                   intensity_denominator_unit="FTE (hundreds)",
+                   intensity_denominator_period_days=365)
     assert r["gri_305_1_scope1"]["gross_tco2e"] == pytest.approx(0.1472)
     assert r["gri_305_2_scope2"]["location_based_tco2e"] == pytest.approx(0.204)
     assert r["gri_305_3_scope3"]["by_ghgp_category_tco2e"]["5"] == pytest.approx(0.120)
