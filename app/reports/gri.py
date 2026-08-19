@@ -151,6 +151,17 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
     energy = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
     energy_mwh = {c: round(energy[c] / 1000.0, 6) for c in ("electricity", "gas", "diesel")}
     total_mwh = round(energy["total_kwh"] / 1000.0, 6)
+    # 302-1/302-3 published the numerator and dropped everything that qualifies it: the
+    # incompleteness caveat (energy-bearing carriers outside the three reported ones, whose
+    # emissions ARE in the figures above) and the diesel calorific-value assumption both
+    # live in these notes. A partial MWh figure with no caveat reads as a complete one.
+    energy_basis = {
+        "basis": energy["basis"],
+        "carriers_reported": energy["carriers_reported"],
+        "carriers_omitted": energy.get("carriers_omitted"),
+        "complete": not energy.get("carriers_omitted"),
+        "notes": energy["notes"],
+    }
 
     ef_sources = run_factor_sources(db, run)
     dq = s.get("data_quality") or {}
@@ -218,12 +229,16 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         "gri_305_5_reductions": reductions,
         "gri_305_5_period_comparability": period_comparability,
         "gri_302_1_energy": {"by_carrier_mwh": energy_mwh, "total_mwh": total_mwh,
-                             "boundary": "own operations (Scope 1/2 line items)"},
+                             "boundary": "own operations (Scope 1/2 line items)",
+                             **energy_basis},
         "gri_302_3_energy_intensity": ({
             "mwh_per_unit": round(total_mwh / intensity_denominator, 6),
             "denominator": intensity_denominator,
             "denominator_unit": intensity_denominator_unit or "unit",
             "period_basis": denominator_period,
+            # The ratio inherits the numerator's caveats — an incomplete numerator makes
+            # the intensity understated by exactly the same omission.
+            **energy_basis,
         } if denom_ok else None),
         "methodology": f"GHG Protocol Corporate Standard; {run.gwp_set} GWP-100; "
                        f"factors: {', '.join(ef_sources) or 'none'}; immutable run "

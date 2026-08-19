@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..models import CalculationRun, EmissionLineItem
 from .summary import summary, run_factor_sources
+from .scope3 import disclosed_totals_incl_financed
 from .secr import _energy_kwh
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
@@ -158,7 +159,6 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     scope1_kg = by_scope.get("1", 0.0)
     scope2_loc_kg = s["scope2"]["location_based"]
     scope2_mkt_kg = s["scope2"]["market_based"]
-    scope3_kg = by_scope.get("3", 0.0)
 
     blockers = []
     cov = s["coverage"]
@@ -235,23 +235,32 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     # ESRS ¶51-52: gross Scope 3 includes every significant category — for a
     # financial institution, Cat 15 (financed emissions) always is. The DISCLOSED
     # totals therefore add financed emissions; run.total_co2e (activity-derived) is
-    # never changed. Both figures are emitted and reconciled.
-    financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
-    scope3_disclosed = scope3_kg / 1000.0 + financed_tco2e
-    total_loc_disclosed = run.total_co2e / 1000.0 + financed_tco2e
-    total_mkt_disclosed = run.total_co2e_market / 1000.0 + financed_tco2e
+    # never changed. Both figures are emitted and reconciled. Shared with IFRS S2 and
+    # SB 253, which publish the same quantities under the same field names — and which
+    # carries the Cat-15 double-count refusal this renderer was missing.
+    disclosed = disclosed_totals_incl_financed(s, run)
+    financed_tco2e = disclosed["financed_tco2e"] or 0.0
+    total_loc_disclosed = disclosed["total_location_based"]
+    total_mkt_disclosed = disclosed["total_market_based"]
 
     intensity = None
     if net_revenue_millions and math.isfinite(net_revenue_millions) and net_revenue_millions > 0:
         # ¶52's total and E1-6 intensity must agree inside one payload -> intensity
-        # is off the DISCLOSED total (financed included).
+        # is off the DISCLOSED total (financed included). A refused total (Cat 15
+        # double-declared) has no intensity either: dividing a number the payload
+        # declines to state would smuggle it back in.
         intensity = {
             "tco2e_total_location_per_million_revenue":
-                round(total_loc_disclosed / net_revenue_millions, 6),
+                (None if total_loc_disclosed is None
+                 else round(total_loc_disclosed / net_revenue_millions, 6)),
             "tco2e_total_market_per_million_revenue":
-                round(total_mkt_disclosed / net_revenue_millions, 6),
+                (None if total_mkt_disclosed is None
+                 else round(total_mkt_disclosed / net_revenue_millions, 6)),
             "net_revenue_millions": net_revenue_millions,
             "revenue_currency": revenue_currency,
+            "numerator_basis": ("refused — " + disclosed["note"]
+                                if total_loc_disclosed is None else
+                                "disclosed total (Scope 1+2 location+3, incl. Cat 15 financed)"),
         }
 
     # Frozen lineage — never via the live activity->factor mapping.
@@ -285,12 +294,17 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             "scope1": round(scope1_kg / 1000.0, 6),
             "scope2_location_based": round(scope2_loc_kg / 1000.0, 6),
             "scope2_market_based": round(scope2_mkt_kg / 1000.0, 6),
-            "scope3_excl_financed": round(scope3_kg / 1000.0, 6),
-            "scope3": round(scope3_disclosed, 6),          # gross, incl. Cat 15 financed
+            "scope3_excl_financed": disclosed["scope3_excl_financed"],
+            # gross, incl. Cat 15 financed. None when Cat 15 is double-declared: the
+            # sum is refused, not published (B13 blocks the run).
+            "scope3": disclosed["scope3"],
             "scope3_ghgp_categories": scope3_ghgp_categories,
-            "total_location_based_excl_financed": round(run.total_co2e / 1000.0, 6),
-            "total_location_based": round(total_loc_disclosed, 6),
-            "total_market_based": round(total_mkt_disclosed, 6),
+            "total_location_based_excl_financed":
+                disclosed["total_location_based_excl_financed"],
+            "total_market_based_excl_financed":
+                disclosed["total_market_based_excl_financed"],
+            "total_location_based": total_loc_disclosed,
+            "total_market_based": total_mkt_disclosed,
             "biogenic_co2_separate": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
             # E1-7 ¶56-57: removals reported separately, NOT deducted from gross or
             # gross-reduction targets — the net line is additional information only.
@@ -300,12 +314,16 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
                 round((run.total_co2e - (run.total_removals_co2e - (run.removals_reversed_co2e or 0.0)))
                       / 1000.0, 6) if run.total_removals_co2e is not None else None),
             "financed_emissions": ({
-                "included_in_total": True,
+                # False when the Cat-15 double-count refusal fired: the disclosed
+                # totals above are then None, so claiming inclusion would be false.
+                "included_in_total": not disclosed["cat15_double_count_blocked"],
+                "double_count_blocked": disclosed["cat15_double_count_blocked"],
                 "tco2e": round(financed_tco2e, 6),
                 "as_of": run.financed_as_of,
                 "note": "PCAF Part A (Dec 2022), frozen to immutable run #%d. NOT part of "
                         "run.total_co2e (which is activity-derived; positions are a live "
-                        "ledger). Re-pull the run to reproduce." % run.id,
+                        "ledger). Re-pull the run to reproduce. " % run.id
+                        + disclosed["note"],
             } if run.financed_co2e is not None else {"included_in_total": False}),
             "ghg_intensity": intensity,
         },
