@@ -504,6 +504,19 @@ def _data_quality(db: Session, run: CalculationRun, li):
                             "lognormal), assuming FULLY CORRELATED line errors: "
                             "the relative band does not narrow as the portfolio "
                             "grows (conservative vs independent-error Monte Carlo).",
+        # Two uncertainty figures exist in this platform and a reader must not have
+        # to guess how they relate. Under full correlation the total is monotone in
+        # the single shared draw, so this closed-form band IS the perfect-correlation
+        # Monte Carlo bound — the two agree to sampling noise, and a test locks it.
+        # The endpoint additionally reports the by_factor default (lines sharing an
+        # emission factor share its error) and the independent lower bound, which
+        # this figure deliberately does not attempt.
+        "full_propagation": {
+            "endpoint": "/runs/{run_id}/uncertainty",
+            "relationship": "This band equals that endpoint's 'perfect' correlation "
+                            "bound. Its headline 'by_factor' interval is narrower "
+                            "and is the one to disclose.",
+        },
     }
 
 
