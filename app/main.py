@@ -2003,6 +2003,42 @@ def get_engagement_lineage(engagement_id: int, x_api_key: Optional[str] = Header
     }
 
 
+@app.get("/assurance/evidence_pack")
+def get_evidence_pack(run_id: Optional[int] = None, max_lines: int = 5000,
+                      uncertainty_iterations: int = 10000,
+                      org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """The assurance working-paper file for one run, assembled and hash-stamped.
+
+    Inventory statement, reporting period, organisational boundary, transaction
+    detail with full factor lineage, factor register, mapping decisions,
+    completeness controls, data quality and uncertainty, methodology versions, and
+    readiness with the applicable assurance standard — all from frozen run state,
+    so the same run yields the same ``content_hash`` years later.
+
+    ``evidence_gaps`` names, with reasons, what an ISAE 3410 / ISSA 5000 file
+    expects that this platform cannot produce — reviewer identity, override
+    before/after values, GL coding. A pack that omitted them would read as
+    complete to the one person who most needs to know it is not.
+    """
+    from .services.evidence_pack import build_evidence_pack
+    if not (1 <= max_lines <= 100000):
+        raise HTTPException(status_code=400, detail="max_lines must be 1..100000")
+    if not (1000 <= uncertainty_iterations <= 200000):
+        raise HTTPException(status_code=400,
+                            detail="uncertainty_iterations must be 1000..200000")
+    if run_id is not None:
+        run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                              CalculationRun.organisation_id == org.id).first()
+    else:
+        run = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
+            .order_by(CalculationRun.id.desc()).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found for this organisation")
+    return JSONResponse(build_evidence_pack(
+        db, run, max_lines=max_lines, uncertainty_iterations=uncertainty_iterations))
+
+
 @app.get("/reports/assurance_readiness")
 def get_assurance_readiness(run_id: Optional[int] = None,
                             org: Organisation = Depends(current_org),
