@@ -1298,3 +1298,72 @@ class DeliverabilityLink(Base):
     basis = Column(String, nullable=False)            # interconnector | single_bidding_zone | ...
     rationale = Column(Text, nullable=True)
     created_at = Column(String)
+
+
+# --- PACT Pathfinder (WBCSD) product carbon footprint exchange ---------------
+
+class ProductFootprint(Base):
+    """A PACT v3 ProductFootprint held by this organisation.
+
+    `direction` separates the two roles a platform plays on the network:
+    `received` is a supplier's PCF we consumed and may use as primary data;
+    `published` is one of ours, offered to customers. They share a table because
+    they share a schema and a lifecycle, and mixing them up is prevented by the
+    column rather than by convention.
+
+    `document` is the RECEIVED BYTES, stored verbatim. The denormalised columns
+    beside it exist for querying and are derived from it — never the other way
+    round. An assuror asking what the supplier actually sent gets the document,
+    not our reconstruction of it, and a later spec revision cannot retroactively
+    change what we were given.
+
+    v3 versioning is IMMUTABLE: a corrected PCF arrives as a new `pf_id` listing
+    the old one in `preceding_pf_ids`, and the old row is marked Deprecated. There
+    is no in-place update and deliberately no `version` column — that was v2.
+    """
+    __tablename__ = "product_footprints"
+    __table_args__ = (
+        UniqueConstraint("organisation_id", "pf_id", name="uq_pf_org_pfid"),
+        CheckConstraint("direction IN ('received','published')", name="ck_pf_direction"),
+        CheckConstraint("status IN ('Active','Deprecated')", name="ck_pf_status"),
+        CheckConstraint("declared_unit_amount > 0", name="ck_pf_declared_amount_pos"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    direction = Column(String, nullable=False)          # received | published
+    pf_id = Column(String, nullable=False)              # the PACT UUID
+    spec_version = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="Active")
+    created = Column(String, nullable=True)             # the sender's timestamp
+    preceding_pf_ids = Column(Text, nullable=True)      # JSON array of UUIDs
+
+    company_name = Column(String, nullable=True)
+    company_ids = Column(Text, nullable=True)           # JSON array of URNs
+    product_name = Column(String, nullable=True)
+    product_description = Column(Text, nullable=True)
+    product_ids = Column(Text, nullable=True)           # JSON array of URNs
+
+    declared_unit = Column(String, nullable=True)
+    declared_unit_amount = Column(Float, nullable=True)
+    # Emissions per ONE declared unit, pre-divided at import. The spec quotes the
+    # footprint against declaredUnitAmount, not against one unit, and using the
+    # undivided figure would overstate by that factor.
+    kg_co2e_per_unit_excl_biogenic = Column(Float, nullable=True)
+    kg_co2e_per_unit_incl_biogenic = Column(Float, nullable=True)
+
+    reference_period_start = Column(String, nullable=True)
+    reference_period_end = Column(String, nullable=True)
+    validity_period_start = Column(String, nullable=True)
+    validity_period_end = Column(String, nullable=True)
+    primary_data_share = Column(Float, nullable=True)
+    geography_level = Column(String, nullable=True)     # global | region | country | subdivision
+    geography_value = Column(String, nullable=True)
+    dqi_technological = Column(Float, nullable=True)
+    dqi_geographical = Column(Float, nullable=True)
+    dqi_temporal = Column(Float, nullable=True)
+
+    document = Column(Text, nullable=False)             # verbatim, as received
+    source_url = Column(String, nullable=True)
+    validation_warnings = Column(Text, nullable=True)   # JSON array, frozen at import
+    received_at = Column(String, nullable=True)
+    created_at = Column(String)

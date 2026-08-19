@@ -392,6 +392,33 @@ FRAMEWORKS = {
         "key_points": ["Audit total energy consumption; identify cost-effective energy-saving measures."],
     },
     # --- Logistics ---
+    "pact_pathfinder": {
+        "name": "PACT Technical Specifications v3 (WBCSD product carbon footprint exchange)",
+        "category": "Product & value chain", "jurisdiction": "global (WBCSD)",
+        "authority": "WBCSD Partnership for Carbon Transparency",
+        "platform_support": "partial", "endpoint": "/pact/footprints",
+        "applies_to": "Exchanging cradle-to-gate product carbon footprints with "
+                      "suppliers and customers over a common data model and API.",
+        "key_points": [
+            "v3 ONLY: version 2.x of the Technical Specifications was deprecated on "
+            "2026-04-01. v3 renamed the declared-unit fields, requires both "
+            "pcfExcludingBiogenicUptake and pcfIncludingBiogenicUptake, made "
+            "primaryDataShare and dqi mandatory, and removed version/updated/"
+            "statusComment.",
+            "Versioning is IMMUTABLE: a corrected footprint is a NEW id listing the "
+            "old one in precedingPfIds, and the old one is marked Deprecated. There "
+            "are no in-place updates.",
+            "Every quantity is a decimal STRING on the wire, not a JSON number.",
+            "A footprint is quoted against declaredUnitAmount, not against one "
+            "declared unit — divide before using it as a factor.",
+            "BUILT: importing, validating and holding a supplier's footprint "
+            "(/pact/footprints/import, /pact/validate). NOT BUILT: the host-side REST "
+            "API (GET /3/footprints, /3/footprints/{id}), OAuth2 client-credentials "
+            "auth, CloudEvents async events, or substitution of a received footprint "
+            "into the emissions inventory as primary data.",
+        ],
+    },
+
     "iso_14083": {
         "name": "ISO 14083 (transport chain GHG) / GLEC Framework",
         "category": "Logistics", "jurisdiction": "global",

@@ -2016,6 +2016,81 @@ def _csv_str(value) -> str:
     return "" if s.lower() in ("nan", "nat", "none") else s
 
 
+# --- PACT Pathfinder (WBCSD) product carbon footprint exchange ---------------
+# The consume side: a supplier's PCF, validated against the v3 Technical
+# Specifications and stored verbatim, so it can later replace an industry-average
+# factor with primary data.
+
+@app.post("/pact/footprints/import")
+async def import_product_footprint(request: Request,
+                                   direction: str = "received",
+                                   source_url: Optional[str] = None,
+                                   org: Organisation = Depends(current_org),
+                                   db: Session = Depends(get_db)):
+    """Import a PACT v3 ProductFootprint document (JSON body).
+
+    A non-conforming document is REFUSED with its errors, never stored and flagged:
+    a stored footprint is exactly what later becomes a primary-data factor, and a
+    flag is not a barrier once the row exists.
+    """
+    from .services.pact_store import import_footprint
+    body = await request.body()
+    result = import_footprint(db, org.id, body, direction=direction,
+                              source_url=source_url)
+    if result.get("stored"):
+        return result
+    if result.get("idempotent"):
+        return JSONResponse(result, status_code=200)
+    # Distinguish a protocol violation (same id, different content) from a plain
+    # validation failure: the caller must do different things about each.
+    status = 409 if result.get("incoming_content_hash") else 422
+    return JSONResponse(result, status_code=status)
+
+
+@app.get("/pact/footprints")
+def get_product_footprints(direction: Optional[str] = None,
+                           status: Optional[str] = None,
+                           product_id: Optional[str] = None,
+                           org: Organisation = Depends(current_org),
+                           db: Session = Depends(get_db)):
+    """Footprints this organisation holds, newest first."""
+    from .services.pact_store import list_footprints
+    return JSONResponse({"data": list_footprints(
+        db, org.id, direction=direction, status=status, product_id=product_id)})
+
+
+@app.get("/pact/footprints/{footprint_id}")
+def get_product_footprint(footprint_id: int, include_document: bool = False,
+                          org: Organisation = Depends(current_org),
+                          db: Session = Depends(get_db)):
+    """One held footprint. ``include_document`` returns the verbatim bytes as
+    received — the evidence an assuror asks for, not our reconstruction of it."""
+    from .models import ProductFootprint
+    from .services.pact_store import footprint_view
+    row = db.query(ProductFootprint).filter(
+        ProductFootprint.id == footprint_id,
+        ProductFootprint.organisation_id == org.id).first()
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail="footprint not found for this organisation")
+    return JSONResponse(footprint_view(row, include_document=include_document))
+
+
+@app.post("/pact/validate")
+async def validate_product_footprint(request: Request,
+                                     org: Organisation = Depends(current_org)):
+    """Validate a document against the v3 spec WITHOUT storing it.
+
+    Errors block an import; warnings do not. Useful before publishing one of your
+    own footprints to a customer.
+    """
+    from .services.pact import parse_document, validate
+    doc, err = parse_document(await request.body())
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    return JSONResponse(validate(doc))
+
+
 # --- Hourly Scope 2 (proposed GHG Protocol revision: temporal matching) -------
 # A PARALLEL method beside the annual location/market figures. Nothing here feeds
 # compute_co2e, so an organisation with no hourly data is unaffected in every way.
