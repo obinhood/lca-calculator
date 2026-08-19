@@ -21,6 +21,9 @@ from .services.qa import check_records
 from .services.resolver import auto_map_activity
 from .services.calc import compute_co2e, ReportingPeriodError, _parse_iso_date
 from .services.gwp import SUPPORTED_GWP_SETS
+from .services.uncertainty import (
+    propagate, DEFAULT_CORRELATION, DEFAULT_ITERATIONS,
+)
 from .reports.summary import summary
 from .reports.secr import secr_report
 from .reports.sb253 import sb253_report
@@ -740,6 +743,41 @@ def get_run_lineage(run_id: int, org: Organisation = Depends(current_org),
                          "source_file": a.source_file},
         } for li, a in rows],
     }
+
+
+@app.get("/runs/{run_id}/uncertainty")
+def get_run_uncertainty(run_id: int,
+                        method: str = "location",
+                        correlation: str = DEFAULT_CORRELATION,
+                        iterations: int = DEFAULT_ITERATIONS,
+                        confidence: float = 0.95,
+                        top_n: int = 10,
+                        org: Organisation = Depends(current_org),
+                        db: Session = Depends(get_db)):
+    """Monte Carlo propagation of the run's frozen per-line pedigree sigmas.
+
+    The interval an ESRS E1 / ISO 14064-1 / CDP uncertainty disclosure asks for,
+    derived from distributions the calculation already froze onto every line. Reads
+    only the frozen run, so re-running it on a filed run returns bit-identical
+    numbers years later; ``reproducibility.input_fingerprint`` proves which inputs
+    produced them.
+
+    ``correlation`` defaults to ``by_factor`` — lines sharing an emission factor
+    share that factor's error. The response also carries the ``independent`` and
+    ``perfect`` bounds so the reader sees how much the answer rests on that choice.
+    """
+    run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                          CalculationRun.organisation_id == org.id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found for this organisation")
+    result = propagate(db, run.id, method=method, correlation=correlation,
+                       iterations=iterations, confidence=confidence, top_n=top_n)
+    # A refusal caused by a bad PARAMETER is a client error; a refusal caused by the
+    # run's own data (no lines, no quantified uncertainty) is a legitimate 200 answer
+    # that says so — the caller asked a valid question and this is the true reply.
+    if not result.get("available") and "run_id" not in result:
+        raise HTTPException(status_code=400, detail=result.get("reason", "invalid request"))
+    return JSONResponse(result)
 
 
 @app.get("/reports/summary.txt")

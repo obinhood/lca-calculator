@@ -4,6 +4,7 @@ pydantic==2.8.2
 SQLAlchemy==2.0.35
 alembic==1.13.2
 pandas==2.2.3
+numpy>=1.26,<3     # Monte Carlo uncertainty propagation (services/uncertainty.py)
 python-multipart==0.0.9
 rapidfuzz==3.9.6
 pint==0.24.4

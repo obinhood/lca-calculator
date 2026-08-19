@@ -71,6 +71,8 @@ FRAMEWORKS = {
         "key_points": [
             "Quantify direct emissions, indirect energy emissions, and other indirect (value chain) categories.",
             "Document methodologies, GWP source, base year, and uncertainty.",
+            "Uncertainty is quantified per line (pedigree matrix) and propagated to an "
+            "inventory-level 95% interval at /runs/{run_id}/uncertainty.",
             "Establish an inventory for verification against ISO 14064-3.",
         ],
     },
@@ -186,6 +188,8 @@ FRAMEWORKS = {
             "E1-6 gross Scope 1, 2 (location + market), 3 and total GHG; GHG intensity per net revenue.",
             "E1-5 energy consumption/mix; E1-7 removals & carbon credits (separate from gross); E1-4 targets; E1-1 transition plan.",
             "Double materiality; digital tagging in inline XBRL against the ESRS taxonomy.",
+            "Measurement uncertainty: an inventory-level 95% interval with a variance-share "
+            "ranking of its drivers is available at /runs/{run_id}/uncertainty.",
             "Assurance escalates from limited toward reasonable over the phase-in.",
         ],
     },
