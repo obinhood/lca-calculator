@@ -176,23 +176,50 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
     # is a parallel view of the same activities, not additional emissions.
     by_scope = db.query(li.scope, func.sum(li.co2e))\
         .filter(li.run_id == run.id, li.method == "location").group_by(li.scope).all()
-    by_cat = db.query(ActivityRecord.category, func.sum(li.co2e))\
-        .join(li, li.activity_id == ActivityRecord.id)\
-        .filter(li.run_id == run.id, li.method == "location")\
-        .group_by(ActivityRecord.category).all()
 
-    # GHG Protocol Scope 3 method split: how much of the total rests on which
-    # calculation method (supplier_specific/hybrid = primary-leaning data;
-    # spend_based = lowest tier). Assurers and the Scope 3 revision ask for this.
-    # Read from the FROZEN per-line detail (method_type captured at compute time),
-    # NOT the live activity->factor mapping — a re-map after the run must not
-    # relabel this immutable run's method mix.
-    method_split = {}
-    for details, line_co2e in db.query(li.details, li.co2e)\
+    # Everything below is read from the FROZEN per-line detail, in ONE pass over the
+    # run's location lines:
+    #   * method split — GHG Protocol Scope 3 method hierarchy: how much of the total
+    #     rests on which method (supplier_specific/hybrid = primary-leaning data;
+    #     spend_based = lowest tier). Assurers and the Scope 3 revision ask for this.
+    #   * by_category and the assumed-scope caveat, keyed on `activity_category`.
+    # None of it may join back to the live ActivityRecord: a post-run re-map would
+    # relabel this immutable run's method mix, and a post-run CATEGORY EDIT used to move
+    # a filed run's emissions between breakdown rows (and rename the row the caveat
+    # named) without the run itself changing at all.
+    method_split, by_cat_kg, scope_assumed = {}, {}, {}
+    _pre_freeze = []          # lines from runs computed before the category freeze
+
+    def _bucket(cat, kg, assumed):
+        cat = cat or "?"
+        by_cat_kg[cat] = by_cat_kg.get(cat, 0.0) + kg
+        if assumed:
+            scope_assumed[cat] = scope_assumed.get(cat, 0) + 1
+
+    for details, line_co2e, activity_id in db.query(li.details, li.co2e, li.activity_id)\
             .filter(li.run_id == run.id, li.method == "location").all():
         d = json.loads(details or "{}")
         m = d.get("method_type") or "average_data"
         method_split[m] = method_split.get(m, 0.0) + (line_co2e or 0.0)
+        # Surface activities whose scope was ASSUMED (unrecognised category -> Scope 3),
+        # so a silent mis-scoping of purchased energy (Scope 2) or a fugitive source
+        # (Scope 1) is visible to the report consumer.
+        _assumed = d.get("scope_source") == "assumed_scope3"
+        # `in`, not a truth test: a frozen NULL category must stay distinguishable from
+        # a run that froze no category at all.
+        if "activity_category" in d:
+            _bucket(d["activity_category"], line_co2e or 0.0, _assumed)
+        else:
+            _pre_freeze.append((activity_id, line_co2e or 0.0, _assumed))
+    if _pre_freeze:
+        # A run frozen before `activity_category` existed has no better source than the
+        # live activity — the same fallback doctrine as `kwh_contractual_rank0` below.
+        # One batched lookup, so the leak is confined to legacy runs instead of every run.
+        _live = dict(db.query(ActivityRecord.id, ActivityRecord.category).filter(
+            ActivityRecord.id.in_([aid for aid, _, _ in _pre_freeze])).all())
+        for aid, kg, assumed in _pre_freeze:
+            _bucket(_live.get(aid), kg, assumed)
+    by_cat = sorted(by_cat_kg.items())          # deterministic order, was SQL GROUP BY
     total_methods = sum(method_split.values())
     primary_kg = method_split.get("supplier_specific", 0.0) + method_split.get("hybrid", 0.0)
 
@@ -222,16 +249,6 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         kwh_market_unverified += d.get("kwh_market_unverified", 0.0) or 0.0
         skipped_market.update(d.get("instruments_skipped_market", []) or [])
 
-    # Surface activities whose scope was ASSUMED (unrecognised category -> Scope 3)
-    # from the frozen line lineage, so a silent mis-scoping of purchased energy
-    # (Scope 2) or a fugitive source (Scope 1) is visible to the report consumer.
-    scope_assumed = {}
-    for details, cat in db.query(li.details, ActivityRecord.category)\
-            .join(ActivityRecord, li.activity_id == ActivityRecord.id)\
-            .filter(li.run_id == run.id, li.method == "location").all():
-        if (json.loads(details or "{}")).get("scope_source") == "assumed_scope3":
-            scope_assumed[cat or "?"] = scope_assumed.get(cat or "?", 0) + 1
-
     # Computed ONCE: three call sites used to load every line item separately, which was
     # ~a third of summary()'s runtime on a large run, paid by every renderer.
     _cat15_double = _cat15_double_declared(db, run)
@@ -249,7 +266,10 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             "assumed_scope3_by_category": scope_assumed,
             "note": "These categories were unrecognised and defaulted to Scope 3 — "
                     "verify none are purchased energy (Scope 2) or direct/fugitive "
-                    "(Scope 1) before relying on the scope split.",
+                    "(Scope 1) before relying on the scope split. Resolve by mapping the "
+                    "category to a scope rule and recomputing: the guess is re-derived on "
+                    "every run and is never written back onto the activity, so a "
+                    "correction always takes effect.",
         } if scope_assumed else None),
         "total_co2e": run.total_co2e,                     # location-based (headline, activity-derived)
         "total_co2e_market": run.total_co2e_market,       # dual reporting counterpart
@@ -511,14 +531,31 @@ def run_factor_sources(db: Session, run: CalculationRun) -> list:
 
 def scope3_by_category(db: Session, run: CalculationRun) -> dict:
     """Scope 3 kg CO2e by activity category, filtered by the line items' FROZEN
-    scope — never by category-name heuristics (a preset scope or a new
-    non-carrier Scope-1 category would silently misattribute otherwise)."""
+    scope — never by category-name heuristics (a declared scope or a new
+    non-carrier Scope-1 category would silently misattribute otherwise).
+
+    The category is the FROZEN one too, for the same reason `summary()` uses it: a
+    post-run category edit must not move a filed run's emissions between rows.
+    """
     li = EmissionLineItem
-    rows = db.query(ActivityRecord.category, func.sum(li.co2e))\
-        .join(li, li.activity_id == ActivityRecord.id)\
-        .filter(li.run_id == run.id, li.method == "location", li.scope == "3")\
-        .group_by(ActivityRecord.category).all()
-    return {(c or "?"): (v or 0.0) for c, v in rows}
+    rows = db.query(li.details, li.co2e, li.activity_id)\
+        .filter(li.run_id == run.id, li.method == "location", li.scope == "3").all()
+    out: dict = {}
+    pre_freeze = []
+    for details, co2e, activity_id in rows:
+        d = json.loads(details or "{}")
+        if "activity_category" in d:
+            c = d["activity_category"] or "?"
+            out[c] = out.get(c, 0.0) + (co2e or 0.0)
+        else:
+            pre_freeze.append((activity_id, co2e or 0.0))
+    if pre_freeze:
+        live = dict(db.query(ActivityRecord.id, ActivityRecord.category).filter(
+            ActivityRecord.id.in_([aid for aid, _ in pre_freeze])).all())
+        for aid, kg in pre_freeze:
+            c = live.get(aid) or "?"
+            out[c] = out.get(c, 0.0) + kg
+    return out
 
 
 def coverage(db: Session, run: CalculationRun):

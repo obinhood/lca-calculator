@@ -2,6 +2,8 @@
 
 Each test reproduces the audit's own failing scenario and pins the corrected behaviour.
 """
+import json
+
 import pytest
 
 from app.models import (ActivityRecord, CalculationRun, EmissionFactor,
@@ -741,3 +743,229 @@ def test_esrs_renewable_share_unchanged_for_a_wholly_owned_org(db):
     assert energy["electricity_renewable_contractual_mwh"] == pytest.approx(0.7)
     assert energy["electricity_renewable_contractual_gross_mwh"] == pytest.approx(0.7)
     assert energy["electricity_renewable_share_pct"] == pytest.approx(70.0)
+# --- derived scope written back onto the live activity ------------------------------
+#
+# The audit's reproduction: an activity whose category this build does not recognise
+# (`purchased_steam_xyz` — purchased steam is Scope 2) is defaulted to Scope 3 and
+# FLAGGED. compute_co2e then wrote that guess onto ActivityRecord.scope, so the next run
+# over IDENTICAL data re-read it as an explicit preparer declaration: the caveat vanished
+# from a disclosed scope split (ESRS E1-6, IFRS S2 29(a), CDP C6) and no later SCOPE_RULES
+# entry could ever reach the activity again.
+
+def _steam(db, org_id):
+    """1,000 kWh of purchased steam on an UNRECOGNISED category — Scope 2 in reality."""
+    f = _factor(db, 0.3, category="purchased_steam_xyz", unit="kWh")
+    return f, _act(db, org_id, f, 1000.0)
+
+
+def test_the_assumed_scope_caveat_survives_a_second_run_over_identical_data(db):
+    """Run twice, change nothing. The second run must still say the scope was guessed."""
+    org = _org(db, "SteamCo")
+    _f, a = _steam(db, org.id)
+
+    first = summary(db, org.id, compute_co2e(db, org.id).id)
+    assert first["scope_assumptions"] is not None
+    assert first["scope_assumptions"]["assumed_scope3_by_category"] == {"purchased_steam_xyz": 1}
+    assert first["by_scope"] == [{"scope": "3", "co2e": pytest.approx(300.0)}]
+
+    second = summary(db, org.id, compute_co2e(db, org.id).id)
+    assert second["scope_assumptions"] == first["scope_assumptions"]     # was None
+    assert second["by_scope"] == first["by_scope"]
+
+    # The mechanism: nothing was written back, so a machine guess can never be re-read as
+    # a preparer's declaration.
+    db.refresh(a)
+    assert a.scope is None
+    from app.models import EmissionLineItem
+    # Both runs' frozen lineage — not just the summary — records the guess AS a guess.
+    sources = {json.loads(li.details)["scope_source"]
+               for li in db.query(EmissionLineItem).filter(
+                   EmissionLineItem.method == "location").all()}
+    assert sources == {"assumed_scope3"}                                # was {"explicit"} too
+
+
+def test_a_scope_rules_correction_still_reaches_an_already_calculated_activity(db, monkeypatch):
+    """The second consequence: the write-back made the misclassification permanent —
+    `a.scope` was tested BEFORE the category rule, so adding the category to SCOPE_RULES
+    had no effect on any activity that had already been through a run."""
+    from app.services import calc as calc_mod
+    org = _org(db, "FixableCo")
+    _f, a = _steam(db, org.id)
+    compute_co2e(db, org.id)                                   # first run guesses Scope 3
+
+    monkeypatch.setitem(calc_mod.SCOPE_RULES, "purchased_steam_xyz", "2")
+    s = summary(db, org.id, compute_co2e(db, org.id).id)
+
+    assert s["by_scope"] == [{"scope": "2", "co2e": pytest.approx(300.0)}]
+    assert s["scope_assumptions"] is None                       # correctly classified now
+    assert s["scope2"]["location_based"] == pytest.approx(300.0)
+    db.refresh(a)
+    assert a.scope is None
+
+
+def test_an_explicit_preparer_declaration_stays_distinguishable_from_a_guess(db):
+    """Removing the write-back must not remove the explicit path: a preparer who DECLARES
+    the scope is honoured, recorded as `explicit`, and raises no assumption caveat."""
+    from app.models import EmissionLineItem
+    org = _org(db, "DeclaringCo")
+    _f, a = _steam(db, org.id)
+    a.scope = "2"                                              # preparer's own declaration
+    db.commit()
+
+    run = compute_co2e(db, org.id)
+    s = summary(db, org.id, run.id)
+    assert s["by_scope"] == [{"scope": "2", "co2e": pytest.approx(300.0)}]
+    assert s["scope_assumptions"] is None
+    line = db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id, EmissionLineItem.method == "location").one()
+    assert json.loads(line.details)["scope_source"] == "explicit"
+
+
+def test_the_assumed_scope_caveat_reaches_the_filing_payloads(db):
+    """The block was produced by summary() and dropped by every renderer that consumes it,
+    so the caveat never reached a filing. Each framework below discloses the scope split
+    (or, for ETS, the Scope 1 figure an assumed-out source understates)."""
+    from app.reports.compliance_extra import ets_mrv_report
+    from app.reports.ecovadis import ecovadis_readiness
+    from app.reports.esrs_e1 import esrs_e1_report
+    from app.reports.gri import gri_report
+    from app.reports.issb_s2 import issb_s2_report
+    from app.reports.sb253 import sb253_report
+    from app.reports.secr import secr_report
+    org = _org(db, "FilingCo")
+    _steam(db, org.id)
+    run = compute_co2e(db, org.id)
+    rid = run.id
+
+    payloads = {
+        "cdp": cdp_export(db, org.id, run_id=rid, intensity_denominator=1.0),
+        "esrs_e1": esrs_e1_report(db, org.id, run_id=rid, net_revenue_millions=1.0),
+        "issb_s2": issb_s2_report(db, org.id, run_id=rid),
+        "gri": gri_report(db, org.id, run_id=rid, intensity_denominator=1.0),
+        "secr": secr_report(db, org.id, run_id=rid, intensity_denominator=1.0),
+        "sb253": sb253_report(db, org.id, run_id=rid),
+        "ecovadis": ecovadis_readiness(db, org.id, run_id=rid, intensity_denominator=1.0),
+        "ets": ets_mrv_report(db, org.id, "UK ETS", run_id=rid),
+    }
+    for name, p in payloads.items():
+        assert p.get("scope_assumptions") is not None, f"{name} dropped the caveat"
+        assert p["scope_assumptions"]["assumed_scope3_by_category"] == {
+            "purchased_steam_xyz": 1}, name
+        assert "purchased energy (Scope 2)" in p["scope_assumptions"]["note"], name
+
+    # And a clean run states the absence rather than omitting the key.
+    clean = _org(db, "CleanScopeCo")
+    _act(db, clean.id, _factor(db, 0.2, category="electricity", unit="kWh"), 1000.0)
+    clean_run = compute_co2e(db, clean.id)
+    assert cdp_export(db, clean.id, run_id=clean_run.id,
+                      intensity_denominator=1.0)["scope_assumptions"] is None
+
+    # The PDF is the artefact that actually gets filed — the caveat has to be ON THE PAGE,
+    # not merely in the JSON a preparer may never read.
+    import io
+
+    from pypdf import PdfReader
+
+    from app.reports.export import to_csv, to_pdf
+    pdf = to_pdf(payloads["esrs_e1"], framework_label="CSRD ESRS E1",
+                 organisation="FilingCo", generated_at="2026-01-01T00:00:00+00:00")
+    text = "".join(p.extract_text() for p in PdfReader(io.BytesIO(pdf)).pages)
+    assert "Assumed scope classification" in text
+    assert "purchased_steam_xyz" in text
+    assert "purchased energy" in text
+    assert "scope_assumptions" in to_csv(payloads["esrs_e1"])
+
+    # ...and the plain-text report, which PRINTS the scope split it qualifies.
+    from app.main import get_plain_report
+    txt = get_plain_report(run_id=rid, org=org, db=db).body.decode()
+    assert "By scope:" in txt
+    assert "ASSUMED SCOPE 3" in txt and "purchased_steam_xyz=1" in txt
+
+
+# --- live-vs-frozen: the category behind a filed run's breakdown --------------------
+
+def test_a_post_run_category_edit_cannot_move_a_filed_runs_breakdown(db):
+    """`by_category` and the assumed-scope caveat were the last aggregations in summary.py
+    reading through a live join to ActivityRecord.category, so renaming a category after
+    the run silently re-cut a FILED run's breakdown."""
+    org = _org(db, "EditCo")
+    _f, a = _steam(db, org.id)
+    run = compute_co2e(db, org.id)
+    before = summary(db, org.id, run.id)
+
+    a.category = "renamed_after_filing"
+    db.commit()
+
+    after = summary(db, org.id, run.id)
+    assert after["by_category"] == before["by_category"]
+    assert after["by_category"] == [
+        {"category": "purchased_steam_xyz", "co2e": pytest.approx(300.0)}]
+    assert after["scope_assumptions"] == before["scope_assumptions"]
+    # The frozen total is unaffected either way — the defect was WHICH ROW it sat in.
+    assert after["total_co2e"] == pytest.approx(300.0)
+
+
+# --- live-vs-frozen: the carrier and unit behind a filed energy figure ---------------
+
+def _energy_run(db):
+    """One reported carrier (electricity, in the kWh total) and one omitted one (LPG)."""
+    org = _org(db, "EnergyEditCo")
+    elec = _factor(db, 0.2, category="electricity", unit="kWh")
+    lpg = _factor(db, 1.5, category="lpg", unit="L")
+    a_elec = _act(db, org.id, elec, 1000.0)
+    a_lpg = _act(db, org.id, lpg, 500.0)
+    return org, a_elec, a_lpg, compute_co2e(db, org.id)
+
+
+def test_a_post_run_category_or_unit_edit_cannot_move_a_filed_energy_figure(db):
+    """`_energy_kwh` took its quantity from the frozen detail but its CARRIER and UNIT from
+    a live join to ActivityRecord, so editing either after the run re-cut a FILED SECR /
+    ESOS / ESRS E1-5 kWh figure, and moved a carrier in or out of `carriers_omitted` (the
+    completeness caveat), without the immutable run changing at all."""
+    from app.reports.secr import _energy_kwh
+    org, a_elec, a_lpg, run = _energy_run(db)
+    before = _energy_kwh(db, run)
+    assert before["total_kwh"] == pytest.approx(1000.0)
+    assert before["carriers_omitted"] == {"lpg": 1}
+
+    # Every post-filing edit that used to reach the figure: restate the reported carrier's
+    # UNIT, rename it out of the allowlist, and rename the omitted carrier INTO it.
+    a_elec.category = "electricity_uk"
+    a_elec.unit = "MWh"
+    a_lpg.category = "diesel"
+    db.commit()
+
+    after = _energy_kwh(db, run)
+    assert after["total_kwh"] == pytest.approx(1000.0)   # not 0, not 1_000_000, not 6_000
+    assert after["electricity"] == pytest.approx(1000.0)
+    assert after["diesel"] == 0.0            # LPG's 500 L never joins the diesel carrier
+    assert after["carriers_omitted"] == before["carriers_omitted"]
+    assert after["notes"] == before["notes"]
+
+
+def test_an_energy_line_frozen_before_the_carrier_freeze_still_reads_the_activity(db):
+    """The fallback is keyed on the KEY's absence, never on a falsy value: a line frozen
+    before the carrier/unit freeze has no better source than the live activity, while a
+    line that froze a NULL category must not silently fall back to a live rename."""
+    from app.models import EmissionLineItem
+    from app.reports.secr import _energy_kwh
+    org, a_elec, _a_lpg, run = _energy_run(db)
+    line = db.query(EmissionLineItem).filter(
+        EmissionLineItem.run_id == run.id, EmissionLineItem.activity_id == a_elec.id,
+        EmissionLineItem.method == "location").one()
+
+    d = json.loads(line.details)
+    del d["activity_category"], d["activity_unit"]        # a pre-freeze run
+    line.details = json.dumps(d)
+    db.commit()
+    assert _energy_kwh(db, run)["total_kwh"] == pytest.approx(1000.0)
+
+    # Frozen NULL: the carrier is unknown, so it is neither reported nor named as an
+    # omitted one — and a live category is NOT substituted for it.
+    d["activity_category"], d["activity_unit"] = None, "kWh"
+    line.details = json.dumps(d)
+    db.commit()
+    frozen_null = _energy_kwh(db, run)
+    assert frozen_null["total_kwh"] == 0.0
+    assert "electricity" not in (frozen_null.get("carriers_omitted") or {})
+    assert None not in (frozen_null.get("carriers_omitted") or {})

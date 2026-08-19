@@ -65,19 +65,48 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
         line's FROZEN share_factor (never the live entity — reproduction contract).
         Correct for ESRS E1-5, whose scope follows the consolidation scope.
     """
-    q = db.query(ActivityRecord, EmissionLineItem.details).join(
+    # ONE pass over the run's location lines, partitioned by their FROZEN carrier: into
+    # the kWh total, or into the `carriers_omitted` caveat below. The carrier filter runs
+    # in Python because the category it filters on is the LINE's, not the live
+    # ActivityRecord's — a post-run category or unit edit used to change a FILED SECR /
+    # ESOS / ESRS E1-5 energy figure, and to move a carrier in or out of the completeness
+    # caveat, without the immutable run changing at all.
+    # Columns rather than the ORM entity, since every location line is now read and the
+    # live values serve only as the pre-freeze fallback.
+    q = db.query(ActivityRecord.id, ActivityRecord.category, ActivityRecord.unit,
+                 ActivityRecord.quantity, EmissionLineItem.details).join(
         EmissionLineItem, EmissionLineItem.activity_id == ActivityRecord.id)\
         .filter(EmissionLineItem.run_id == run.id,
-                EmissionLineItem.method == "location",
-                ActivityRecord.category.in_(_ENERGY_CARRIERS))
+                EmissionLineItem.method == "location")
     if scopes is not None:
         q = q.filter(EmissionLineItem.scope.in_(scopes))
     rows = q.all()
     out = {c: 0.0 for c in _ENERGY_CARRIERS}
     notes = []
     weighted_any = False
-    for a, details in rows:
+    # Any energy-bearing activity OUTSIDE the three-carrier allowlist had its emissions
+    # counted in Scope 1/2 while its energy silently vanished from the kWh figure. The
+    # omission is now measured and disclosed; an undisclosed one is what made a partial
+    # energy total read as complete.
+    # Restricted to the SAME scopes as the figure it annotates — the `scopes` filter
+    # above. Without this it reported a Scope 3 line as an omission from an
+    # own-operations total it was never part of, and asserted its emissions sat in
+    # Scope 1/2, which was simply false, in a filed CSRD disclosure.
+    omitted: dict = {}
+    for _aid, _live_cat, _live_unit, _live_qty, details in rows:
         _d = json.loads(details or "{}")
+        # `in`, not a truthiness test: a run frozen before the category/unit freeze has
+        # no better source than the live activity, but a run that froze a NULL category
+        # must stay distinguishable from one that froze no category at all.
+        cat = _d["activity_category"] if "activity_category" in _d else _live_cat
+        unit = _d["activity_unit"] if "activity_unit" in _d else _live_unit
+        if cat not in _ENERGY_CARRIERS:
+            # A NULL carrier is in NEITHER bucket: it is not one of the reported carriers,
+            # and naming it as an omitted one would assert a carrier nobody recorded.
+            # (The SQL `~in_()` this replaced dropped it the same way, via NULL logic.)
+            if cat is not None and (unit or "").strip().lower().replace(" ", "") in _ENERGY_UNITS:
+                omitted[cat] = omitted.get(cat, 0) + 1
+            continue
         share = 1.0
         if consolidated:
             share = (_d.get("consolidation") or {}).get("share_factor", 1.0)
@@ -88,36 +117,17 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
         # that were prorated — a wrong implied intensity, and 2000 kWh reported across two
         # periods for a 1000 kWh invoice. Falls back for runs frozen before proration
         # existed, whose details carry no `quantity` key, so those stay byte-identical.
-        _qty = _d["quantity"] if "quantity" in _d else a.quantity
+        _qty = _d["quantity"] if "quantity" in _d else _live_qty
         try:
-            if a.category == "diesel":
-                litres = convert(_qty, a.unit, "L")
+            if cat == "diesel":
+                litres = convert(_qty, unit, "L")
                 out["diesel"] += litres * DIESEL_KWH_PER_LITRE_DEMO * share
                 notes.append(f"diesel converted at DEMO constant "
                              f"{DIESEL_KWH_PER_LITRE_DEMO} kWh/L")
             else:
-                out[a.category] += convert(_qty, a.unit, "kWh") * share
+                out[cat] += convert(_qty, unit, "kWh") * share
         except UnitConversionError as exc:
-            notes.append(f"activity {a.id} excluded from energy figure: {exc}")
-    # Any energy-bearing activity OUTSIDE the three-carrier allowlist had its emissions
-    # counted in Scope 1/2 while its energy silently vanished from the kWh figure. The
-    # omission is now measured and disclosed; an undisclosed one is what made a partial
-    # energy total read as complete.
-    # Restricted to the SAME scopes as the figure it annotates. Without this it reported
-    # a Scope 3 line as an omission from an own-operations total it was never part of —
-    # and asserted its emissions sat in Scope 1/2, which was simply false, in a filed
-    # CSRD disclosure.
-    oq = db.query(ActivityRecord.category, ActivityRecord.unit)\
-        .join(EmissionLineItem, EmissionLineItem.activity_id == ActivityRecord.id)\
-        .filter(EmissionLineItem.run_id == run.id,
-                EmissionLineItem.method == "location",
-                ~ActivityRecord.category.in_(_ENERGY_CARRIERS))
-    if scopes is not None:
-        oq = oq.filter(EmissionLineItem.scope.in_(scopes))
-    omitted: dict = {}
-    for cat, u in oq.all():
-        if (u or "").strip().lower().replace(" ", "") in _ENERGY_UNITS:
-            omitted[cat] = omitted.get(cat, 0) + 1
+            notes.append(f"activity {_aid} excluded from energy figure: {exc}")
     if omitted:
         out["carriers_omitted"] = omitted
         _where = ("the Scope 1/2 figures" if scopes is None or set(scopes) <= {"1", "2"}
@@ -266,6 +276,10 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         "derivations": D.summarise(derivations),
         "disclosure_ready": not blockers,
         "blockers": blockers,
+        # SECR's mandatory headline is Scope 1 + 2; Scope 3 is voluntary. An activity
+        # ASSUMED into Scope 3 is therefore assumed OUT of the mandatory figure, which is
+        # exactly the caveat a reader needs beside it. None when nothing was assumed.
+        "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "reporting_period_id": run.reporting_period_id,
         "emissions_tco2e": {

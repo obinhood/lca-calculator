@@ -694,9 +694,17 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 detail["biogenic_co2e"] = biogenic
                 total_biogenic += biogenic
 
-            # Scope classification: explicit preset > category rule > flagged default.
+            # Scope classification: explicit declaration > category rule > flagged default.
             # An unrecognised category defaults to Scope 3 but records scope_source
             # so the assumption is visible in the frozen lineage and the summary.
+            #
+            # The DERIVED scope is frozen on the line item (EmissionLineItem.scope +
+            # details["scope_source"]) and is NEVER written back to the activity — same
+            # doctrine as ghgp_category. The write-back that used to sit here re-entered
+            # this branch as "explicit" on the NEXT run over identical data, so the
+            # assumed-scope caveat disappeared from the summary (a reader could no longer
+            # tell a preparer's declaration from a machine guess), and no later
+            # SCOPE_RULES entry could ever reach the activity again.
             _cat = (a.category or "").lower()
             if a.scope:
                 scope, scope_source = a.scope, "explicit"
@@ -704,7 +712,6 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 scope, scope_source = SCOPE_RULES[_cat], "category_rule"
             else:
                 scope, scope_source = "3", "assumed_scope3"
-            a.scope = scope
             detail["scope_source"] = scope_source
             # IFRS S2 ¶29(a)(iv) per-entity Scope 1 / Scope 2 split. Uses the same
             # WEIGHTED (consolidated) co2e that feeds `total` — the location basis, to

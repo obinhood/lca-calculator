@@ -276,6 +276,9 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
         "framework": "CSRD ESRS E1",
         "disclosure_ready": not blockers,
         "blockers": blockers,
+        # E1-6 mandates gross emissions BY SCOPE, so an assumed scope is a caveat on a
+        # DISCLOSED figure, not an internal detail. None when nothing was assumed.
+        "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "reporting_period_id": run.reporting_period_id,
         "e1_6_gross_ghg_emissions_tco2e": {

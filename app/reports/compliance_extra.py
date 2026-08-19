@@ -77,6 +77,11 @@ def ets_mrv_report(db: Session, organisation_id: int, scheme: str,
         "report_ready": not blockers,
         "blockers": blockers,
         "run": run_info,
+        # An unrecognised category defaults to Scope 3, so a fugitive or process source
+        # whose category this build does not know is assumed OUT of the direct figure an
+        # installation surrenders allowances against — an UNDERSTATEMENT, and the one
+        # caveat this report cannot afford to drop. None when nothing was assumed.
+        "scope_assumptions": s.get("scope_assumptions"),
         "direct_emissions_tco2e": round(scope1 / 1000.0, 3),  # Scope 1 = ETS direct
         "verified": verified,
         "note": "Reportable emissions are direct (Scope 1) under the MRR/AVR; "
