@@ -2076,6 +2076,76 @@ def get_product_footprint(footprint_id: int, include_document: bool = False,
     return JSONResponse(footprint_view(row, include_document=include_document))
 
 
+@app.post("/pact/footprints/{footprint_id}/materialise")
+def materialise_pact_factor(footprint_id: int,
+                            category: Optional[str] = None,
+                            subcategory: Optional[str] = None,
+                            org: Organisation = Depends(current_org),
+                            db: Session = Depends(get_db)):
+    """Turn a held supplier footprint into a supplier-specific emission factor.
+
+    The factor is an ordinary EmissionFactor with method_type='supplier_specific',
+    so every existing mechanism applies to it unchanged — the pedigree reliability
+    indicator (1, the best, against 5 for spend-based), the narrowed Monte Carlo
+    interval, the primary-data share, the GWP-vintage guard and the frozen per-line
+    lineage. No special case was added to the calculation engine.
+    """
+    from .models import ProductFootprint
+    from .services.pact_factor import materialise
+    row = db.query(ProductFootprint).filter(
+        ProductFootprint.id == footprint_id,
+        ProductFootprint.organisation_id == org.id).first()
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail="footprint not found for this organisation")
+    result = materialise(db, row, category=category, subcategory=subcategory)
+    if result.get("materialised") or result.get("idempotent"):
+        return JSONResponse(result)
+    return JSONResponse(result, status_code=422)
+
+
+@app.get("/pact/footprints/{footprint_id}/materialisation")
+def preview_pact_factor(footprint_id: int,
+                        org: Organisation = Depends(current_org),
+                        db: Session = Depends(get_db)):
+    """Whether a footprint can become a factor, and what that factor would be —
+    without writing anything."""
+    from .models import ProductFootprint
+    from .services.pact_factor import materialisation_verdict
+    row = db.query(ProductFootprint).filter(
+        ProductFootprint.id == footprint_id,
+        ProductFootprint.organisation_id == org.id).first()
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail="footprint not found for this organisation")
+    return JSONResponse(materialisation_verdict(db, row))
+
+
+@app.post("/pact/factors/{factor_id}/bind")
+def bind_pact_factor(factor_id: int, activity_ids: str = Query(...),
+                     org: Organisation = Depends(current_org),
+                     db: Session = Depends(get_db)):
+    """Bind activities to a materialised supplier factor. `activity_ids` is a
+    comma-separated list.
+
+    An explicit per-activity decision, never an automatic name match: the buyer
+    knows which purchase the supplier's product is, and a fuzzy match would put
+    someone else's footprint on a line with nothing in the result to reveal it.
+    """
+    from .services.pact_factor import bind_activities
+    try:
+        ids = [int(x) for x in activity_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400,
+                            detail="activity_ids must be a comma-separated list of integers")
+    if not ids:
+        raise HTTPException(status_code=400, detail="activity_ids must not be empty")
+    result = bind_activities(db, org.id, factor_id, ids)
+    if result.get("reason") and result["bound"] == 0 and "not a materialised" in result["reason"]:
+        raise HTTPException(status_code=404, detail=result["reason"])
+    return JSONResponse(result)
+
+
 @app.post("/pact/validate")
 async def validate_product_footprint(request: Request,
                                      org: Organisation = Depends(current_org)):
