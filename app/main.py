@@ -2016,6 +2016,97 @@ def _csv_str(value) -> str:
     return "" if s.lower() in ("nan", "nat", "none") else s
 
 
+# --- Pre-calculation screening: the assurance exception register -------------
+
+@app.post("/activities/screen")
+def run_screening(materiality_pct: float = 5.0, trivial_floor_pct: float = 0.25,
+                  org: Organisation = Depends(current_org),
+                  db: Session = Depends(get_db)):
+    """Screen this organisation's activity data and update the exception register.
+
+    Findings are keyed by a stable hash of the check and the activities it
+    concerns, so re-screening UPDATES rather than duplicates and a disposition made
+    earlier still attaches. A defect that has gone away is marked superseded, never
+    deleted — ISAE 3410 para 69 forbids discarding engagement documentation.
+    """
+    from .services.screening import screen
+    if not (0 < materiality_pct <= 100):
+        raise HTTPException(status_code=400, detail="materiality_pct must be in (0, 100]")
+    if not (0 <= trivial_floor_pct < materiality_pct):
+        raise HTTPException(
+            status_code=400,
+            detail="trivial_floor_pct must be >= 0 and below materiality_pct — "
+                   "'clearly trivial' is a different, smaller order of magnitude than "
+                   "'not material' (ISAE 3410 A112)")
+    return JSONResponse(screen(db, org.id, materiality_pct=materiality_pct,
+                               trivial_floor_pct=trivial_floor_pct))
+
+
+@app.get("/activities/findings")
+def list_findings(status: Optional[str] = None, severity: Optional[str] = None,
+                  check_code: Optional[str] = None,
+                  org: Organisation = Depends(current_org),
+                  db: Session = Depends(get_db)):
+    """The exception register: every live finding with its expectation and threshold."""
+    from .models import ActivityFinding
+    from .services.screening import finding_view, summary
+    q = db.query(ActivityFinding).filter(ActivityFinding.organisation_id == org.id)
+    if status:
+        q = q.filter(ActivityFinding.status == status)
+    if severity:
+        q = q.filter(ActivityFinding.severity == severity)
+    if check_code:
+        q = q.filter(ActivityFinding.check_code == check_code)
+    rows = q.order_by(ActivityFinding.id).all()
+    return JSONResponse({"summary": summary(db, org.id),
+                         "findings": [finding_view(r) for r in rows]})
+
+
+@app.post("/activities/findings/{finding_id}/dispose")
+def dispose_finding(finding_id: int, status: str = Query(...),
+                    reason_code: str = Query(...), note: str = Query(...),
+                    org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+    """Record a disposition: corrected, or accepted with a reason.
+
+    A bare acknowledgement is refused. PCAOB Staff Audit Practice Alert No. 11:
+    "Verifying that a review was signed off provides little or no evidence by
+    itself about the control's effectiveness." A disposition needs a reason code
+    from the closed vocabulary AND a substantive note saying what was investigated
+    and concluded.
+    """
+    from .services.screening import dispose
+    result = dispose(db, org.id, finding_id, status=status,
+                     reason_code=reason_code, note=note)
+    if result["disposed"]:
+        return JSONResponse(result)
+    if "not found" in result["reason"]:
+        raise HTTPException(status_code=404, detail=result["reason"])
+    raise HTTPException(status_code=400, detail=result["reason"])
+
+
+@app.get("/reports/screening")
+def get_screening_report(run_id: Optional[int] = None,
+                         org: Organisation = Depends(current_org),
+                         db: Session = Depends(get_db)):
+    """The screening state frozen onto a run, with its blockers and warnings.
+
+    A run computed before screening existed returns the legacy branch and is never
+    retroactively blocked — the same anti-cliff rule the residual-mix and Scope 3
+    temporal gates use.
+    """
+    from .services.screening import completeness
+    if run_id is not None:
+        run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                              CalculationRun.organisation_id == org.id).first()
+    else:
+        run = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
+            .order_by(CalculationRun.id.desc()).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found for this organisation")
+    return JSONResponse(completeness(db, run))
+
+
 # --- PACT Pathfinder (WBCSD) product carbon footprint exchange ---------------
 # The consume side: a supplier's PCF, validated against the v3 Technical
 # Specifications and stored verbatim, so it can later replace an industry-average

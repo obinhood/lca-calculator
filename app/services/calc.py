@@ -25,6 +25,7 @@ from .residual_mix import (
 from .units import convert, UnitConversionError, QuantityError
 from .gwp import co2e_from_gases, gwp
 from .dq import line_dq
+from .screening import freeze_onto_run as screening_freeze_onto_run
 from .spend import normalize_spend, SpendNormalizationError
 
 # GHG Protocol scope by activity category. Purchased energy carriers (electricity,
@@ -1227,6 +1228,16 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 run.removals_reversed_co2e = reversed_rem
                 run.removals_as_of = rem_as_of
                 run.removals_fingerprint = _removals_fingerprint(included_rem)
+
+        # --- Freeze the screening state onto the run ---
+        # ADVISORY, never a refusal: the run is always produced. The engine's own
+        # contract (above) is that every activity lands in a visible bucket and
+        # nothing is silently dropped, so a gate that refused to produce a run at
+        # all would be the first mechanism here to leave NO evidence artifact
+        # behind. Blockers are reported at DISCLOSURE time by
+        # screening.completeness(), where the reader sees the figure and the reason
+        # to doubt it together.
+        screening_freeze_onto_run(db, run, organisation_id, _utcnow_iso())
 
         run.status = "complete"
         db.commit()

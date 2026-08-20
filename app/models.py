@@ -707,6 +707,10 @@ class CalculationRun(Base):
     # PREDATES the requirement, and the gate then only warns (never blocks) — that NULL
     # is the entire anti-cliff mechanism, so it must NEVER be back-filled.
     scope3_temporal_basis_version = Column(String, nullable=True)
+    # Which pre-calculation screening policy was in force. NULL = the run PREDATES
+    # screening and is never retroactively blocked by it — the same anti-cliff
+    # sentinel as the columns around it, and it must NEVER be back-filled.
+    screening_version = Column(String, nullable=True)
     # Which Scope 2 residual-mix policy priced this run's uncovered market-based load.
     # NULL = the run PREDATES the requirement and the gate only warns — the anti-cliff
     # mechanism, so it must NEVER be back-filled.
@@ -1367,3 +1371,104 @@ class ProductFootprint(Base):
     validation_warnings = Column(Text, nullable=True)   # JSON array, frozen at import
     received_at = Column(String, nullable=True)
     created_at = Column(String)
+
+
+# --- Pre-calculation screening: the assurance exception register -------------
+# Built as the MISSTATEMENT LEDGER that ISAE 3410 (50-56) and ISSA 5000 (153-161)
+# require a practitioner to assemble by hand, not as an "anomaly detector". Each
+# finding carries a stated expectation, the threshold in force, the observation,
+# a quantified effect, and an auditable disposition — because PCAOB SAPA 11 is
+# explicit that a sign-off alone is not evidence of a control.
+
+class ActivityFinding(Base):
+    """One screening exception against an organisation's activity data.
+
+    Identity is `finding_key` — a hash of the check and the activities it
+    concerns, never of the detection time or a row id — so re-screening UPDATES a
+    finding rather than duplicating it, and a disposition made last month still
+    attaches to the same defect today.
+
+    Findings are never deleted. A defect that disappears is marked `superseded`
+    and retained: ISAE 3410 para 69 forbids discarding engagement documentation,
+    and a register that silently drops cleared items cannot answer "what did you
+    know on the day you signed".
+    """
+    __tablename__ = "activity_findings"
+    __table_args__ = (
+        UniqueConstraint("organisation_id", "finding_key", name="uq_finding_org_key"),
+        CheckConstraint("severity IN ('blocking','high','medium','informational')",
+                        name="ck_finding_severity"),
+        CheckConstraint("status IN ('open','corrected','accepted','superseded')",
+                        name="ck_finding_status"),
+        # The vocabulary is closed at the DB, not only at the endpoint — the
+        # evidence pack names "no constraints on the severity/status vocabularies"
+        # as a gap in the older AssuranceFinding table, and this does not repeat it.
+        CheckConstraint(
+            "disposition_reason_code IS NULL OR disposition_reason_code IN ("
+            "'genuine_operational_change','corrected_at_source','restated_prior_period',"
+            "'unit_error_fixed','boundary_change','benchmark_not_applicable',"
+            "'accepted_immaterial')",
+            name="ck_finding_reason_code"),
+        # A disposed finding must carry its reason and its note. A status change
+        # with no recorded investigation is exactly the worthless sign-off.
+        CheckConstraint(
+            "status IN ('open','superseded') OR "
+            "(disposition_reason_code IS NOT NULL AND disposition_note IS NOT NULL)",
+            name="ck_finding_disposition_complete"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    activity_id = Column(Integer, ForeignKey("activities.id"), nullable=True)
+    related_activity_ids = Column(Text, nullable=True)   # JSON array — duplicates/pairs
+    finding_key = Column(String, nullable=False)
+    check_code = Column(String, nullable=False)
+    severity = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="open")
+    # The three attributes that make a finding audit evidence rather than a score.
+    expectation = Column(Text, nullable=False)
+    threshold = Column(Text, nullable=False)
+    observed = Column(Text, nullable=False)
+    # kgCO2e at risk. NULL is NOT zero: it means the effect could not be
+    # determined, which is tracked separately and never folded into the total.
+    estimated_effect_kg = Column(Float, nullable=True)
+    effect_quantifiable = Column(Boolean, nullable=False, default=True)
+    disposition_reason_code = Column(String, nullable=True)
+    disposition_note = Column(Text, nullable=True)
+    dispositioned_at = Column(String, nullable=True)
+    screening_version = Column(String, nullable=False)
+    detected_at = Column(String, nullable=True)
+    created_at = Column(String)
+
+
+class RunScreeningStatement(Base):
+    """The screening state frozen onto one immutable run.
+
+    Advisory by construction: the run is always produced. The engine's contract is
+    that every activity lands in a visible bucket and nothing is silently dropped,
+    so a gate that refused to produce a run would be the first mechanism here to
+    leave NO evidence artifact at all. The blockers are reported at disclosure
+    time instead, where a reader sees the figure and the reason to doubt it
+    together.
+    """
+    __tablename__ = "run_screening_statements"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_run_screening_statement"),
+        CheckConstraint("findings_total >= 0", name="ck_rss_total_nonneg"),
+        CheckConstraint("materiality_pct > 0 AND materiality_pct <= 100",
+                        name="ck_rss_materiality_pct"),
+    )
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("calculation_runs.id"), nullable=False)
+    screening_version = Column(String, nullable=False)
+    screened_at = Column(String, nullable=True)     # when the register was last run
+    findings_total = Column(Integer, nullable=False, default=0)
+    findings_open = Column(Integer, nullable=False, default=0)
+    findings_corrected = Column(Integer, nullable=False, default=0)
+    findings_accepted = Column(Integer, nullable=False, default=0)
+    open_blocking = Column(Integer, nullable=False, default=0)
+    accumulated_uncorrected_effect_kg = Column(Float, nullable=False, default=0.0)
+    uncorrected_unquantifiable = Column(Integer, nullable=False, default=0)
+    materiality_kg = Column(Float, nullable=False, default=0.0)
+    materiality_pct = Column(Float, nullable=False, default=5.0)
+    exceeds_materiality = Column(Boolean, nullable=False, default=False)
+    frozen_at = Column(String, nullable=False)

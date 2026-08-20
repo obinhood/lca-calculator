@@ -38,7 +38,7 @@ from ..models import (
 # Bumped when the pack's CONTENT or hashing changes in a way that would alter the
 # content_hash of an unchanged run. Frozen into every pack so an old hash stays
 # attributable to the assembler that produced it.
-PACK_VERSION = "evp-v1"
+PACK_VERSION = "evp-v2"
 
 # Transaction detail is the largest section by far and an inventory can carry tens
 # of thousands of lines. It is capped, and a truncated pack SAYS SO in its own
@@ -337,12 +337,33 @@ def _s10_readiness_and_standard(db: Session, run: CalculationRun) -> dict:
             "note": r["note"]}
 
 
+def _s11_screening_register(db: Session, run: CalculationRun) -> dict:
+    """The exception register frozen onto the run — the misstatement ledger.
+
+    ISSA 5000 para 161 requires the engagement file to contain "all misstatements
+    accumulated during the engagement, other than those that are clearly trivial
+    ... and whether they have been corrected". This is that table, pre-built.
+    """
+    from .screening import completeness
+    c = completeness(db, run)
+    return {
+        "assessable": c["assessable"], "legacy": c["legacy"],
+        "blockers": c["blockers"], "warnings": c["warnings"],
+        "statement": c["statement"],
+        "note": "ISAE 3410 paras 50-56 / ISSA 5000 paras 153-161: accumulate every "
+                "non-trivial misstatement, record whether it was corrected or "
+                "accepted uncorrected, and evaluate the accumulated uncorrected "
+                "effect against materiality. A finding whose effect could not be "
+                "quantified is counted separately and never treated as nil.",
+    }
+
+
 # Assembled in a fixed order so the hash cannot move with dict iteration order.
 _SECTION_ORDER = (
     "1_inventory_statement", "2_reporting_period", "3_organisational_boundary",
     "4_transaction_detail", "5_factor_register", "6_mapping_decisions",
     "7_completeness_controls", "8_data_quality_and_uncertainty",
-    "9_methodology", "10_readiness_and_standard",
+    "9_methodology", "10_readiness_and_standard", "11_screening_register",
 )
 
 
@@ -359,7 +380,10 @@ def _evidence_gaps() -> list:
             "expected_by": "ISSA 5000 / ISAE 3410 — who made each judgement",
             "why_absent": "Authentication is an organisation-scoped API key with no "
                           "concept of a person, so no per-user identity exists to "
-                          "record. mapping_status proves A human decided, never which.",
+                          "record. mapping_status proves A human decided, never which. "
+                          "NOTE: the screening register (section 11) now records what "
+                          "was investigated and concluded, and when — but still not "
+                          "by whom.",
             "what_would_close_it": "Per-user authentication with an actor id written "
                                    "onto every mutation.",
         },
@@ -446,6 +470,7 @@ def build_evidence_pack(db: Session, run: CalculationRun, *,
             db, run, summary_payload, uncertainty_iterations),
         "9_methodology": _s9_methodology(db, run, summary_payload),
         "10_readiness_and_standard": _s10_readiness_and_standard(db, run),
+        "11_screening_register": _s11_screening_register(db, run),
     }
     gaps = _evidence_gaps()
 
