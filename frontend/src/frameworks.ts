@@ -23,6 +23,13 @@ export type Framework = {
   assessmentScoped?: boolean;
   params: Param[];
   note?: string;                // honest-scope caveat
+  // Whether the server can render this as CSV/PDF. A report with no export
+  // builder must not offer the buttons — a 404 behind a download is worse than
+  // an absent control.
+  exportable?: boolean;
+  // Whether a required-data checklist exists for this key. Without one the
+  // compliance panel has nothing to say, so it is not shown.
+  hasChecklist?: boolean;
 };
 
 export const CATEGORIES = [
@@ -235,6 +242,69 @@ export const FRAMEWORKS: Framework[] = [
       { name: "published_sustainability_report", label: "Published report", def: "false",
         options: ["false", "true"] } ],
     note: "Covers the carbon/energy part of the Environment theme — it does not produce a score or medal." },
+  // --- Added with the 2026 build-out. These are computed reports rather than
+  // disclosure renderers, so none has a CSV/PDF export builder or a
+  // required-data checklist, and each says so rather than offering a control
+  // that 404s.
+  { key: "uncertainty", label: "Uncertainty interval", full: "Monte Carlo propagation of pedigree uncertainty",
+    category: "Inventory & assurance", needs: "run",
+    blurb: "The 95% interval around your total, and which factors drive its width.",
+    path: "/reports/uncertainty", exportable: false, hasChecklist: false,
+    note: "Lines sharing an emission factor share its error, so the default assumes that rather than independence; the narrowest and widest bounds are shown alongside.",
+    params: [
+      { name: "correlation", label: "Correlation", def: "by_factor", width: 140,
+        options: ["by_factor", "independent", "perfect"],
+        help: "by_factor is the default: lines on one factor share its error" },
+      { name: "iterations", label: "Iterations", def: "10000", width: 100 },
+      { name: "confidence", label: "Confidence", def: "0.95", width: 90 },
+      { name: "include_crosswalk", label: "Include crosswalk error", def: "false", width: 110,
+        options: ["false", "true"],
+        help: "adds the declared classification chain's measured contribution" } ] },
+  { key: "evidence_pack", label: "Evidence pack", full: "Assurance working-paper file",
+    category: "Inventory & assurance", needs: "run",
+    blurb: "The twelve-section file an assuror works from, hash-stamped so the handover is provable.",
+    path: "/assurance/evidence_pack", exportable: false, hasChecklist: false,
+    note: "evidence_gaps names what this platform cannot supply — reviewer identity, GL coding, trial-balance reconciliation — rather than omitting it.",
+    params: [
+      { name: "max_lines", label: "Max transaction lines", def: "5000", width: 120,
+        help: "a truncated section says how many were omitted" },
+      { name: "uncertainty_iterations", label: "MC iterations", def: "10000", width: 110 } ] },
+  { key: "screening", label: "Screening register", full: "Pre-calculation exception register",
+    category: "Inventory & assurance", needs: "run",
+    blurb: "The misstatement ledger: what was flagged, what was cleared, and the uncorrected total against materiality.",
+    path: "/reports/screening", exportable: false, hasChecklist: false,
+    note: "Run POST /activities/screen first to populate the register. Advisory: a run is always produced, and blockers surface here rather than suppressing the figure.",
+    params: [] },
+  { key: "series_screen", label: "Period-over-period", full: "Year-on-year screening over declared series",
+    category: "Inventory & assurance", needs: "run", runScoped: false,
+    blurb: "The GHG Protocol ch.7 ten-percent rule, as a robust band on the log ratio.",
+    path: "/reports/series_screen", exportable: false, hasChecklist: false,
+    note: "Covers DECLARED series only. A row with no series_key is not screened, and the unenrolled share is reported by name.",
+    params: [
+      { name: "current_period_id", label: "Current period id", def: "", width: 120 },
+      { name: "baseline_period_id", label: "Baseline period id", def: "", width: 120 } ] },
+  { key: "hourly_scope2", label: "Hourly Scope 2", full: "Temporal matching (proposed GHG Protocol revision)",
+    category: "Carbon accounting", needs: "run", runScoped: false,
+    blurb: "24/7 carbon-free-energy score: certificates matched to load hour by hour.",
+    path: "/reports/hourly_scope2", exportable: false, hasChecklist: false,
+    note: "A PARALLEL method — the annual location and market figures are untouched. Surplus in one hour never offsets a deficit in another.",
+    params: [
+      { name: "reporting_period_id", label: "Reporting period id", def: "", width: 120 },
+      { name: "include_hours", label: "Include hourly series", def: "false", width: 110,
+        options: ["false", "true"] } ] },
+  { key: "sbti_v2", label: "SBTi Net-Zero v2.0", full: "SBTi Corporate Net-Zero Standard V2.0",
+    category: "Targets", needs: "run",
+    blurb: "Significant Scope 3 categories at 5% of categories 1-14, and company categorisation.",
+    path: "/reports/sbti_v2", exportable: false, hasChecklist: false,
+    note: "Effective 2027-02-01. There is no aggregate coverage floor: the old 67% rule is gone and nothing backstops it.",
+    params: [
+      { name: "turnover_eur", label: "Group turnover (EUR)", def: "", width: 140,
+        help: "consolidated group, two-year average" },
+      { name: "fte", label: "FTE", def: "", width: 90 },
+      { name: "balance_sheet_eur", label: "Balance sheet (EUR)", def: "", width: 140 },
+      { name: "high_income_country", label: "High-income country", def: "false", width: 110,
+        options: ["false", "true"] } ] },
+
 ];
 
 export const byCategory = (cat: string) => FRAMEWORKS.filter((f) => f.category === cat);

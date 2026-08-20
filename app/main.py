@@ -2995,6 +2995,38 @@ def get_evidence_pack(run_id: Optional[int] = None, max_lines: int = 5000,
         db, run, max_lines=max_lines, uncertainty_iterations=uncertainty_iterations))
 
 
+@app.get("/reports/uncertainty")
+def get_uncertainty_report(run_id: Optional[int] = None,
+                           method: str = "location",
+                           correlation: str = DEFAULT_CORRELATION,
+                           iterations: int = DEFAULT_ITERATIONS,
+                           confidence: float = 0.95,
+                           include_crosswalk: bool = False,
+                           org: Organisation = Depends(current_org),
+                           db: Session = Depends(get_db)):
+    """Run-scoped alias of /runs/{run_id}/uncertainty.
+
+    Same payload; `run_id` moves from the path to a query parameter so the
+    registry-driven report UI can call it like every other report instead of
+    special-casing one path shape.
+    """
+    from .services.uncertainty import propagate
+    if run_id is not None:
+        run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                              CalculationRun.organisation_id == org.id).first()
+    else:
+        run = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
+            .order_by(CalculationRun.id.desc()).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found for this organisation")
+    result = propagate(db, run.id, method=method, correlation=correlation,
+                       iterations=iterations, confidence=confidence,
+                       include_crosswalk=include_crosswalk)
+    if not result.get("available") and "run_id" not in result:
+        raise HTTPException(status_code=400, detail=result.get("reason", "invalid request"))
+    return JSONResponse(result)
+
+
 @app.get("/reports/assurance_readiness")
 def get_assurance_readiness(run_id: Optional[int] = None,
                             org: Organisation = Depends(current_org),
