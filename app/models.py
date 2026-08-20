@@ -74,6 +74,19 @@ class ActivityRecord(Base):
     # NULL (the normal case) = derive per run from the category; the derived value is
     # frozen on EmissionLineItem.scope with details["scope_source"] beside it.
     scope = Column(String)
+    # PREPARER-DECLARED series identity for period-over-period screening. NULL is
+    # the normal case and means "not enrolled" — it is NEVER written back by the
+    # engine, for the same reason `scope` and `ghgp_category` are not: a derived
+    # value written here would be indistinguishable from a declaration on the next
+    # run, and would put the row beyond the reach of a later correction.
+    #
+    # Why declared and not inferred: nothing else on this row identifies a meter or
+    # a site. The shipped demo separates HQ from workshop electricity by description
+    # string alone, so a key inferred from category+subcategory+geo+entity would
+    # merge two physical sites and report their sum as one trend — a real jump at
+    # one site would vanish into a flat total, and a site opening would read as a
+    # data error.
+    series_key = Column(String, nullable=True, index=True)
     mapping_confidence = Column(Float)  # 0-1
     factor_id = Column(Integer, ForeignKey("emission_factors.id"), nullable=True)
     # Human-review gate (Gap 6): coarse resolver matches are SUGGESTED, not bound.

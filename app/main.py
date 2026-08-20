@@ -2016,6 +2016,83 @@ def _csv_str(value) -> str:
     return "" if s.lower() in ("nan", "nat", "none") else s
 
 
+# --- Period-over-period screening over DECLARED series -----------------------
+
+@app.post("/activities/series_key")
+def declare_series_key(series_key: str = Query(...),
+                       activity_ids: Optional[str] = None,
+                       category: Optional[str] = None,
+                       source_file: Optional[str] = None,
+                       org: Organisation = Depends(current_org),
+                       db: Session = Depends(get_db)):
+    """Declare which physical series a set of activities belongs to.
+
+    PREPARER-DECLARED and never written by the engine, for the same reason `scope`
+    and `ghgp_category` are not: a derived value written here would be
+    indistinguishable from a declaration on the next run. Nothing else on the row
+    identifies a meter or a site, so an inferred key would merge physically
+    distinct sites and report their sum as one trend.
+
+    Select by explicit ids, or in bulk by category and/or source_file — the same
+    two selectors /activities/coverage_window and /activities/entity use.
+    """
+    if not series_key.strip():
+        raise HTTPException(status_code=400, detail="series_key must not be empty")
+    q = db.query(ActivityRecord).filter(ActivityRecord.organisation_id == org.id)
+    if activity_ids:
+        try:
+            ids = [int(x) for x in activity_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail="activity_ids must be comma-separated integers")
+        q = q.filter(ActivityRecord.id.in_(ids))
+    if category:
+        q = q.filter(ActivityRecord.category == category)
+    if source_file:
+        q = q.filter(ActivityRecord.source_file == source_file)
+    if not (activity_ids or category or source_file):
+        raise HTTPException(
+            status_code=400,
+            detail="supply activity_ids, category or source_file — declaring a series "
+                   "across an entire organisation would defeat the purpose of the key")
+    rows = q.all()
+    for a in rows:
+        a.series_key = series_key.strip()
+    db.commit()
+    return {"series_key": series_key.strip(), "activities_updated": len(rows),
+            "activity_ids": [a.id for a in rows]}
+
+
+@app.get("/activities/series")
+def get_series_enrolment(org: Organisation = Depends(current_org),
+                         db: Session = Depends(get_db)):
+    """How much of the inventory is enrolled in period-over-period screening.
+
+    An unenrolled row is not a clean one — it is simply not looked at.
+    """
+    from .services.series_screen import enrolment
+    return JSONResponse(enrolment(db, org.id))
+
+
+@app.get("/reports/series_screen")
+def get_series_screen(current_period_id: int, baseline_period_id: int,
+                      org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """Screen one reporting period against a baseline, series by series.
+
+    The GHG Protocol Corporate Standard ch.7 rule — "changes of over 10 percent
+    from year to year may warrant further investigation" — applied as a robust band
+    on the LOG RATIO rather than a flat 10%, because weather and occupancy alone
+    move a heating series further than that. A z-score is not used: it is bounded
+    at (n-1)/sqrt(n) and cannot exceed 3 at ten or fewer points.
+    """
+    from .services.series_screen import compare
+    result = compare(db, org.id, current_period_id, baseline_period_id)
+    if not result.get("available") and result.get("status") == "period_not_found":
+        raise HTTPException(status_code=404, detail=result["reason"])
+    return JSONResponse(result)
+
+
 # --- Pre-calculation screening: the assurance exception register -------------
 
 @app.post("/activities/screen")
