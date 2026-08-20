@@ -574,8 +574,12 @@ def approve_mapping(activity_id: int, org: Organisation = Depends(current_org),
     a = _get_own_activity(db, org, activity_id)
     if a.mapping_status != "needs_review" or a.suggested_factor_id is None:
         raise HTTPException(status_code=400, detail="activity is not awaiting review")
+    from .services.mapping_audit import record as _audit
+    prev_factor, prev_status = a.factor_id, a.mapping_status
     a.factor_id = a.suggested_factor_id
     a.mapping_status = "approved"
+    _audit(db, a, "approved", from_factor_id=prev_factor,
+           from_status=prev_status, commit=False)
     db.commit()
     return {"activity_id": a.id, "factor_id": a.factor_id, "mapping_status": a.mapping_status}
 
@@ -588,9 +592,13 @@ def override_mapping(activity_id: int, factor_id: int = Query(...),
     factor = db.get(EmissionFactor, factor_id)
     if factor is None:
         raise HTTPException(status_code=404, detail="emission factor not found")
+    from .services.mapping_audit import record as _audit
+    prev_factor, prev_status = a.factor_id, a.mapping_status
     a.factor_id = factor.id
     a.mapping_status = "overridden"
     a.mapping_confidence = 1.0   # human decision
+    _audit(db, a, "overridden", from_factor_id=prev_factor,
+           from_status=prev_status, commit=False)
     db.commit()
     return {"activity_id": a.id, "factor_id": a.factor_id, "mapping_status": a.mapping_status}
 
@@ -2014,6 +2022,37 @@ def _csv_str(value) -> str:
         return ""
     s = str(value).strip()
     return "" if s.lower() in ("nan", "nat", "none") else s
+
+
+# --- Mapping audit trail -----------------------------------------------------
+
+@app.get("/mappings/audit")
+def get_mapping_audit(activity_id: Optional[int] = None,
+                      org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """The append-only journal of factor-binding decisions, oldest first."""
+    from .services.mapping_audit import history, summary
+    return JSONResponse({"summary": summary(db, org.id),
+                         "events": history(db, org.id, activity_id)})
+
+
+@app.get("/mappings/audit/as_at")
+def get_binding_as_at(activity_id: int, at: str,
+                      org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """What an activity was bound to at a moment in time.
+
+    The question an assuror actually asks, and the one an in-place status column
+    cannot answer.
+    """
+    from .models import ActivityRecord as _AR
+    from .services.mapping_audit import binding_as_at
+    owned = db.query(_AR).filter(_AR.id == activity_id,
+                                 _AR.organisation_id == org.id).first()
+    if owned is None:
+        raise HTTPException(status_code=404,
+                            detail="activity not found for this organisation")
+    return JSONResponse(binding_as_at(db, activity_id, at))
 
 
 # --- Versioned classification crosswalks -------------------------------------
