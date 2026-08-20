@@ -38,7 +38,7 @@ from ..models import (
 # Bumped when the pack's CONTENT or hashing changes in a way that would alter the
 # content_hash of an unchanged run. Frozen into every pack so an old hash stays
 # attributable to the assembler that produced it.
-PACK_VERSION = "evp-v3"
+PACK_VERSION = "evp-v4"
 
 # Transaction detail is the largest section by far and an inventory can carry tens
 # of thousands of lines. It is capped, and a truncated pack SAYS SO in its own
@@ -294,8 +294,13 @@ def _s8_data_quality_and_uncertainty(db: Session, run: CalculationRun,
             "approx_ci95_low": dq.get("approx_ci95_low"),
             "approx_ci95_high": dq.get("approx_ci95_high"),
         },
-        "primary_data_share_pct": summary_payload.get("primary_data_share_pct"),
-        "spend_based_share_pct": summary_payload.get("spend_based_share_pct"),
+        # summary nests both under "method_split"; reading them from the top level
+        # published null for two figures the run had actually determined — in the file
+        # an assuror reads to judge how much of the inventory rests on primary data.
+        "primary_data_share_pct": (summary_payload.get("method_split") or {})
+                                  .get("primary_data_share_pct"),
+        "spend_based_share_pct": (summary_payload.get("method_split") or {})
+                                 .get("spend_based_share_pct"),
     }
     if mc.get("available"):
         block["monte_carlo"] = {
@@ -468,8 +473,18 @@ def build_evidence_pack(db: Session, run: CalculationRun, *,
                         uncertainty_iterations: int = 10_000) -> dict:
     """The full working-paper file for one immutable run, hash-stamped.
 
-    Deterministic for a given run: two calls return the same `content_hash`, and so
-    will a call made years later, because every section reads only frozen state.
+    Two calls made back to back return the same `content_hash`. A call made years later
+    MAY NOT, and the pack no longer claims otherwise.
+
+    Most of the file is frozen run state, but several sections deliberately describe the
+    CURRENT catalog — the factor register carries live factor metadata, the mapping
+    sections read live mapping status and the org-wide journal. Those are the right thing
+    to show an assuror (they are how you see that a factor was edited under a filed run),
+    but it means an edit to the catalog moves the hash of a run that has not changed.
+    Stamping that as a reproduction guarantee was a false assurance in the one document
+    whose whole purpose is assurance, so it is stated instead of promised. Splitting the
+    stamp into a frozen-sections hash and a current-state hash is the real fix and is not
+    done here.
     """
     from ..reports.summary import summary
     from .calc import _utcnow_iso
@@ -504,12 +519,18 @@ def build_evidence_pack(db: Session, run: CalculationRun, *,
             "generated_at": _utcnow_iso(),
             "hash_note": "content_hash covers every section and the evidence-gap list. "
                          "generated_at is EXCLUDED — a hash that moved on every render "
-                         "could verify nothing.",
+                         "could verify nothing. It is NOT a reproduction guarantee for "
+                         "the run: sections 4, 5, 6 and 12 describe the current catalog "
+                         "and mapping state, so an edit there moves this hash even though "
+                         "the run is immutable and its totals are unchanged. Compare two "
+                         "packs for the same run to see WHAT moved.",
             "section_order": list(_SECTION_ORDER),
         },
         "sections": sections,
         "evidence_gaps": gaps,
-        "note": "Assembled from frozen run state only. This is the evidence an assuror "
+        "note": "Assembled from the run's frozen state plus, where an assuror needs to "
+                "see it, the CURRENT catalog and mapping state (sections 4, 5, 6, 12). "
+                "This is the evidence an assuror "
                 "works from; it is not an assurance opinion, and evidence_gaps names "
                 "what this platform cannot currently supply.",
     }

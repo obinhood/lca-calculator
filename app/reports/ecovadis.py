@@ -24,7 +24,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import CalculationRun, EmissionsTarget, MarketInstrument, AssuranceEngagement
-from ..services.boundary import boundary_completeness
+from ..services.boundary import boundary_completeness, boundary_comparable
 from ..services.residual_mix import residual_mix_comparable
 from ..services.comparability import period_comparable, period_payload
 from .summary import summary
@@ -169,6 +169,13 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
                                          label_b="current", quantity="the trend",
                                          measures="a measured reduction")):
                 blockers.append(f"trend_vs_baseline: {_pc}")
+            # The comment above claims "the same comparability gates" as GRI 305-5. GRI
+            # applies FOUR; this block applied three. The missing one is the boundary:
+            # a divestment between the two runs is the single most flattering thing that
+            # can happen to an Actions-pillar trend, and it is not action.
+            if (_bc := boundary_comparable(db, base, run, label_a="baseline",
+                                           label_b="current", quantity="the trend")):
+                blockers.append(f"trend_vs_baseline: {_bc}")
             trend_comparability = period_payload(
                 db, base, run, key_a="baseline", key_b="current",
                 note="A trend is only evidence of action if the two runs cover the same "
@@ -186,9 +193,10 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
                 "baseline_gwp_set": base.gwp_set,
                 "current_gwp_set": run.gwp_set,
                 "comparability_note": "Valid only where the two runs share a GWP set, a "
-                                      "residual-mix methodology and a comparable period "
-                                      "length — each gated as a blocker; read `blockers` "
-                                      "before quoting this as evidence.",
+                                      "residual-mix methodology, an organisational "
+                                      "boundary and a comparable period length — each "
+                                      "gated as a blocker; read `blockers` before "
+                                      "quoting this as evidence.",
             }
             if delta < 0:
                 actions_evidence.append(

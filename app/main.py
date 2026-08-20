@@ -2332,10 +2332,16 @@ def pact_get_footprint(footprint_id: str, request: Request,
 async def pact_events(request: Request, db: Session = Depends(get_db)):
     """Events endpoint, CloudEvents structured content mode.
 
-    Accepted events return 200 with an empty body; anything invalid is a 4xx with
-    an Error object. A RequestCreatedEvent is answered with exactly one fulfilled
-    OR rejected callback — never a fulfilled event with an empty pfs, which has
-    minItems 1.
+    Anything invalid is a 4xx with an Error object.
+
+    NOT YET THE FULL v3 CONTRACT, and this description is what a partner integrates
+    against, so it says so. The spec has an accepted event return 200 with an EMPTY body
+    and then answers a RequestCreatedEvent asynchronously with exactly one fulfilled OR
+    rejected callback delivered to the requester. This handler answers synchronously with
+    a non-empty body describing what it found, and delivers no callback — there is no
+    outbound HTTP client on this path. `pact_host.build_response_event` constructs a
+    conformant callback and is deliberately retained for when delivery is wired; until
+    then a partner must not wait on one.
     """
     from .services.pact_host import (
         EVENT_TYPES, error, is_cloudevents_media_type, list_footprints,

@@ -382,8 +382,16 @@ def to_pdf(payload: dict, *, framework_label: str, organisation: str,
     story.append(Spacer(1, 10))
 
     # --- Verdict, carried through from the same fail-closed gate as the JSON. ---
+    # Every WHOLE-DOCUMENT readiness key, listed explicitly. Four frameworks minted
+    # their own key and the banner never learned them, so an ESOS/ETS/CBAM/EcoVadis PDF
+    # that was NOT ready printed the neutral grey "INFORMATION REPORT" instead of the red
+    # DRAFT stamp — the fail-closed gate held in the JSON and was lost on the way to the
+    # artefact a human actually files. Not `endswith("_ready")`: tcfd.py and pef.py
+    # publish top-level SUB-verdicts (one criterion each), which must not drive the
+    # banner for a whole document.
     ready = None
-    for k in ("disclosure_ready", "filing_ready", "ok"):
+    for k in ("disclosure_ready", "filing_ready", "report_ready", "declaration_ready",
+              "assessment_ready", "submission_ready", "ok"):
         if isinstance(payload.get(k), bool):
             ready = payload[k]
             break

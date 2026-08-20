@@ -14,9 +14,9 @@ refused with a reason instead of estimated.
 | | |
 |---|---|
 | Framework registry | 42 entries — 24 `built`, 16 `partial`, 2 `reference` |
-| API | 122 endpoints over 42 ORM models |
+| API | 122 endpoints over 44 ORM models |
 | Engine | ~25k lines Python across 76 modules |
-| Tests | 1,462, including property-based (Hypothesis) and calculation oracles |
+| Tests | 1,472, including property-based (Hypothesis) and calculation oracles |
 
 `GET /frameworks` is the authoritative inventory and each entry states its own
 `platform_support` level. `partial` means partial — the guidance says what is not
@@ -49,8 +49,8 @@ produced.
   the network: `GET /3/footprints`, OAuth2 client credentials, CloudEvents.
 - **SBTi Corporate Net-Zero Standard V2.0** — the ≥5% significance test on
   categories 1–14 with the WTW-uplift denominator, company categorisation,
-  C14.2/3 exclusion validation, C8.3 recalculation triggers and C12 Scope 2
-  conformance.
+  C14.2/3 exclusion validation and C12 Scope 2 conformance. (C8.3 recalculation
+  triggers are implemented in the service layer but no endpoint emits them yet.)
 - **Versioned classification crosswalks** whose uncertainty is *measured* —
   σ = ln(GSD) of the candidate set's own factors, so a one-to-one hop is exactly
   zero. A direct UNSPSC→NAICS hop is flagged uncitable, because UNSPSC classifies

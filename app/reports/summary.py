@@ -235,6 +235,7 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
     kwh_residual_mix = 0.0          # priced at the residual mix (neither contractual nor grid)
     kwh_market_unverified = 0.0     # covered by an instrument whose market couldn't be checked
     skipped_market = set()          # instruments excluded by a declared market mismatch
+    skipped_vintage = set()         # instruments excluded because their GWP label differs
     for (details,) in market_lines:
         d = parse_detail(details)
         bases[d.get("method_basis", "?")] = bases.get(d.get("method_basis", "?"), 0) + 1
@@ -246,6 +247,7 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
         kwh_residual_mix += d.get("kwh_residual_mix", 0.0) or 0.0
         kwh_market_unverified += d.get("kwh_market_unverified", 0.0) or 0.0
         skipped_market.update(d.get("instruments_skipped_market", []) or [])
+        skipped_vintage.update(d.get("instruments_skipped_gwp_vintage", []) or [])
 
     # Computed ONCE: three call sites used to load every line item separately, which was
     # ~a third of summary()'s runtime on a large run, paid by every renderer.
@@ -319,6 +321,13 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             # location grid average. This is the frozen per-(market, year) statement.
             "residual_mix": _residual_mix_block(db, run),
             "instruments_excluded_by_market": sorted(skipped_market),
+            # An instrument whose gwp_set LABEL differs from the run's is dropped whole —
+            # its covered MWh, not merely its rate. calc froze that exclusion onto every
+            # market line and NO renderer read it, so a fully-REC'd org could publish a
+            # market-based total identical to its location-based one, and ESRS E1-5 could
+            # publish 0% renewable, with nothing anywhere saying why. Surfaced here so
+            # every renderer reading scope2 inherits it.
+            "instruments_excluded_by_gwp_vintage": sorted(skipped_vintage),
         },
         "method_split": {
             "co2e_by_method": method_split,
@@ -525,19 +534,39 @@ def run_factor_sources(db: Session, run: CalculationRun) -> list:
     re-map (or un-map) silently rewrite an immutable run's methodology
     statement — the factor ids must come from the line details captured at
     compute time.
+
+    The ids alone were not enough. Taking the id from frozen lineage and then reading
+    ``source``/``version`` off the LIVE row still let an in-place edit rewrite a filed
+    run's methodology sentence, because those two columns were never frozen. Runs
+    computed since carry ``factor_provenance`` and are answered entirely from it.
+
+    Legacy runs predate that block and are NOT blocked or back-filled (a NULL sentinel
+    is evidence about the run, not a missing value). They fall back to the live join and
+    say so in the returned string, because a reader cannot otherwise tell a provenance
+    that is guaranteed from one that merely has not been edited yet.
     """
-    ids = set()
+    frozen_labels, unfrozen_ids = set(), set()
     for (details,) in db.query(EmissionLineItem.details)\
             .filter(EmissionLineItem.run_id == run.id,
                     EmissionLineItem.method == "location").all():
-        fid = parse_detail(details).get("factor_id")
-        if fid:
-            ids.add(fid)
-    if not ids:
-        return []
-    rows = db.query(EmissionFactor.source, EmissionFactor.version)\
-        .filter(EmissionFactor.id.in_(ids)).distinct().all()
-    return sorted(f"{src} v{ver}" for src, ver in rows)
+        d = parse_detail(details)
+        fid = d.get("factor_id")
+        if not fid:
+            continue
+        prov = d.get("factor_provenance")
+        if isinstance(prov, dict) and prov.get("source"):
+            frozen_labels.add(f"{prov['source']} v{prov.get('version')}")
+        else:
+            unfrozen_ids.add(fid)
+    live_labels = set()
+    if unfrozen_ids:
+        rows = db.query(EmissionFactor.source, EmissionFactor.version)\
+            .filter(EmissionFactor.id.in_(unfrozen_ids)).distinct().all()
+        live_labels = {
+            f"{src} v{ver} (read from the current catalog: this run predates frozen "
+            f"factor provenance, so an in-place edit since the run would not show here)"
+            for src, ver in rows}
+    return sorted(frozen_labels | live_labels)
 
 
 def scope3_by_category(db: Session, run: CalculationRun) -> dict:
@@ -607,7 +636,7 @@ def coverage(db: Session, run: CalculationRun):
     # factor (which should never happen — supersede instead) means the run no longer
     # reproduces from the current catalog. Detect it rather than silently diverge.
     factor_drift = []
-    frozen = {}
+    frozen, frozen_prov = {}, {}
     for (details,) in db.query(EmissionLineItem.details)\
             .filter(EmissionLineItem.run_id == run.id,
                     EmissionLineItem.method == "location").all():
@@ -615,13 +644,35 @@ def coverage(db: Session, run: CalculationRun):
         fid, fval = d.get("factor_id"), d.get("factor_value")
         if fid is not None and fval is not None:
             frozen[fid] = fval
-    if frozen:
-        for f in db.query(EmissionFactor).filter(EmissionFactor.id.in_(frozen.keys())).all():
-            if f.value is not None and f.value != frozen[f.id]:
+        prov = d.get("factor_provenance")
+        if fid is not None and isinstance(prov, dict) and prov.get("source"):
+            frozen_prov[fid] = prov
+    if frozen or frozen_prov:
+        _ids = set(frozen) | set(frozen_prov)
+        for f in db.query(EmissionFactor).filter(EmissionFactor.id.in_(_ids)).all():
+            if f.id in frozen and f.value is not None and f.value != frozen[f.id]:
                 factor_drift.append(
                     f"factor {f.id} ({f.source} v{f.version}) value changed in place since "
                     f"this run ({frozen[f.id]} -> {f.value}) — the run's figures no longer "
                     f"reproduce from the current catalog; supersede factors, never edit them")
+            # Identity drift. The value can be untouched while source/version/year/
+            # geography are edited underneath a filed run — which changes nothing
+            # numerically and everything about the methodology statement and the
+            # temporal pedigree score an assuror reads. Comparing only `value` was blind
+            # to it. Only checkable for runs that froze provenance; legacy runs have no
+            # frozen side to compare against and are silent here rather than accused.
+            p = frozen_prov.get(f.id)
+            if p:
+                for field, was in (("source", p.get("source")), ("version", p.get("version")),
+                                   ("year", p.get("year")), ("geography", p.get("geography"))):
+                    now = getattr(f, field, None)
+                    if was is not None and now != was:
+                        factor_drift.append(
+                            f"factor {f.id} {field} changed in place since this run "
+                            f"({was!r} -> {now!r}) — the value is unchanged, so the totals "
+                            f"still reproduce, but the methodology statement and pedigree "
+                            f"this run was filed with no longer match the catalog; "
+                            f"supersede factors, never edit them")
 
     unmapped_by_cat = db.query(ActivityRecord.category, func.count(ActivityRecord.id))\
         .filter(ActivityRecord.organisation_id == run.organisation_id,

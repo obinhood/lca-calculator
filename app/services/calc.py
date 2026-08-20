@@ -658,6 +658,19 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                     "consolidated_co2e": co2e,
                 },
                 "factor_id": a.factor_id,
+                # The factor's IDENTITY, frozen — not just its value. The methodology
+                # statement every renderer publishes ("EF sources: DEFRA v2024") used to
+                # join the LIVE source/version columns, so re-labelling or re-versioning
+                # a factor in place silently rewrote that sentence on runs already filed,
+                # and the drift detector — which compared only `value` — could not see it.
+                # Frozen here, a filed run keeps the statement it was filed with and any
+                # drift in these fields becomes detectable.
+                "factor_provenance": {
+                    "source": a.factor.source,
+                    "version": a.factor.version,
+                    "year": a.factor.year,
+                    "geography": a.factor.geography,
+                },
                 "activity_unit": a.unit,
                 "factor_unit": a.factor.unit,
                 "quantity": _qty,

@@ -41,10 +41,16 @@ fabrication, and the payload says `band_basis: "insufficient_series"` instead.
 A LEVEL SHIFT IS NOT AN ERROR. A site that opens, a factory that closes, a line
 that is commissioned — these move a series permanently and legitimately. ISAE 3410
 A101 names exactly this case: trends must be read "for consistency with other
-circumstances such as the acquisition or disposal of facilities". A series whose
-deviation persists in the same direction across consecutive comparisons is
-reclassified as `level_shift`, dropped to informational, and routed to base-year
-recalculation rather than filed as a data defect.
+circumstances such as the acquisition or disposal of facilities".
+
+`compare()` screens ONE pair of periods and cannot see a persistent shift — a caller
+holding only two periods has no way to distinguish a step from a spike. The
+reclassification is `classify_level_shifts()`, which takes an ordered history of
+`compare()` payloads and re-files a series whose deviation persists in the same
+direction as `level_shift`: informational, routed to base-year recalculation rather
+than filed as a data defect. It is available to a caller that accumulates comparisons;
+no endpoint assembles that history yet, so the ISAE 3410 A101 treatment is offered
+here, not applied on your behalf.
 """
 import math
 import statistics
