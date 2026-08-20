@@ -13,10 +13,10 @@ refused with a reason instead of estimated.
 
 | | |
 |---|---|
-| Framework registry | 40 entries — 24 `built`, 14 `partial`, 2 `reference` |
-| API | 85 endpoints over 30 ORM models |
-| Engine | ~18k lines Python across 61 modules |
-| Tests | 818, including property-based (Hypothesis) and calculation oracles |
+| Framework registry | 41 entries — 24 `built`, 15 `partial`, 2 `reference` |
+| API | 103 endpoints over 37 ORM models |
+| Engine | ~22k lines Python across 69 modules |
+| Tests | 1,165, including property-based (Hypothesis) and calculation oracles |
 
 `GET /frameworks` is the authoritative inventory and each entry states its own
 `platform_support` level. `partial` means partial — the guidance says what is not
@@ -39,7 +39,13 @@ produced.
   (including entities weighted 0.0, which are the "excluded investees" list a
   disclosure asks for).
 - **Dual Scope 2** — location and market basis on every run, with residual-mix
-  pricing for uncovered load.
+  pricing for uncovered load, plus **hourly temporal matching** as a parallel
+  method (`GET /reports/hourly_scope2`) for the proposed GHG Protocol revision:
+  granular certificates, a CFE score, and deliverability gating. Surplus in one
+  hour never offsets a deficit in another.
+- **PACT Pathfinder v3** — import and validate a supplier's product carbon
+  footprint, then materialise it as a `supplier_specific` factor. On a real
+  portfolio that moved the uncertainty band from ±195.6% to ±10.3%.
 - **Spend-based** normalisation with inflation and price-basis adjustment.
 
 ### Data quality and uncertainty
@@ -54,6 +60,12 @@ produced.
   emission factor share its error, and the narrowest (`independent`) and widest
   (`perfect`) bounds are always reported alongside the `by_factor` default so
   the reader can see how much the answer rests on that assumption.
+- **Pre-calculation screening** as an assurance misstatement ledger, not an
+  anomaly detector — `POST /activities/screen`. Each finding carries a stated
+  expectation, the threshold in force, a quantified effect and an auditable
+  disposition, and the accumulated *uncorrected* effect is tracked against
+  materiality (ISAE 3410 ¶¶50–56, ISSA 5000 ¶¶153–161). Deterministic checks
+  only: a z-score is provably blind at twelve monthly points.
 
 ### Reporting and assurance
 
@@ -138,14 +150,20 @@ eGRID for market-based Scope 2.
 Stated plainly because a reader deciding whether to use this deserves them:
 
 - **Ingestion is CSV only.** No ERP, utility, expense or travel connectors.
-- **No supplier engagement** — no portal and no PACT Pathfinder exchange, so
-  supplier primary data has no route in.
+- **No supplier portal.** PACT exchange covers the *consume* side (import a
+  supplier's footprint and use it as primary data); the host side — serving
+  `GET /3/footprints`, OAuth2 client credentials, CloudEvents — is not built.
 - **Nothing on the reduction side** — no abatement levers, no MACC, no scenario
   modelling.
-- **No AI-assisted mapping or anomaly detection.** The resolver is rule-based
-  plus fuzzy matching; QA checks nulls, negatives and units, not outliers.
-- **Scope 2 is annual.** No hourly matching, granular certificates or
-  deliverability — the GHG Protocol Scope 2 revision will require these.
+- **No AI-assisted mapping.** The resolver is rule-based plus fuzzy matching.
+- **Screening is deterministic only.** Duplicates, unit allow-lists, coverage
+  overlaps and unit-conversion signatures. The GHG Protocol ch.7 ten-percent
+  year-on-year rule is *not* implemented: `ActivityRecord` carries no series
+  identity, so an inferred series key would merge distinct sites and report
+  their sum as one trend. It needs a preparer-declared key first.
+- **Hourly Scope 2 has no data feed.** The matching engine, certificates and
+  deliverability model exist, but nothing ingests interval meter data
+  automatically — hourly load arrives by CSV like everything else.
 - Crosswalk versioning (chart-of-accounts → UNSPSC → NAICS/NACE) is documented in
   the registry but not implemented, so spend-mapping error is not yet carried
   into the uncertainty band.
