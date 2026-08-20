@@ -38,7 +38,7 @@ from ..models import (
 # Bumped when the pack's CONTENT or hashing changes in a way that would alter the
 # content_hash of an unchanged run. Frozen into every pack so an old hash stays
 # attributable to the assembler that produced it.
-PACK_VERSION = "evp-v2"
+PACK_VERSION = "evp-v3"
 
 # Transaction detail is the largest section by far and an inventory can carry tens
 # of thousands of lines. It is capped, and a truncated pack SAYS SO in its own
@@ -358,12 +358,31 @@ def _s11_screening_register(db: Session, run: CalculationRun) -> dict:
     }
 
 
+def _s12_mapping_audit(db: Session, run: CalculationRun) -> dict:
+    """The append-only journal of factor-binding decisions.
+
+    Live-read like section 6 and for the same reason: the journal accumulates
+    after the run. What it adds over section 6 is the ability to answer what a
+    binding WAS at a moment in time, which an in-place status column cannot.
+    """
+    from .mapping_audit import history, summary
+    return {
+        "summary": summary(db, run.organisation_id),
+        "events": history(db, run.organisation_id),
+        "note": "Read LIVE, not frozen: the journal accumulates after the run. Its "
+                "value is that it can answer what an activity was bound to on the "
+                "day an opinion was issued — the question an in-place status column "
+                "cannot.",
+    }
+
+
 # Assembled in a fixed order so the hash cannot move with dict iteration order.
 _SECTION_ORDER = (
     "1_inventory_statement", "2_reporting_period", "3_organisational_boundary",
     "4_transaction_detail", "5_factor_register", "6_mapping_decisions",
     "7_completeness_controls", "8_data_quality_and_uncertainty",
     "9_methodology", "10_readiness_and_standard", "11_screening_register",
+    "12_mapping_audit",
 )
 
 
@@ -390,18 +409,18 @@ def _evidence_gaps() -> list:
         {
             "item": "Override log with before/after values",
             "expected_by": "Audit trail of changes to the mapping",
-            "why_absent": "POST /mappings/{id}/override overwrites factor_id in place; "
-                          "the prior binding is not journalled, so the previous value "
-                          "cannot be recovered.",
-            "what_would_close_it": "An append-only mapping audit table capturing "
-                                   "(activity, timestamp, action, from_factor, to_factor).",
+            "why_absent": "CLOSED. services/mapping_audit.py journals every binding "
+                          "decision append-only with from_factor_id and to_factor_id; "
+                          "see section 12 and GET /mappings/audit.",
+            "what_would_close_it": "Already closed.",
         },
         {
             "item": "Reviewer timestamp",
             "expected_by": "When each judgement was made",
-            "why_absent": "No decision time is stored on the activity — only the "
-                          "resulting status.",
-            "what_would_close_it": "The same append-only mapping audit table.",
+            "why_absent": "CLOSED. Every journalled decision carries `at`, and "
+                          "GET /mappings/audit/as_at answers what an activity was "
+                          "bound to at a given moment.",
+            "what_would_close_it": "Already closed.",
         },
         {
             "item": "GL account and cost centre per transaction",
@@ -471,6 +490,7 @@ def build_evidence_pack(db: Session, run: CalculationRun, *,
         "9_methodology": _s9_methodology(db, run, summary_payload),
         "10_readiness_and_standard": _s10_readiness_and_standard(db, run),
         "11_screening_register": _s11_screening_register(db, run),
+        "12_mapping_audit": _s12_mapping_audit(db, run),
     }
     gaps = _evidence_gaps()
 

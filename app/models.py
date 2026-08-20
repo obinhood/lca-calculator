@@ -1578,3 +1578,41 @@ class CrosswalkMapping(Base):
     to_code = Column(String, nullable=False)
     partial = Column(Boolean, nullable=False, default=False)
     note = Column(Text, nullable=True)
+
+
+# --- Mapping audit trail -----------------------------------------------------
+
+class MappingAuditEvent(Base):
+    """An append-only record of every change to an activity's factor binding.
+
+    Closes two of the six gaps the evidence pack has to declare: the override log
+    with before/after values, and the decision timestamp. It does NOT close
+    reviewer identity — authentication is an organisation-scoped API key with no
+    concept of a person, so there is no actor to record, and inventing one would
+    be worse than the gap. The pack continues to name that gap.
+
+    Append-only by construction: no update path exists and there is no status
+    column to flip. Resolution in the older AssuranceFinding table is an in-place
+    mutation with no journal, which cannot answer "what was the binding on the day
+    the opinion was issued" — the question audit evidence exists to answer.
+    """
+    __tablename__ = "mapping_audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('auto_mapped','suggested','approved','overridden',"
+            "'unmapped','pact_bound')",
+            name="ck_mapping_audit_action"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    activity_id = Column(Integer, ForeignKey("activities.id"), nullable=False,
+                         index=True)
+    action = Column(String, nullable=False)
+    from_factor_id = Column(Integer, nullable=True)      # provenance only, never joined
+    to_factor_id = Column(Integer, nullable=True)
+    from_status = Column(String, nullable=True)
+    to_status = Column(String, nullable=True)
+    basis = Column(String, nullable=True)                # mapping_basis at the time
+    confidence = Column(Float, nullable=True)
+    note = Column(Text, nullable=True)
+    at = Column(String, nullable=False)                  # ISO-8601 UTC

@@ -248,10 +248,15 @@ def bind_activities(db: Session, organisation_id: int, factor_id: int,
                             "reason": f"unit {a.unit!r} cannot convert to the "
                                       f"footprint's {factor.unit!r}: {exc}"})
             continue
+        from .mapping_audit import record as _audit
+        prev_factor, prev_status = a.factor_id, a.mapping_status
         a.factor_id = factor.id
         a.mapping_status = "overridden"
         a.mapping_basis = "exact"
         a.mapping_confidence = 1.0
+        _audit(db, a, "pact_bound", from_factor_id=prev_factor,
+               from_status=prev_status,
+               note=f"bound to PACT footprint {factor.version}", commit=False)
         bound.append(a.id)
     db.commit()
     return {"bound": len(bound), "activity_ids": bound,
