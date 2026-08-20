@@ -1,0 +1,244 @@
+/* Marketing page. Extends the product palette in styles.css rather than introducing a
+   second one — a landing page that looks nothing like the app it sells is a promise the
+   first screen after sign-in has to break. Prefix `mk-` keeps it clearly separate from
+   the in-app classes. */
+
+.mk { --mk-max: 1120px; --mk-ink: #0a3d2b; background: var(--surface); }
+.mk h2 { font-size: 30px; letter-spacing: -.03em; line-height: 1.2; }
+.mk section { scroll-margin-top: 70px; }
+
+.mk-eyebrow {
+  display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--brand); margin-bottom: 12px;
+}
+
+/* ---------- Nav ---------- */
+.mk-nav {
+  position: sticky; top: 0; z-index: 20; background: rgba(255, 255, 255, .86);
+  backdrop-filter: blur(10px); border-bottom: 1px solid transparent; transition: border-color .18s;
+}
+.mk-nav.stuck { border-bottom-color: var(--border); }
+.mk-nav-in {
+  max-width: var(--mk-max); margin: 0 auto; padding: 13px 24px;
+  display: flex; align-items: center; gap: 26px;
+}
+.mk-logo {
+  display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text);
+}
+.mk-logo .mark { font-size: 20px; }
+.mk-logo b { font-size: 15.5px; letter-spacing: -.02em; }
+.mk-links { display: flex; gap: 22px; margin-left: 10px; }
+.mk-links a {
+  color: var(--muted); text-decoration: none; font-size: 13.5px; font-weight: 500;
+}
+.mk-links a:hover { color: var(--text); }
+.mk-nav-cta { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+/* ---------- Hero ---------- */
+.mk-hero {
+  max-width: var(--mk-max); margin: 0 auto; padding: 68px 24px 60px;
+  display: grid; grid-template-columns: 1.02fr .98fr; gap: 52px; align-items: center;
+}
+.mk-hero h1 {
+  font-size: 46px; line-height: 1.08; letter-spacing: -.038em; margin-bottom: 18px;
+  max-width: 15ch;
+}
+.mk-hero-copy > p {
+  color: var(--muted); font-size: 16.5px; line-height: 1.6; max-width: 52ch; margin: 0 0 26px;
+}
+.mk-hero-cta { display: flex; gap: 10px; flex-wrap: wrap; }
+.mk-hero-note { color: var(--muted); font-size: 12.5px; margin: 14px 0 0; }
+
+/* The drawn product visual. Not a screenshot and not a stock photo — a faithful sketch
+   of the one screen that makes the argument. */
+.mk-hero-vis { display: flex; flex-direction: column; gap: 10px; }
+.mk-shot {
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 13px;
+  overflow: hidden; box-shadow: 0 12px 34px rgba(10, 61, 43, .11), 0 2px 8px rgba(10, 61, 43, .06);
+}
+.mk-shot-bar {
+  display: flex; align-items: center; gap: 6px; padding: 10px 13px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+}
+.mk-shot-bar .dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong);
+}
+.mk-shot-title {
+  margin-left: 8px; font-size: 11.5px; color: var(--muted); font-weight: 500;
+}
+.mk-shot-body { padding: 16px; }
+.mk-verdict {
+  background: var(--bad-soft); color: var(--bad); border-radius: 8px;
+  padding: 9px 12px; font-size: 12px; font-weight: 700; letter-spacing: .02em;
+  text-align: center; margin-bottom: 14px;
+}
+.mk-blockers { border-left: 3px solid var(--bad); padding-left: 12px; margin-bottom: 16px; }
+.mk-blockers > b { font-size: 12px; color: var(--bad); display: block; margin-bottom: 7px; }
+.mk-blocker {
+  font-size: 12px; color: var(--muted); line-height: 1.5; margin-bottom: 7px;
+}
+.mk-blocker i { color: var(--text); font-style: italic; }
+.mk-shot-rows { border-top: 1px solid var(--border); padding-top: 4px; }
+.mk-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.mk-row:last-child { border-bottom: none; }
+.mk-row span { color: var(--muted); }
+.mk-cd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  color: var(--warn); background: var(--warn-soft); padding: 2px 7px; border-radius: 5px;
+}
+.mk-shot-cap { text-align: center; color: var(--muted); font-size: 12px; }
+
+/* ---------- Framework strip ---------- */
+.mk-strip {
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  background: var(--bg); padding: 26px 24px;
+}
+.mk-strip p {
+  text-align: center; color: var(--muted); font-size: 12.5px; margin: 0 0 14px;
+  text-transform: uppercase; letter-spacing: .08em; font-weight: 600;
+}
+.mk-strip-row {
+  max-width: var(--mk-max); margin: 0 auto;
+  display: flex; flex-wrap: wrap; gap: 9px; justify-content: center;
+}
+.mk-strip-row span {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+  padding: 6px 14px; font-size: 12.5px; color: var(--text); font-weight: 500;
+}
+
+/* ---------- Generic section ---------- */
+.mk-sec { max-width: var(--mk-max); margin: 0 auto; padding: 76px 24px; }
+.mk-sec.alt {
+  max-width: none; background: var(--bg);
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+}
+.mk-sec.alt > * { max-width: var(--mk-max); margin-left: auto; margin-right: auto; }
+.mk-sec-head { max-width: 62ch; margin-bottom: 40px; }
+.mk-sec-lead { color: var(--muted); font-size: 15.5px; line-height: 1.6; margin: 14px 0 0; }
+
+/* ---------- Steps ---------- */
+.mk-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(268px, 1fr)); gap: 20px; }
+.mk-step {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 13px;
+  padding: 22px; box-shadow: var(--shadow);
+}
+.mk-step-n {
+  display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
+  background: var(--brand-soft); color: var(--brand-ink); font-weight: 700; font-size: 14px;
+  margin-bottom: 13px;
+}
+.mk-step b { display: block; font-size: 16px; letter-spacing: -.015em; margin-bottom: 7px; }
+.mk-step p { color: var(--muted); font-size: 13.5px; line-height: 1.6; margin: 0; }
+
+/* ---------- Pillars ---------- */
+.mk-pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(390px, 1fr)); gap: 22px; }
+.mk-pillar {
+  display: flex; gap: 15px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 13px; padding: 22px; box-shadow: var(--shadow);
+}
+.mk-pillar-ico {
+  flex: none; width: 40px; height: 40px; border-radius: 10px; background: var(--brand-soft);
+  display: grid; place-items: center; font-size: 19px;
+}
+.mk-pillar b { display: block; font-size: 16px; letter-spacing: -.015em; margin-bottom: 7px; }
+.mk-pillar p { color: var(--muted); font-size: 13.5px; line-height: 1.62; margin: 0; }
+
+/* ---------- Coverage ---------- */
+.mk-cov { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 26px 30px; }
+.mk-cov-cat {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .09em; font-weight: 700;
+  color: var(--brand); padding-bottom: 9px; margin-bottom: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.mk-cov-col ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.mk-cov-col li { line-height: 1.35; }
+.mk-cov-col li b { display: block; font-size: 13.5px; font-weight: 600; }
+.mk-cov-col li span { display: block; font-size: 11.5px; color: var(--muted); }
+
+/* ---------- Rigour ---------- */
+.mk-facts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(212px, 1fr)); gap: 16px;
+  margin-bottom: 22px;
+}
+.mk-fact {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px; box-shadow: var(--shadow);
+}
+.mk-fact .v { font-size: 27px; font-weight: 700; letter-spacing: -.03em; color: var(--brand-ink); }
+.mk-fact .l { font-size: 13px; font-weight: 600; margin: 2px 0 8px; }
+.mk-fact p { color: var(--muted); font-size: 12.5px; line-height: 1.55; margin: 0; }
+
+/* The section that would be a testimonial. Saying what the product cannot do is the most
+   persuasive thing an anti-overclaim product can put on a marketing page. */
+.mk-honest {
+  border: 1px dashed var(--border-strong); border-radius: 12px; padding: 20px;
+  background: var(--surface);
+}
+.mk-honest b { font-size: 14px; }
+.mk-honest p { color: var(--muted); font-size: 13.5px; line-height: 1.62; margin: 7px 0 0; max-width: 78ch; }
+
+/* ---------- Closing CTA ---------- */
+.mk-cta {
+  background: linear-gradient(160deg, var(--brand-ink) 0%, #0a4a33 60%, #073a28 100%);
+  color: #fff; text-align: center; padding: 74px 24px;
+}
+.mk-cta h2 { color: #fff; margin-bottom: 12px; }
+.mk-cta p {
+  color: #b9d8ca; font-size: 16px; max-width: 52ch; margin: 0 auto 26px; line-height: 1.6;
+}
+.mk-cta .mk-hero-cta { justify-content: center; }
+button.ghost-light {
+  background: transparent; color: #fff; border-color: rgba(255, 255, 255, .35);
+}
+button.ghost-light:hover:not(:disabled) {
+  background: rgba(255, 255, 255, .1); color: #fff; border-color: rgba(255, 255, 255, .55);
+}
+
+/* ---------- Footer ---------- */
+.mk-foot { background: var(--surface); border-top: 1px solid var(--border); }
+.mk-foot-in {
+  max-width: var(--mk-max); margin: 0 auto; padding: 44px 24px 34px;
+  display: flex; gap: 44px; flex-wrap: wrap; justify-content: space-between;
+}
+.mk-foot-brand { display: flex; gap: 10px; align-items: flex-start; max-width: 30ch; }
+.mk-foot-brand .mark { font-size: 20px; }
+.mk-foot-brand b { display: block; font-size: 14.5px; letter-spacing: -.02em; }
+.mk-foot-brand span { color: var(--muted); font-size: 12.5px; }
+.mk-foot-cols { display: flex; gap: 52px; flex-wrap: wrap; }
+.mk-foot-cols h4 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--muted);
+  margin-bottom: 11px;
+}
+.mk-foot-cols a, .mk-foot-cols span {
+  display: block; font-size: 13px; color: var(--text); text-decoration: none; margin-bottom: 8px;
+}
+.mk-foot-cols a:hover { color: var(--brand); }
+.mk-foot-cols span { color: var(--muted); }
+.mk-foot-bar {
+  border-top: 1px solid var(--border); padding: 16px 24px;
+}
+.mk-foot-bar span {
+  display: block; max-width: var(--mk-max); margin: 0 auto;
+  color: var(--muted); font-size: 11.5px;
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 940px) {
+  .mk-hero { grid-template-columns: 1fr; gap: 34px; padding: 46px 20px 44px; }
+  .mk-hero h1 { font-size: 36px; max-width: none; }
+  .mk-links { display: none; }
+  .mk-sec { padding: 54px 20px; }
+  .mk h2 { font-size: 25px; }
+  .mk-pillars { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .mk-hero h1 { font-size: 30px; }
+  .mk-hero-copy > p { font-size: 15px; }
+  .mk-nav-in { padding: 11px 16px; gap: 12px; }
+  .mk-nav-cta button:first-child { display: none; }   /* one CTA on a phone, not two */
+  .mk-hero-cta button { width: 100%; }
+  .mk-foot-cols { gap: 28px; }
+}
