@@ -136,7 +136,8 @@ def _basis_rows(db: Session, run_id: int, method: str) -> list:
             or (r.method == "location" and r.activity_id not in market_activities)]
 
 
-def _load_lines(db: Session, run_id: int, method: str) -> list:
+def _load_lines(db: Session, run_id: int, method: str,
+                include_crosswalk: bool = False) -> list:
     """Frozen (median, sigma, group_key, unscored, basis) per line of one basis.
 
     ``median`` keeps its sign. Multiplying by a strictly positive lognormal
@@ -153,6 +154,20 @@ def _load_lines(db: Session, run_id: int, method: str) -> list:
             or sigma < 0
         if unscored:
             sigma = SIGMA_UNSCORED
+
+        # The declared classification chain's own contribution, frozen at compute
+        # time. Variances add on the log scale, so the chain widens the line's
+        # band rather than replacing it. A line with no declared chain adds
+        # nothing — which is NOT the same as carrying no crosswalk error, and the
+        # payload reports the unquantified share separately.
+        xw = detail.get("crosswalk") or {}
+        xw_declared = bool(xw.get("declared"))
+        xw_var = xw.get("total_variance") if xw.get("quantifiable") else None
+        xw_applied = isinstance(xw_var, (int, float)) and math.isfinite(xw_var) \
+            and xw_var > 0
+        if include_crosswalk and xw_applied:
+            sigma = math.sqrt(sigma ** 2 + xw_var)
+
         clamped = sigma > SIGMA_CEILING
         if clamped:
             sigma = SIGMA_CEILING
@@ -165,12 +180,16 @@ def _load_lines(db: Session, run_id: int, method: str) -> list:
             "line_id": r.id, "activity_id": r.activity_id, "scope": r.scope,
             "median": float(co2e), "sigma": float(sigma),
             "group": group, "unscored": unscored, "clamped": clamped, "basis": basis,
+            "crosswalk_declared": xw_declared,
+            "crosswalk_variance": xw_var if xw_applied else None,
+            "crosswalk_unquantifiable": xw_declared and not xw_applied,
         })
     return out
 
 
 def _fingerprint(run_id: int, method: str, correlation: str, iterations: int,
-                 confidence: float, lines: list) -> str:
+                 confidence: float, lines: list,
+                 include_crosswalk: bool = False) -> str:
     """SHA-256 over the exact inputs the simulation consumes.
 
     Sorted and rounded so neither row order nor float repr can move the seed;
@@ -180,6 +199,7 @@ def _fingerprint(run_id: int, method: str, correlation: str, iterations: int,
         "v": PROPAGATION_VERSION,
         "run": run_id, "method": method, "correlation": correlation,
         "iterations": iterations, "confidence": round(confidence, 6),
+        "include_crosswalk": bool(include_crosswalk),
         "lines": sorted(
             [f"{ln['group']}|{ln['median']:.10g}|{ln['sigma']:.10g}" for ln in lines]
         ),
@@ -387,7 +407,8 @@ def _sensitivity(group_var: Optional[dict], group_mean: Optional[dict],
 def propagate(db: Session, run_id: int, *, method: str = "location",
               correlation: str = DEFAULT_CORRELATION,
               iterations: int = DEFAULT_ITERATIONS,
-              confidence: float = 0.95, top_n: int = 10) -> dict:
+              confidence: float = 0.95, top_n: int = 10,
+              include_crosswalk: bool = False) -> dict:
     """Propagate frozen per-line pedigree sigmas to an inventory-level interval.
 
     Returns a payload carrying the interval under the requested correlation mode,
@@ -414,7 +435,7 @@ def propagate(db: Session, run_id: int, *, method: str = "location",
     if run is None:
         return {"available": False, "reason": f"run {run_id} not found"}
 
-    lines = _load_lines(db, run_id, method)
+    lines = _load_lines(db, run_id, method, include_crosswalk)
     if not lines:
         return {"available": False, "run_id": run_id, "method": method,
                 "reason": f"run {run_id} has no emission lines on the {method} "
@@ -426,7 +447,7 @@ def propagate(db: Session, run_id: int, *, method: str = "location",
     zero_sigma = all(ln["sigma"] == 0.0 for ln in lines)
 
     fingerprint = _fingerprint(run_id, method, correlation, iterations,
-                               confidence, lines)
+                               confidence, lines, include_crosswalk)
     seed = _seed_from(fingerprint)
 
     if zero_sigma:
@@ -452,7 +473,8 @@ def propagate(db: Session, run_id: int, *, method: str = "location",
         if mode == correlation:
             bounds[mode] = headline
             continue
-        fp_m = _fingerprint(run_id, method, mode, iterations, confidence, lines)
+        fp_m = _fingerprint(run_id, method, mode, iterations, confidence, lines,
+                            include_crosswalk)
         t_m, _, _ = _simulate(lines, mode, iterations, _seed_from(fp_m))
         bounds[mode] = _interval(t_m, deterministic, confidence)
 
@@ -489,6 +511,30 @@ def propagate(db: Session, run_id: int, *, method: str = "location",
             "simulated_mean exceeding deterministic_total_co2e_kg is the correct "
             "behaviour of a right-skewed distribution, not a discrepancy — the "
             "total is the inventory, the simulation is a statement about it."),
+        "crosswalk": {
+            "included": include_crosswalk,
+            "lines_with_declared_chain": sum(1 for l in lines if l["crosswalk_declared"]),
+            "lines_with_quantified_chain": sum(
+                1 for l in lines if l["crosswalk_variance"]),
+            "lines_declared_but_unquantifiable": sum(
+                1 for l in lines if l["crosswalk_unquantifiable"]),
+            "lines_without_a_declared_chain": sum(
+                1 for l in lines if not l["crosswalk_declared"]),
+            "note": (
+                "Classification-chain variance is added to each line's pedigree "
+                "variance on the log scale, widening the band rather than replacing "
+                "it. The registry has long recorded that a chart-of-accounts -> "
+                "UNSPSC -> NAICS mapping often carries more error than the factor "
+                "itself; this is where that shows up in the number."
+                if include_crosswalk else
+                "NOT INCLUDED. The interval above reflects factor-and-activity "
+                "pedigree only. Pass include_crosswalk=true to add the declared "
+                "classification chain's measured contribution."),
+            "undeclared_note": (
+                "A line with no declared chain adds nothing — which is NOT the same "
+                "as carrying no crosswalk error. It is unquantified, not absent, and "
+                "the count above says how many lines are in that position."),
+        },
         "coverage": _coverage(db, run, method, lines),
         "sensitivity": _sensitivity(group_var, group_mean, lines, top_n),
         "lines": {
