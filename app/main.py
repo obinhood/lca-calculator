@@ -2016,6 +2016,76 @@ def _csv_str(value) -> str:
     return "" if s.lower() in ("nan", "nat", "none") else s
 
 
+# --- Versioned classification crosswalks -------------------------------------
+
+@app.post("/crosswalks")
+def register_crosswalk(from_scheme: str = Query(...), to_scheme: str = Query(...),
+                       source: str = Query(...), table_version: str = Query(...),
+                       licence: Optional[str] = None, url: Optional[str] = None,
+                       org: Organisation = Depends(current_org),
+                       db: Session = Depends(get_db)):
+    """Register a versioned concordance table between two classification schemes."""
+    from .services.crosswalk import register
+    out = register(db, from_scheme=from_scheme, to_scheme=to_scheme, source=source,
+                   table_version=table_version, licence=licence, url=url)
+    if not out["registered"] and not out.get("idempotent"):
+        raise HTTPException(status_code=400, detail=out["reason"])
+    return JSONResponse(out)
+
+
+@app.post("/crosswalks/{crosswalk_id}/mappings")
+async def add_crosswalk_mappings(crosswalk_id: int, request: Request,
+                                 org: Organisation = Depends(current_org),
+                                 db: Session = Depends(get_db)):
+    """Add concordance rows. Body is a JSON array of
+    {from_code, to_code, partial?, note?}."""
+    from .services.crosswalk import add_mappings
+    try:
+        body = _json.loads(await request.body())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="body must be a JSON array")
+    if not isinstance(body, list):
+        raise HTTPException(status_code=400, detail="body must be a JSON array")
+    out = add_mappings(db, crosswalk_id, body)
+    if out.get("reason"):
+        raise HTTPException(status_code=404, detail=out["reason"])
+    return JSONResponse(out)
+
+
+@app.get("/crosswalks/resolve")
+def resolve_crosswalk(from_scheme: str, from_code: str, to_scheme: str,
+                      table_version: Optional[str] = None,
+                      org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """Resolve one code to its candidate set, with the measured uncertainty.
+
+    Uncertainty is the dispersion of the candidate set's own factor values, not a
+    pedigree score: a one-to-one hop is exactly zero, which no fixed 1-5 score can
+    express.
+    """
+    from .services.crosswalk import hop_uncertainty
+    return JSONResponse(hop_uncertainty(
+        db, from_scheme=from_scheme, from_code=from_code, to_scheme=to_scheme,
+        table_version=table_version))
+
+
+@app.post("/crosswalks/chain")
+async def resolve_crosswalk_chain(request: Request,
+                                  org: Organisation = Depends(current_org),
+                                  db: Session = Depends(get_db)):
+    """Combine a chain of hops. Body is a JSON array of
+    {from_scheme, from_code, to_scheme, table_version?}."""
+    from .services.crosswalk import chain_uncertainty
+    try:
+        hops = _json.loads(await request.body())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="body must be a JSON array")
+    if not isinstance(hops, list) or not hops:
+        raise HTTPException(status_code=400,
+                            detail="body must be a non-empty JSON array of hops")
+    return JSONResponse(chain_uncertainty(db, hops))
+
+
 # --- PACT v3 HOST side: serving the network ----------------------------------
 # NOTE ON ROUTING: the token endpoint is deliberately NOT under /3. Everything
 # else is /3/..., but the spec puts the token at {auth-base}/auth/token and the
