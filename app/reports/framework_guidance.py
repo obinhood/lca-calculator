@@ -304,6 +304,42 @@ FRAMEWORKS = {
             "Set a base year and cover Scope 1 & 2 (and Scope 3 where material); validate with SBTi.",
         ],
     },
+
+    "sbti_cnzs_v2": {
+        "name": "SBTi Corporate Net-Zero Standard V2.0",
+        "category": "Targets", "jurisdiction": "global (SBTi)",
+        "authority": "Science Based Targets initiative",
+        "platform_support": "partial", "endpoint": "/reports/sbti_v2",
+        "applies_to": "Companies setting or revalidating science-based targets. "
+                      "Approved 2026-06-11, effective 2027-02-01.",
+        "key_points": [
+            "Significance: a scope 3 category is significant at 5% or more of "
+            "categories 1-14 in the PHYSICAL inventory — not total scope 3, not the "
+            "whole inventory, and never including category 15. The denominator is the "
+            "GHG Protocol Table 5.4 minimum boundary PLUS the mandatory WTW transport "
+            "uplift; other above-boundary emissions are excluded (C5.6, C14.1 fn21).",
+            "There is NO aggregate coverage floor. The 67% rule is gone and nothing "
+            "backstops it; a company whose every category is under 5% owes zero "
+            "scope 3 target categories.",
+            "A sub-5% category needs no justification. Justification (a closed "
+            "condition enum plus four C14.3 fields) is required only for excluding "
+            "activities INSIDE a significant category.",
+            "Two company categories, A and B. There is no Category C.",
+            "Scope 2: ONE target suffices, from low-carbon-electricity alignment or "
+            "absolute reduction (C12.2). V2.0 does NOT require a location-based plus "
+            "market-based pair — that was in the consultation drafts and was dropped.",
+            "Low-carbon electricity is numeric and per generator: <= 0.048 kgCO2/kWh, "
+            "tightening to 0.024 from 2035. 'Zero-carbon electricity' is not a V2.0 "
+            "term.",
+            "BUILT: significance and its denominator, company categorisation, C14.2/3 "
+            "exclusion validation, target-boundary conformance, C8.3 recalculation "
+            "triggers, LCE thresholds, C12 scope 2 conformance. NOT BUILT: the "
+            "implementation hierarchy (C21), market-instrument integrity criteria "
+            "(C25-C32), emissions-intensive-activity analysis (C6), and claim-type "
+            "derivation (C37) — all of which are assessed at end-of-cycle rather than "
+            "at target validation.",
+        ],
+    },
     "iso_14068": {
         "name": "ISO 14068-1 (carbon neutrality) — supersedes PAS 2060",
         "category": "Carbon credits", "jurisdiction": "global (ISO)",

@@ -2016,6 +2016,59 @@ def _csv_str(value) -> str:
     return "" if s.lower() in ("nan", "nat", "none") else s
 
 
+# --- SBTi Corporate Net-Zero Standard V2.0 -----------------------------------
+
+@app.get("/reports/sbti_v2")
+def get_sbti_v2_report(run_id: Optional[int] = None,
+                       turnover_eur: Optional[float] = None,
+                       fte: Optional[int] = None,
+                       balance_sheet_eur: Optional[float] = None,
+                       high_income_country: Optional[bool] = None,
+                       org: Organisation = Depends(current_org),
+                       db: Session = Depends(get_db)):
+    """SBTi V2.0 significance, company categorisation and target boundary.
+
+    Significance is 5% of scope 3 categories 1-14 in the PHYSICAL inventory — never
+    total Scope 3, never the whole inventory, and never including category 15. There
+    is no aggregate coverage floor: the old 67% rule is gone and nothing backstops it.
+    """
+    from .reports.sbti_v2 import sbti_v2_report
+    if run_id is not None:
+        run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
+                                              CalculationRun.organisation_id == org.id).first()
+    else:
+        run = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
+            .order_by(CalculationRun.id.desc()).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found for this organisation")
+    return JSONResponse(with_guidance(sbti_v2_report(
+        db, run, turnover_eur=turnover_eur, fte=fte,
+        balance_sheet_eur=balance_sheet_eur, high_income_country=high_income_country)))
+
+
+@app.post("/sbti_v2/scope2_conformance")
+def check_scope2_conformance(target_types: str = Query(...),
+                             company_category: Optional[str] = None,
+                             projected_electricity_growth: Optional[float] = None,
+                             coverage_pct: float = 100.0,
+                             org: Organisation = Depends(current_org)):
+    """C12 Scope 2 target conformance. `target_types` is comma-separated.
+
+    ONE target suffices — V2.0 does NOT require a location-based plus market-based
+    pair. That appeared in the consultation drafts and was dropped.
+    """
+    from .services.sbti_v2 import scope2_target_conformance
+    types = [t.strip() for t in target_types.split(",") if t.strip()]
+    if company_category not in (None, "A", "B"):
+        raise HTTPException(status_code=400,
+                            detail="company_category must be 'A' or 'B' — V2.0 defines "
+                                   "exactly two categories, there is no Category C")
+    return JSONResponse(scope2_target_conformance(
+        types, company_cat=company_category,
+        projected_electricity_growth=projected_electricity_growth,
+        coverage_pct=coverage_pct))
+
+
 # --- Period-over-period screening over DECLARED series -----------------------
 
 @app.post("/activities/series_key")

@@ -38,6 +38,7 @@ _METHODOLOGY = {
     "iso_14068": "ISO 14068-1 (carbon neutrality)",
     "iso_14083": "ISO 14083 (transport chain GHG) / GLEC",
     "pact_pathfinder": "PACT Technical Specifications v3 (PCF exchange)",
+    "sbti_cnzs_v2": "SBTi Corporate Net-Zero Standard V2.0",
     "isae_3410": "ISAE 3410 (assurance on GHG statements)",
     "issa_5000": "ISSA 5000 (general sustainability assurance)",
     "pef": "EU Product Environmental Footprint",
