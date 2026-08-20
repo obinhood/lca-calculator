@@ -761,6 +761,7 @@ def get_run_uncertainty(run_id: int,
                         iterations: int = DEFAULT_ITERATIONS,
                         confidence: float = 0.95,
                         top_n: int = 10,
+                        include_crosswalk: bool = False,
                         org: Organisation = Depends(current_org),
                         db: Session = Depends(get_db)):
     """Monte Carlo propagation of the run's frozen per-line pedigree sigmas.
@@ -780,7 +781,8 @@ def get_run_uncertainty(run_id: int,
     if run is None:
         raise HTTPException(status_code=404, detail="run not found for this organisation")
     result = propagate(db, run.id, method=method, correlation=correlation,
-                       iterations=iterations, confidence=confidence, top_n=top_n)
+                       iterations=iterations, confidence=confidence, top_n=top_n,
+                       include_crosswalk=include_crosswalk)
     # A refusal caused by a bad PARAMETER is a client error; a refusal caused by the
     # run's own data (no lines, no quantified uncertainty) is a legitimate 200 answer
     # that says so — the caller asked a valid question and this is the true reply.
@@ -2089,6 +2091,65 @@ async def add_crosswalk_mappings(crosswalk_id: int, request: Request,
     if out.get("reason"):
         raise HTTPException(status_code=404, detail=out["reason"])
     return JSONResponse(out)
+
+
+@app.post("/activities/crosswalk_chain")
+async def declare_crosswalk_chain(request: Request,
+                                  activity_ids: Optional[str] = None,
+                                  category: Optional[str] = None,
+                                  source_file: Optional[str] = None,
+                                  org: Organisation = Depends(current_org),
+                                  db: Session = Depends(get_db)):
+    """Declare the classification chain a set of activities was mapped through.
+
+    Body is a JSON array of hops: {from_scheme, from_code, to_scheme,
+    table_version?}. PREPARER-DECLARED and never written by the engine — an
+    inferred chain would be indistinguishable from one the preparer stood behind.
+
+    Once declared, the chain's measured variance is frozen onto each line at the
+    next calculation and widens that line's Monte Carlo band when the propagation
+    is asked to include it.
+    """
+    from .services.crosswalk import chain_uncertainty
+    try:
+        hops = _json.loads(await request.body())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="body must be a JSON array of hops")
+    if not isinstance(hops, list) or not hops:
+        raise HTTPException(status_code=400,
+                            detail="body must be a non-empty JSON array of hops")
+    if not (activity_ids or category or source_file):
+        raise HTTPException(
+            status_code=400,
+            detail="supply activity_ids, category or source_file — declaring one "
+                   "chain across an entire organisation would defeat the purpose")
+
+    q = db.query(ActivityRecord).filter(ActivityRecord.organisation_id == org.id)
+    if activity_ids:
+        try:
+            ids = [int(x) for x in activity_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail="activity_ids must be comma-separated integers")
+        q = q.filter(ActivityRecord.id.in_(ids))
+    if category:
+        q = q.filter(ActivityRecord.category == category)
+    if source_file:
+        q = q.filter(ActivityRecord.source_file == source_file)
+
+    rows = q.all()
+    for a in rows:
+        a.crosswalk_chain = _json.dumps(hops)
+    db.commit()
+    # Show the caller what they just committed to, resolved now.
+    preview = chain_uncertainty(db, hops)
+    return JSONResponse({
+        "activities_updated": len(rows),
+        "activity_ids": [a.id for a in rows],
+        "chain": preview,
+        "note": "The chain is frozen onto each line at the NEXT calculation, so a "
+                "later concordance revision cannot move an already-filed interval.",
+    })
 
 
 @app.get("/crosswalks/resolve")

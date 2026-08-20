@@ -364,3 +364,46 @@ def effective_resolution(db: Session, scheme: str) -> dict:
                 "share one value, a finer crosswalk buys nothing — report the "
                 "effective resolution, not the nominal one.",
     }
+
+
+def activity_verdict(db: Session, activity) -> Optional[dict]:
+    """The declared chain's contribution for one activity, frozen onto its line.
+
+    Returns None when no chain was declared — and that is NOT the same as zero.
+    A spend line reached through an undeclared chain still carries that error; it
+    is simply unquantified, and the propagation reports the unquantified share
+    rather than treating it as clean.
+    """
+    import json as _json
+    raw = getattr(activity, "crosswalk_chain", None)
+    if not raw:
+        return None
+    try:
+        hops = _json.loads(raw)
+    except (ValueError, TypeError):
+        return {"declared": True, "quantifiable": False,
+                "reason": "crosswalk_chain is not valid JSON"}
+    if not isinstance(hops, list) or not hops:
+        return {"declared": True, "quantifiable": False,
+                "reason": "crosswalk_chain must be a non-empty array of hops"}
+    try:
+        out = chain_uncertainty(db, hops)
+    except (KeyError, TypeError) as exc:
+        return {"declared": True, "quantifiable": False,
+                "reason": f"malformed hop: {exc}"}
+    return {
+        "declared": True,
+        "version": out["version"],
+        "quantifiable": out["quantifiable"],
+        "hop_count": out["hop_count"],
+        "total_variance": out["total_variance"],
+        "total_sigma": out["total_sigma"],
+        "unresolved_hops": out["unresolved_hops"],
+        "uncitable_hops": out["uncitable_hops"],
+        "hops": [{
+            "from_scheme": h.get("from_scheme"), "from_code": h.get("from_code"),
+            "to_scheme": h.get("to_scheme"), "table_version": h.get("table_version"),
+            "cardinality": h.get("cardinality"), "sigma": h.get("sigma"),
+            "uncitable": h.get("uncitable"),
+        } for h in out["hops"]],
+    }

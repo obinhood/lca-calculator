@@ -87,6 +87,15 @@ class ActivityRecord(Base):
     # one site would vanish into a flat total, and a site opening would read as a
     # data error.
     series_key = Column(String, nullable=True, index=True)
+    # The PREPARER-DECLARED classification chain this row's spend factor was
+    # reached through, as a JSON array of hops. Never written by the engine, for
+    # the same reason as `scope` and `series_key`: a chain the engine inferred
+    # would be indistinguishable from one the preparer stood behind.
+    #
+    # NULL means no chain was declared, and the uncertainty propagation adds
+    # nothing — which is honest, not clean: a spend line mapped through an
+    # undeclared chain still carries that error, it simply is not quantified.
+    crosswalk_chain = Column(Text, nullable=True)
     mapping_confidence = Column(Float)  # 0-1
     factor_id = Column(Integer, ForeignKey("emission_factors.id"), nullable=True)
     # Human-review gate (Gap 6): coarse resolver matches are SUGGESTED, not bound.

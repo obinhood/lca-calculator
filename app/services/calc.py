@@ -26,6 +26,7 @@ from .units import convert, UnitConversionError, QuantityError
 from .gwp import co2e_from_gases, gwp
 from .dq import line_dq
 from .screening import freeze_onto_run as screening_freeze_onto_run
+from .crosswalk import activity_verdict as crosswalk_verdict
 from .spend import normalize_spend, SpendNormalizationError
 
 # GHG Protocol scope by activity category. Purchased energy carriers (electricity,
@@ -670,6 +671,9 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 "lca_boundary": a.factor.lca_boundary,
                 # ecoinvent pedigree data-quality score + lognormal uncertainty.
                 "data_quality": dq,
+                # The declared classification chain's measured contribution, frozen
+                # so a later concordance revision cannot move a filed interval.
+                "crosswalk": crosswalk_verdict(db, a),
             }
             if spend_steps is not None:
                 detail["spend_normalization"] = spend_steps
