@@ -13,10 +13,10 @@ refused with a reason instead of estimated.
 
 | | |
 |---|---|
-| Framework registry | 41 entries — 24 `built`, 15 `partial`, 2 `reference` |
-| API | 103 endpoints over 37 ORM models |
-| Engine | ~22k lines Python across 69 modules |
-| Tests | 1,165, including property-based (Hypothesis) and calculation oracles |
+| Framework registry | 42 entries — 24 `built`, 16 `partial`, 2 `reference` |
+| API | 120 endpoints over 42 ORM models |
+| Engine | ~25k lines Python across 76 modules |
+| Tests | 1,446, including property-based (Hypothesis) and calculation oracles |
 
 `GET /frameworks` is the authoritative inventory and each entry states its own
 `platform_support` level. `partial` means partial — the guidance says what is not
@@ -43,9 +43,18 @@ produced.
   method (`GET /reports/hourly_scope2`) for the proposed GHG Protocol revision:
   granular certificates, a CFE score, and deliverability gating. Surplus in one
   hour never offsets a deficit in another.
-- **PACT Pathfinder v3** — import and validate a supplier's product carbon
-  footprint, then materialise it as a `supplier_specific` factor. On a real
-  portfolio that moved the uncertainty band from ±195.6% to ±10.3%.
+- **PACT Pathfinder v3, both sides** — import and validate a supplier's product
+  carbon footprint and materialise it as a `supplier_specific` factor (which on
+  a real portfolio moved the uncertainty band from ±195.6% to ±10.3%), and serve
+  the network: `GET /3/footprints`, OAuth2 client credentials, CloudEvents.
+- **SBTi Corporate Net-Zero Standard V2.0** — the ≥5% significance test on
+  categories 1–14 with the WTW-uplift denominator, company categorisation,
+  C14.2/3 exclusion validation, C8.3 recalculation triggers and C12 Scope 2
+  conformance.
+- **Versioned classification crosswalks** whose uncertainty is *measured* —
+  σ = ln(GSD) of the candidate set's own factors, so a one-to-one hop is exactly
+  zero. A direct UNSPSC→NAICS hop is flagged uncitable, because UNSPSC classifies
+  the product and NAICS the establishment.
 - **Spend-based** normalisation with inflation and price-basis adjustment.
 
 ### Data quality and uncertainty
@@ -150,20 +159,26 @@ eGRID for market-based Scope 2.
 Stated plainly because a reader deciding whether to use this deserves them:
 
 - **Ingestion is CSV only.** No ERP, utility, expense or travel connectors.
-- **No supplier portal.** PACT exchange covers the *consume* side (import a
-  supplier's footprint and use it as primary data); the host side — serving
-  `GET /3/footprints`, OAuth2 client credentials, CloudEvents — is not built.
+- **No supplier portal**, and PACT conformance is untested. The API is served but
+  has not been run against the official conformance tool, which needs a hosted
+  endpoint and a registered test account. Outbound event delivery with retry is
+  not built.
 - **Nothing on the reduction side** — no abatement levers, no MACC, no scenario
   modelling.
 - **No AI-assisted mapping.** The resolver is rule-based plus fuzzy matching.
-- **Screening is deterministic only.** Duplicates, unit allow-lists, coverage
-  overlaps and unit-conversion signatures. The GHG Protocol ch.7 ten-percent
-  year-on-year rule is *not* implemented: `ActivityRecord` carries no series
-  identity, so an inferred series key would merge distinct sites and report
-  their sum as one trend. It needs a preparer-declared key first.
+- **Period-over-period screening covers declared series only.** `series_key` is
+  preparer-supplied and never written by the engine; a row without one is not
+  screened for year-on-year change, and the unenrolled share is reported by name.
+- **Reviewer identity is still unavailable.** The mapping audit trail records
+  what changed and when, but authentication is an organisation-scoped API key
+  with no concept of a person, so *who* decided cannot be recorded.
 - **Hourly Scope 2 has no data feed.** The matching engine, certificates and
   deliverability model exist, but nothing ingests interval meter data
   automatically — hourly load arrives by CSV like everything else.
+- **Bill extraction has no OCR.** The validation layer — triage, arithmetic
+  reconciliation, MPAN check, read quality, supersession — is built; character
+  recognition sits behind a pluggable protocol and the library is the operator's
+  choice (pdfplumber is MIT; PyMuPDF is AGPL; OCRmyPDF needs AGPL Ghostscript).
 - Crosswalk versioning (chart-of-accounts → UNSPSC → NAICS/NACE) is documented in
   the registry but not implemented, so spend-mapping error is not yet carried
   into the uncertainty band.
