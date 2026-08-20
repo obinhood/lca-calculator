@@ -594,16 +594,17 @@ def test_unquantifiable_findings_warn_that_the_total_is_a_lower_bound(db):
 
 # --- what it deliberately does not do ----------------------------------------
 
-def test_period_over_period_is_declared_not_implemented_with_its_reason(db):
-    """Honesty over coverage: the schema carries no series identifier, so a series
-    key would merge distinct sites and report their sum as one trend."""
+def test_period_over_period_points_at_the_declared_series_screen(db):
+    """It is implemented, but only over DECLARED series — and the register says so
+    rather than implying the check covers everything."""
     org = _org(db)
     _act(db, org)
     s = screen(db, org.id)
     ns = s["not_screened"]["period_over_period_step_change"]
-    assert "NOT IMPLEMENTED" in ns
-    assert "series identity" in ns or "series identifier" in ns
+    assert "DECLARED series only" in ns
+    assert "series_screen" in ns
     assert "10 percent" in ns
+    assert "NOT screened" in ns
 
 
 def test_intensity_benchmarks_are_declared_not_implemented(db):

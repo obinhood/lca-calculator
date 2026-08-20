@@ -541,21 +541,17 @@ def summary(db: Session, organisation_id: int, *,
         },
         "not_screened": {
             "period_over_period_step_change": (
-                "NOT IMPLEMENTED. The GHG Protocol Corporate Standard ch.7 rule that "
-                "'changes of over 10 percent from year to year may warrant further "
-                "investigation' needs a stable series identity, and ActivityRecord "
-                "carries none — no metering point, site, asset or account. Two "
-                "distinct sites are indistinguishable rows (the shipped demo data "
-                "separates HQ from workshop electricity by description string alone), "
-                "so any series key INFERRED from the available columns would merge "
-                "them and report their sum as one trend. The resolution is a "
-                "preparer-DECLARED series key on the activity — nullable, never "
-                "written back by the engine, following the same doctrine as `scope` "
-                "and `ghgp_category`, where NULL means 'not enrolled in "
-                "period-over-period screening' and says so by name. That is a schema "
-                "change and its own piece of work; inferring the series here would "
-                "produce exactly the confidently-wrong number this platform exists "
-                "to avoid."),
+                "IMPLEMENTED SEPARATELY, over DECLARED series only — see "
+                "services/series_screen.py and GET /reports/series_screen. The GHG "
+                "Protocol Corporate Standard ch.7 rule ('changes of over 10 percent "
+                "from year to year may warrant further investigation') needs a stable "
+                "series identity, and ActivityRecord carries none by default. The key "
+                "is preparer-DECLARED and never written back by the engine: an "
+                "inferred one would merge physically distinct sites — the shipped demo "
+                "separates HQ from workshop electricity by description string alone — "
+                "and report their sum as one trend. A row with no declared key is NOT "
+                "screened for period-over-period change, and the unenrolled share is "
+                "reported by name rather than passing as clean."),
             "intensity_benchmarks": (
                 "NOT IMPLEMENTED. Ratio-to-exposure checks (kWh per m2, litres per "
                 "vehicle) need a recorded exposure basis — floor area, fleet size, "
