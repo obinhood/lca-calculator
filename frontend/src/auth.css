@@ -1,0 +1,121 @@
+/* Sign-in area — a split panel: brand and explanation on the left, the form on the right.
+   Kept out of styles.css so neither file grows past the point of being readable. */
+
+.auth {
+  display: grid;
+  grid-template-columns: minmax(0, 460px) 1fr;
+  min-height: 100vh;
+}
+
+/* ---------- Left: brand + why the credential works this way ---------- */
+.auth-aside {
+  background: linear-gradient(165deg, var(--brand-ink) 0%, #0a4a33 55%, #073a28 100%);
+  color: #eaf5f0;
+  padding: 30px 40px 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+}
+.auth-brand {
+  display: flex; align-items: center; gap: 10px;
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: inherit; font-family: inherit; text-align: left;
+}
+.auth-brand:hover { border-color: transparent; color: inherit; }
+.auth-brand .mark { font-size: 22px; }
+.auth-brand b { display: block; font-size: 15px; letter-spacing: -.02em; color: #fff; }
+.auth-brand span span { display: block; font-size: 11px; color: #9fc9b6; font-weight: 400; }
+
+.auth-aside-body { margin-top: auto; }
+.auth-aside-body h2 {
+  font-size: 25px; letter-spacing: -.025em; color: #fff; margin-bottom: 12px; line-height: 1.25;
+}
+.auth-aside-body p { color: #b9d8ca; font-size: 14px; margin: 0 0 22px; max-width: 44ch; }
+
+.auth-points { list-style: none; margin: 0; padding: 0; display: grid; gap: 13px; }
+.auth-points li {
+  font-size: 13px; color: #b9d8ca; padding-left: 26px; position: relative; max-width: 44ch;
+}
+.auth-points li::before {
+  content: "✓"; position: absolute; left: 0; top: -1px;
+  width: 17px; height: 17px; border-radius: 50%;
+  background: rgba(255, 255, 255, .13); color: #7fe3b4;
+  display: grid; place-items: center; font-size: 10px; font-weight: 700;
+}
+.auth-points b { color: #eaf5f0; font-weight: 600; }
+
+.auth-foot { margin: auto 0 0; color: #7fa896 !important; font-size: 12px; }
+
+/* ---------- Right: the form ---------- */
+.auth-main {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 40px 24px; position: relative; background: var(--bg);
+}
+.auth-card {
+  width: 100%; max-width: 400px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  padding: 28px; box-shadow: var(--shadow);
+}
+.auth-card h1 { font-size: 24px; letter-spacing: -.025em; margin-bottom: 6px; }
+.auth-card .lead { font-size: 13.5px; margin-bottom: 20px; }
+.auth-card .divider { margin: 20px 0 12px; }
+
+.auth-eyebrow {
+  display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--brand); margin-bottom: 8px;
+}
+
+/* Segmented control — two flows that end in the same place, so they share one surface
+   rather than living on separate screens. */
+.auth-tabs {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 22px;
+  background: var(--surface-2); border-radius: 9px; padding: 4px;
+}
+.auth-tabs button {
+  border: none; background: none; padding: 7px 10px; border-radius: 6px;
+  font-size: 13px; color: var(--muted); font-weight: 500;
+}
+.auth-tabs button:hover:not(.active) { color: var(--text); }
+.auth-tabs button.active {
+  background: var(--surface); color: var(--text); font-weight: 600;
+  box-shadow: 0 1px 2px rgba(16, 40, 30, .08);
+}
+
+label.field.block { width: 100%; margin-bottom: 16px; }
+label.field.block input, label.field.block select { width: 100%; padding: 10px 12px; font-size: 14px; }
+button.block { width: 100%; justify-content: center; }
+.muted.center { text-align: center; margin: 14px 0 0; }
+
+/* ---------- The one-time secret ---------- */
+.secret {
+  display: flex; align-items: stretch; gap: 8px; margin: 4px 0 16px;
+}
+.secret code {
+  flex: 1; min-width: 0; padding: 11px 12px; font-size: 12.5px; line-height: 1.45;
+  background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 8px;
+  word-break: break-all; user-select: all;
+}
+.secret button { flex: none; align-self: stretch; }
+
+/* Deliberately heavier than a normal checkbox row: this is the gate between "issued"
+   and "unrecoverable". */
+.ack {
+  display: flex; gap: 10px; align-items: flex-start; margin-bottom: 18px;
+  padding: 12px 13px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface-2); font-size: 12.5px; color: var(--text); cursor: pointer;
+}
+.ack input { margin: 1px 0 0; accent-color: var(--brand); flex: none; }
+
+.auth-back { position: absolute; top: 24px; right: 26px; }
+
+@media (max-width: 900px) {
+  .auth { grid-template-columns: 1fr; min-height: 100dvh; }
+  .auth-aside { padding: 20px 22px; gap: 18px; }
+  .auth-aside-body { margin-top: 0; }
+  .auth-aside-body h2 { font-size: 20px; }
+  /* The reassurance is nice-to-have; the form is not. Drop it before the fold on small
+     screens rather than pushing the card below it. */
+  .auth-aside-body p, .auth-points, .auth-foot { display: none; }
+  .auth-main { padding: 28px 18px 40px; }
+  .auth-back { position: static; margin-top: 20px; }
+}

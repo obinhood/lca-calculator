@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, isAuthError, loadSettings, saveSettings, Settings } from "./api";
 import Landing from "./components/Landing";
+import SignIn from "./components/SignIn";
 import Home, { SESSION_GONE } from "./components/Home";
 import Upload from "./components/Upload";
 import Review from "./components/Review";
@@ -39,8 +40,19 @@ const TITLES: Record<Page, { title: string; sub: string }> = {
   settings: { title: "Settings", sub: "Organisation, API key and connection" },
 };
 
+// Signed-out routing. The marketing page and the auth screen are separate destinations —
+// a visitor reading about the product should not be looking at a credential field, and
+// someone returning to sign in should not have to scroll past a pitch. The hash keeps
+// /#/signin linkable and makes the browser back button behave.
+type View = "landing" | "signin";
+const viewFromHash = (): View =>
+  typeof window !== "undefined" && window.location.hash.startsWith("#/signin")
+    ? "signin" : "landing";
+
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings());
+  const [view, setView] = useState<View>(viewFromHash);
+  const [authMode, setAuthMode] = useState<"signin" | "create">("signin");
   const [page, setPage] = useState<Page>("home");
   const [runId, setRunId] = useState<number | undefined>(undefined);
   const [version, setVersion] = useState(0);            // bump -> siblings refetch
@@ -52,6 +64,28 @@ export default function App() {
 
   const bump = () => setVersion((v) => v + 1);
   const update = (s: Settings) => { saveSettings(s); setSettings(s); };
+
+  useEffect(() => {
+    const onHash = () => setView(viewFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const goAuth = (mode: "signin" | "create") => {
+    setAuthMode(mode);
+    window.location.hash = "#/signin";
+    setView("signin");
+  };
+  const goLanding = () => {
+    // replaceState rather than clearing the hash, so leaving the auth screen does not
+    // push an extra entry the back button has to climb through.
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    // Clearing the notice matters: a dead key PINS the user to the auth screen so the
+    // explanation has somewhere to live, and without this "Back to site" would be a
+    // button that visibly does nothing.
+    setNotice(null);
+    setView("landing");
+  };
 
   // A stored key can be DEAD — most often because the demo database was reset by a redeploy,
   // so the organisation it belonged to no longer exists. Without this the app would sail past
@@ -81,7 +115,13 @@ export default function App() {
   }, [settings.apiKey, settings.baseUrl, version]);
 
   if (!settings.apiKey) {
-    return <Landing settings={settings} onChange={update} notice={notice} />;
+    // A dead key drops the user straight onto the auth screen with the reason, rather
+    // than onto the marketing page, where the explanation would have nowhere to live.
+    if (view === "signin" || notice) {
+      return <SignIn settings={settings} onChange={update} onBack={goLanding}
+                     notice={notice} initialMode={authMode} />;
+    }
+    return <Landing onSignIn={() => goAuth("signin")} onGetStarted={() => goAuth("create")} />;
   }
 
   const t = TITLES[page];

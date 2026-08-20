@@ -59,8 +59,15 @@ export class ApiError extends Error {
 export const isAuthError = (e: any) => e?.status === 401 || e?.status === 403;
 
 export const api = {
-  register: (s: Settings, name: string) =>
-    request(s, "POST", "/organisations", { params: { name } }),
+  register: (s: Settings, name: string, sector?: string) =>
+    request(s, "POST", "/organisations", { params: { name, sector } }),
+  // Reference data the sign-up form needs BEFORE a key exists, so it is deliberately
+  // callable with an empty one.
+  publicSectors: (s: Settings) => request({ ...s, apiKey: "" }, "GET", "/sectors"),
+  // Prove a key works before admitting it. Accepting a key optimistically and only
+  // discovering it is dead on the next screen turns "wrong key" into "the app is broken":
+  // /runs is org-scoped and cheap, so a 200 means the key resolves to a live tenant.
+  verifyKey: (s: Settings) => request(s, "GET", "/runs"),
   upload: (s: Settings, file: File) => {
     const fd = new FormData();
     fd.append("file", file);
