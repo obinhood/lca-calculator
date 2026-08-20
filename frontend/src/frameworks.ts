@@ -15,7 +15,11 @@ export type Framework = {
   key: string;
   label: string;
   full?: string;                // long/official name
-  category: string;
+  // Must be one of CATEGORIES. Reports.tsx renders cards only inside categories drawn
+  // from that tuple, so a free-string category silently makes an entry UNREACHABLE in
+  // the catalogue — the card never renders and no chip ever selects it. Typing it
+  // against the tuple makes that a compile error instead of an invisible hole.
+  category: (typeof CATEGORIES)[number];
   blurb: string;                // one line, plain English: what this report is for
   needs: "run" | "assessment" | "portfolio" | "target" | "nature" | "year";
   path: string;                 // GET endpoint (assessment-scoped: /{id} appended)
@@ -284,7 +288,7 @@ export const FRAMEWORKS: Framework[] = [
       { name: "current_period_id", label: "Current period id", def: "", width: 120 },
       { name: "baseline_period_id", label: "Baseline period id", def: "", width: 120 } ] },
   { key: "hourly_scope2", label: "Hourly Scope 2", full: "Temporal matching (proposed GHG Protocol revision)",
-    category: "Carbon accounting", needs: "run", runScoped: false,
+    category: "Inventory & assurance", needs: "run", runScoped: false,
     blurb: "24/7 carbon-free-energy score: certificates matched to load hour by hour.",
     path: "/reports/hourly_scope2", exportable: false, hasChecklist: false,
     note: "A PARALLEL method — the annual location and market figures are untouched. Surplus in one hour never offsets a deficit in another.",
@@ -293,7 +297,7 @@ export const FRAMEWORKS: Framework[] = [
       { name: "include_hours", label: "Include hourly series", def: "false", width: 110,
         options: ["false", "true"] } ] },
   { key: "sbti_v2", label: "SBTi Net-Zero v2.0", full: "SBTi Corporate Net-Zero Standard V2.0",
-    category: "Targets", needs: "run",
+    category: "Targets & projects", needs: "run",
     blurb: "Significant Scope 3 categories at 5% of categories 1-14, and company categorisation.",
     path: "/reports/sbti_v2", exportable: false, hasChecklist: false,
     note: "Effective 2027-02-01. There is no aggregate coverage floor: the old 67% rule is gone and nothing backstops it.",

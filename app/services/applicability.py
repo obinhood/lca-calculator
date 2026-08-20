@@ -316,8 +316,14 @@ def evaluate_one(key: str, rule: dict, org, rates: Optional[dict] = None) -> dic
             return out
         # A sub-national regime is not ruled out by naming only its parent territory:
         # "we operate in the US" does not tell us whether that includes California.
+        # But ask the direct question FIRST. Declaring BOTH "US" and "US-CA" fully
+        # determines the answer, and consulting the parent gate before the direct hit
+        # threw that answer away — turning a known obligation into cannot_determine with
+        # a reason ("you have not said whether that includes California") flatly
+        # contradicted by the profile the caller submitted.
         parent = rule.get("territory_parent")
-        if parent and parent in prof["jurisdictions"]:
+        direct_hit = bool(set(applies_in) & set(prof["jurisdictions"]))
+        if parent and not direct_hit and parent in prof["jurisdictions"]:
             out["verdict"] = CANNOT_DETERMINE
             out["missing_inputs"] = ["jurisdictions"]
             named = ", ".join(JURISDICTIONS.get(j, j) for j in applies_in)
@@ -325,7 +331,7 @@ def evaluate_one(key: str, rule: dict, org, rates: Optional[dict] = None) -> dic
                              f"have not said whether that includes {named}, where this "
                              f"regime applies — add it if you do business there")
             return out
-        if not set(applies_in) & set(prof["jurisdictions"]):
+        if not direct_hit:
             out["verdict"] = OUT_OF_TERRITORY
             out["reason"] = (f"applies in {', '.join(applies_in)}; this entity operates "
                              f"in {', '.join(prof['jurisdictions'])}")

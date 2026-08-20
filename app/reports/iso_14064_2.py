@@ -38,6 +38,7 @@ from ..models import CalculationRun
 from .summary import summary
 from ..services.residual_mix import residual_mix_comparable
 from ..services.comparability import period_comparable, period_payload
+from ..services.boundary import boundary_comparable
 
 # Things a credible 14064-2 assertion requires that a calculation engine does not produce.
 # Listed so their absence is explicit, never implied complete.
@@ -185,7 +186,7 @@ def iso_14064_2_report(db: Session, organisation_id: int,
     # Comparability gates. Subtracting two whole-organisation runs only measures a
     # PROJECT effect if the runs are otherwise alike: a 12-month baseline minus a 3-month
     # project run reports the missing nine months as abatement, and a change of GWP set or
-    # consolidation approach shows up the same way. Each is a blocker, not a note —
+    # organisational boundary shows up the same way. Each is a blocker, not a note —
     # a non-comparable delta is not a smaller reduction, it is not a reduction at all.
     _period_blocker = period_comparable(db, base, proj, label_a="baseline",
                                         label_b="project", quantity="the delta",
@@ -196,11 +197,18 @@ def iso_14064_2_report(db: Session, organisation_id: int,
         blockers.append(
             f"baseline uses {base.gwp_set} and the project run uses {proj.gwp_set} — a "
             f"change of GWP set moves the delta on its own, so the two are not comparable")
-    if (base.consolidation_approach or None) != (proj.consolidation_approach or None):
-        blockers.append(
-            f"baseline is consolidated on the {base.consolidation_approach!r} approach and "
-            f"the project run on {proj.consolidation_approach!r} — a boundary change would "
-            f"be disclosed as a project reduction")
+    # The shared boundary detector, NOT a local re-derivation of it. Comparing only the
+    # consolidation approach passes a DIVESTMENT silently: the entity population changes,
+    # the approach does not, and the departed entity's emissions are published as
+    # abatement with an empty blocker list. boundary_difference's own docstring forbids
+    # exactly this — one detector, so two renderers cannot drift apart. Same call GRI
+    # 305-5 makes, and it also catches the legacy case where either run predates the
+    # organisational-boundary dimension and comparability cannot be shown at all.
+    _boundary_blocker = boundary_comparable(db, base, proj, label_a="baseline",
+                                            label_b="project",
+                                            quantity="the project reduction")
+    if _boundary_blocker:
+        blockers.append(_boundary_blocker)
 
     # The exact delta. Positive = the project emitted LESS than the baseline = a reduction.
     gross_loc = (base.total_co2e - proj.total_co2e) / 1000.0
