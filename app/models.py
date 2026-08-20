@@ -1485,3 +1485,43 @@ class RunScreeningStatement(Base):
     materiality_pct = Column(Float, nullable=False, default=5.0)
     exceeds_materiality = Column(Boolean, nullable=False, default=False)
     frozen_at = Column(String, nullable=False)
+
+
+# --- PACT host side: OAuth2 client credentials and issued tokens -------------
+
+class PactClient(Base):
+    """A partner permitted to read this organisation's published footprints.
+
+    Separate from the X-API-Key tenant credential on purpose: the PACT network
+    identifies a DATA RECIPIENT, and a partner must be able to be revoked without
+    touching the owner's own access.
+    """
+    __tablename__ = "pact_clients"
+    __table_args__ = (
+        UniqueConstraint("client_id", name="uq_pact_client_id"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    client_id = Column(String, nullable=False)
+    client_secret_hash = Column(String, nullable=False)
+    partner_name = Column(String, nullable=True)
+    revoked = Column(Boolean, nullable=False, default=False)
+    created_at = Column(String)
+
+
+class PactToken(Base):
+    """A bearer token issued to a PACT client.
+
+    Stored by hash and given an explicit expiry, so a leaked token has a bounded
+    life and revocation is a delete rather than a hope.
+    """
+    __tablename__ = "pact_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_pact_token_hash"),
+    )
+    id = Column(Integer, primary_key=True)
+    client_id = Column(String, nullable=False)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
+    token_hash = Column(String, nullable=False)
+    expires_at = Column(String, nullable=False)     # ISO-8601 UTC
+    created_at = Column(String)

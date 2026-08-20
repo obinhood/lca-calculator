@@ -447,11 +447,18 @@ FRAMEWORKS = {
             "Every quantity is a decimal STRING on the wire, not a JSON number.",
             "A footprint is quoted against declaredUnitAmount, not against one "
             "declared unit — divide before using it as a factor.",
-            "BUILT: importing, validating and holding a supplier's footprint "
-            "(/pact/footprints/import, /pact/validate). NOT BUILT: the host-side REST "
-            "API (GET /3/footprints, /3/footprints/{id}), OAuth2 client-credentials "
-            "auth, CloudEvents async events, or substitution of a received footprint "
-            "into the emissions inventory as primary data.",
+            "BUILT — consume side: importing, validating and holding a supplier's "
+            "footprint (/pact/footprints/import, /pact/validate), and substituting it "
+            "into the inventory as a supplier-specific factor.",
+            "BUILT — host side: GET /3/footprints and /3/footprints/{id} with "
+            "repeated-key array filters, OR-within/AND-between semantics, "
+            "case-insensitive values and RFC 8288 next-link pagination; OAuth2 "
+            "client-credentials at /auth/token (deliberately NOT under /3); and "
+            "POST /3/events in CloudEvents structured content mode.",
+            "NOT BUILT: outbound event delivery with retry and 72-hour abandonment, "
+            "and a run against the official conformance tool — which since April 2025 "
+            "is the only route to conformant status, peer-to-peer testing having been "
+            "retired and V2 conformance expiring 2026-04-01.",
         ],
     },
 
