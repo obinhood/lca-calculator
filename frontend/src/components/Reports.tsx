@@ -112,7 +112,10 @@ function Runner({ fw, settings, runId, back }:
       if (fw.assessmentScoped) cparams.assessment_id = assessmentId.trim();
       // Awaited, with its own error state: a silently-swallowed failure would just hide the
       // checklist and read as "this framework has no requirements".
-      try { setCheck(await api.compliance(settings, fw.key, cparams)); }
+      // A report with no required-data checklist has nothing to show here, and
+      // asking for one would render an empty "not assessable" panel.
+      if (fw.hasChecklist === false) { setCheck(null); }
+      else try { setCheck(await api.compliance(settings, fw.key, cparams)); }
       catch (e: any) { setCheck(null); setCheckError(e.message); }
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
@@ -220,12 +223,16 @@ function Runner({ fw, settings, runId, back }:
                 {ready ? "✓ Disclosure-ready" : "Not ready yet"}
               </span>
             )}
-            <button onClick={() => downloadServer("pdf")} disabled={exporting !== null}>
-              {exporting === "pdf" ? "Preparing…" : "📄 PDF"}
-            </button>
-            <button onClick={() => downloadServer("csv")} disabled={exporting !== null}>
-              {exporting === "csv" ? "Preparing…" : "📊 CSV"}
-            </button>
+            {fw.exportable !== false && (
+              <>
+                <button onClick={() => downloadServer("pdf")} disabled={exporting !== null}>
+                  {exporting === "pdf" ? "Preparing…" : "📄 PDF"}
+                </button>
+                <button onClick={() => downloadServer("csv")} disabled={exporting !== null}>
+                  {exporting === "csv" ? "Preparing…" : "📊 CSV"}
+                </button>
+              </>
+            )}
             <button onClick={downloadJson}>⬇ JSON</button>
           </div>
 

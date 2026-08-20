@@ -286,8 +286,13 @@ def test_the_token_endpoint_is_not_under_the_version_prefix(env):
     assert _token(client, creds)
     raw = base64.b64encode(
         f"{creds['client_id']}:{creds['client_secret']}".encode()).decode()
+    # Not-served is the property, not a particular status. When frontend/dist has
+    # been built the SPA mount answers unmatched paths with 405 rather than 404,
+    # so asserting 404 alone made this test pass or fail on whether someone had
+    # run `npm run build` — which has nothing to do with PACT routing.
     assert client.post("/3/auth/token", headers={"Authorization": f"Basic {raw}"},
-                       data={"grant_type": "client_credentials"}).status_code == 404
+                       data={"grant_type": "client_credentials"}
+                       ).status_code in (404, 405)
 
 
 def test_the_token_response_shape(env):
