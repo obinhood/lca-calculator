@@ -242,3 +242,53 @@ button.ghost-light:hover:not(:disabled) {
   .mk-hero-cta button { width: 100%; }
   .mk-foot-cols { gap: 28px; }
 }
+
+/* ---------- Homepage ---------- */
+
+/* The homepage hero is single-column and centred: it introduces the whole offering rather
+   than making one argument, so there is no single visual that belongs beside it. */
+.mk-hero.home { grid-template-columns: 1fr; text-align: center; padding: 76px 24px 60px; }
+.mk-hero-copy.wide { max-width: 780px; margin: 0 auto; }
+.mk-hero.home h1 { max-width: none; font-size: 44px; }
+.mk-hero.home .mk-hero-copy > p { margin-left: auto; margin-right: auto; max-width: 58ch; }
+.mk-hero.home .mk-hero-cta { justify-content: center; }
+
+/* Product cards — the densest block on the site, so they get a tighter type scale and a
+   fact row that lets someone skim eight of them without reading eight paragraphs. */
+.mk-prods { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; }
+.mk-prod {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 13px;
+  padding: 20px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 11px;
+}
+.mk-prod-head { display: flex; gap: 13px; align-items: flex-start; }
+.mk-prod-head b { display: block; font-size: 16px; letter-spacing: -.015em; }
+.mk-prod-tag { display: block; color: var(--brand); font-size: 12px; font-weight: 500; margin-top: 1px; }
+.mk-prod > p { color: var(--muted); font-size: 13.5px; line-height: 1.62; margin: 0; flex: 1; }
+.mk-prod-facts { display: flex; flex-wrap: wrap; gap: 6px; }
+.mk-prod-facts span {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px;
+  padding: 3px 10px; font-size: 11.5px; color: var(--muted);
+}
+
+/* Audiences read as a list, not as cards — three short rows should not cost three boxes. */
+.mk-who { display: grid; gap: 0; border-top: 1px solid var(--border); }
+.mk-who-row {
+  display: grid; grid-template-columns: minmax(200px, 260px) 1fr; gap: 24px;
+  padding: 18px 0; border-bottom: 1px solid var(--border); align-items: baseline;
+}
+.mk-who-row b { font-size: 15px; letter-spacing: -.015em; }
+.mk-who-row span { color: var(--muted); font-size: 14px; line-height: 1.6; }
+
+.mk-step-detail { color: var(--brand-ink) !important; font-size: 12.5px !important; margin-top: 8px !important; }
+.mk-step .mk-pillar-ico { margin-bottom: 13px; }
+
+/* The bridge to the platform page. Deliberately not a card: it is a doorway, and a border
+   around it would read as one more thing to skim past. */
+.mk-bridge { max-width: 62ch; }
+
+@media (max-width: 940px) {
+  .mk-hero.home { padding: 46px 20px 44px; }
+  .mk-hero.home h1 { font-size: 34px; }
+  .mk-prods { grid-template-columns: 1fr; }
+  .mk-who-row { grid-template-columns: 1fr; gap: 5px; padding: 15px 0; }
+}

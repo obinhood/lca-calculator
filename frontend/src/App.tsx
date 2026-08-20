@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { api, isAuthError, loadSettings, saveSettings, Settings } from "./api";
 import Landing from "./components/Landing";
 import SignIn from "./components/SignIn";
+import Homepage from "./components/Homepage";
+import { Route as SiteRoute, scrollToId } from "./components/SiteChrome";
 import Home, { SESSION_GONE } from "./components/Home";
 import Upload from "./components/Upload";
 import Review from "./components/Review";
@@ -44,15 +46,20 @@ const TITLES: Record<Page, { title: string; sub: string }> = {
 // a visitor reading about the product should not be looking at a credential field, and
 // someone returning to sign in should not have to scroll past a pitch. The hash keeps
 // /#/signin linkable and makes the browser back button behave.
-type View = "landing" | "signin";
-const viewFromHash = (): View =>
-  typeof window !== "undefined" && window.location.hash.startsWith("#/signin")
-    ? "signin" : "landing";
+const viewFromHash = (): SiteRoute => {
+  if (typeof window === "undefined") return "home";
+  const h = window.location.hash;
+  if (h.startsWith("#/signin")) return "signin";
+  if (h.startsWith("#/platform")) return "platform";
+  return "home";
+};
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings());
-  const [view, setView] = useState<View>(viewFromHash);
+  const [view, setView] = useState<SiteRoute>(viewFromHash);
   const [authMode, setAuthMode] = useState<"signin" | "create">("signin");
+  // Set when a cross-page link targets a section; consumed AFTER that page mounts.
+  const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
   const [page, setPage] = useState<Page>("home");
   const [runId, setRunId] = useState<number | undefined>(undefined);
   const [version, setVersion] = useState(0);            // bump -> siblings refetch
@@ -76,6 +83,26 @@ export default function App() {
     window.location.hash = "#/signin";
     setView("signin");
   };
+
+  // Cross-page navigation that can also land on a section. The scroll is deferred a frame
+  // because the target page has not mounted yet at the moment the click is handled.
+  const navigate = (route: SiteRoute, anchor?: string) => {
+    if (route === "signin") { goAuth("signin"); return; }
+    setNotice(null);
+    window.location.hash = route === "home" ? "#/" : `#/${route}`;
+    setView(route);
+    // Scrolling here would aim at a page React has not committed yet, so the target does
+    // not exist and the scroll silently lands at the top. Hand it to an effect that runs
+    // after the new page has mounted instead.
+    if (anchor) setPendingAnchor(anchor);
+    else window.scrollTo(0, 0);
+  };
+
+  useEffect(() => {
+    if (!pendingAnchor) return;
+    scrollToId(pendingAnchor);
+    setPendingAnchor(null);
+  }, [pendingAnchor, view]);
   const goLanding = () => {
     // replaceState rather than clearing the hash, so leaving the auth screen does not
     // push an extra entry the back button has to climb through.
@@ -84,7 +111,7 @@ export default function App() {
     // explanation has somewhere to live, and without this "Back to site" would be a
     // button that visibly does nothing.
     setNotice(null);
-    setView("landing");
+    setView("home");
   };
 
   // A stored key can be DEAD — most often because the demo database was reset by a redeploy,
@@ -121,7 +148,12 @@ export default function App() {
       return <SignIn settings={settings} onChange={update} onBack={goLanding}
                      notice={notice} initialMode={authMode} />;
     }
-    return <Landing onSignIn={() => goAuth("signin")} onGetStarted={() => goAuth("create")} />;
+    const chrome = {
+      onSignIn: () => goAuth("signin"),
+      onGetStarted: () => goAuth("create"),
+      onNavigate: navigate,
+    };
+    return view === "platform" ? <Landing {...chrome} /> : <Homepage {...chrome} />;
   }
 
   const t = TITLES[page];

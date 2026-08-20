@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
 import { FRAMEWORKS, CATEGORIES } from "../frameworks";
+import { SiteNav, SiteFooter, Route } from "./SiteChrome";
 
 /**
  * The signed-out marketing page.
@@ -25,46 +25,23 @@ const STRIP = STRIP_KEYS
   .map((k) => FRAMEWORKS.find((f) => f.key === k))
   .filter((f): f is (typeof FRAMEWORKS)[number] => Boolean(f));
 
-export default function Landing({ onSignIn, onGetStarted }:
-    { onSignIn: () => void; onGetStarted: () => void }) {
-  const [scrolled, setScrolled] = useState(false);
-
-  useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 8);
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
-
-  const jump = (id: string) => (e: React.MouseEvent) => {
-    e.preventDefault();
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-
+export default function Landing({ onSignIn, onGetStarted, onNavigate }:
+    { onSignIn: () => void; onGetStarted: () => void;
+      onNavigate: (route: Route, anchor?: string) => void }) {
   const byCategory = CATEGORIES
     .map((c) => ({ cat: c, items: FRAMEWORKS.filter((f) => f.category === c) }))
     .filter((g) => g.items.length > 0);
 
   return (
     <div className="mk">
-      {/* ---------- Nav ---------- */}
-      <header className={"mk-nav" + (scrolled ? " stuck" : "")}>
-        <div className="mk-nav-in">
-          <a className="mk-logo" href="#top" onClick={jump("top")}>
-            <span className="mark">🌿</span>
-            <b>Carbon Platform</b>
-          </a>
-          <nav className="mk-links">
-            <a href="#how" onClick={jump("how")}>How it works</a>
-            <a href="#why" onClick={jump("why")}>Why it's different</a>
-            <a href="#coverage" onClick={jump("coverage")}>Coverage</a>
-            <a href="#rigour" onClick={jump("rigour")}>Rigour</a>
-          </nav>
-          <div className="mk-nav-cta">
-            <button className="ghost" onClick={onSignIn}>Sign in</button>
-            <button className="primary" onClick={onGetStarted}>Get started</button>
-          </div>
-        </div>
-      </header>
+      <SiteNav
+        links={[
+          { label: "How it works", anchor: "how" },
+          { label: "Why it's different", anchor: "why" },
+          { label: "Coverage", anchor: "coverage" },
+          { label: "Rigour", anchor: "rigour" },
+        ]}
+        onNavigate={onNavigate} onSignIn={onSignIn} onGetStarted={onGetStarted} />
 
       {/* ---------- Hero ---------- */}
       <section className="mk-hero" id="top">
@@ -258,41 +235,7 @@ export default function Landing({ onSignIn, onGetStarted }:
         </div>
       </section>
 
-      {/* ---------- Footer ---------- */}
-      <footer className="mk-foot">
-        <div className="mk-foot-in">
-          <div className="mk-foot-brand">
-            <span className="mark">🌿</span>
-            <div>
-              <b>Carbon Platform</b>
-              <span>Audit-grade carbon accounting and disclosure.</span>
-            </div>
-          </div>
-          <div className="mk-foot-cols">
-            <div>
-              <h4>Product</h4>
-              <a href="#how" onClick={jump("how")}>How it works</a>
-              <a href="#why" onClick={jump("why")}>Why it's different</a>
-              <a href="#coverage" onClick={jump("coverage")}>Framework coverage</a>
-            </div>
-            <div>
-              <h4>Standards</h4>
-              <span>GHG Protocol Corporate</span>
-              <span>Scope 2 & Scope 3 Guidance</span>
-              <span>ISO 14064 · ISO 14067</span>
-            </div>
-            <div>
-              <h4>Access</h4>
-              <a href="#" onClick={(e) => { e.preventDefault(); onGetStarted(); }}>Create a workspace</a>
-              <a href="#" onClick={(e) => { e.preventDefault(); onSignIn(); }}>Sign in</a>
-            </div>
-          </div>
-        </div>
-        <div className="mk-foot-bar">
-          <span>Emission factors are attributed to their publishers. This platform prepares
-            disclosures; it does not provide assurance or legal advice.</span>
-        </div>
-      </footer>
+      <SiteFooter onNavigate={onNavigate} onSignIn={onSignIn} onGetStarted={onGetStarted} />
     </div>
   );
 }
