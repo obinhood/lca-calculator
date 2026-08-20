@@ -2016,6 +2016,201 @@ def _csv_str(value) -> str:
     return "" if s.lower() in ("nan", "nat", "none") else s
 
 
+# --- PACT v3 HOST side: serving the network ----------------------------------
+# NOTE ON ROUTING: the token endpoint is deliberately NOT under /3. Everything
+# else is /3/..., but the spec puts the token at {auth-base}/auth/token and the
+# conformance runner defaults auth-base to base — routing it under /3 fails the
+# first test case and aborts the whole run.
+
+@app.post("/pact/clients")
+def create_pact_client(partner_name: Optional[str] = None,
+                       org: Organisation = Depends(current_org),
+                       db: Session = Depends(get_db)):
+    """Mint client credentials for one data recipient.
+
+    Separate from the tenant X-API-Key: a partner must be revocable without
+    touching the owner's own access.
+    """
+    from .services.pact_host import create_client
+    return JSONResponse(create_client(db, org.id, partner_name))
+
+
+@app.post("/auth/token")
+async def pact_token(request: Request, db: Session = Depends(get_db)):
+    """OAuth2 client-credentials grant (PACT v3 section 5.5.1).
+
+    Credentials arrive as HTTP Basic. The prose implies form fields named
+    client_id/client_secret, but the spec's own example and the conformance runner
+    send Authorization: Basic base64(id:secret) with only grant_type in the body —
+    a host reading the body alone fails immediately. Both are accepted.
+    """
+    from .services.pact_host import issue_token, parse_basic_auth
+    form = {}
+    try:
+        form = dict(await request.form())
+    except Exception:
+        pass
+    if (form.get("grant_type") or "").strip() not in ("client_credentials", ""):
+        return JSONResponse({"error": "unsupported_grant_type",
+                             "error_description": "only client_credentials is supported"},
+                            status_code=400)
+    creds = parse_basic_auth(request.headers.get("authorization"))
+    if creds is None:
+        cid, secret = form.get("client_id"), form.get("client_secret")
+        if not cid or not secret:
+            return JSONResponse(
+                {"error": "invalid_client",
+                 "error_description": "supply credentials via HTTP Basic, or as "
+                                      "client_id/client_secret in the body"},
+                status_code=401)
+        creds = (cid, secret)
+    out = issue_token(db, creds[0], creds[1])
+    if not out["ok"]:
+        return JSONResponse({"error": out["error"],
+                             "error_description": out["error_description"]},
+                            status_code=401)
+    return JSONResponse({"access_token": out["access_token"],
+                         "token_type": out["token_type"],
+                         "expires_in": out["expires_in"]})
+
+
+@app.get("/.well-known/openid-configuration")
+def pact_openid_configuration(request: Request):
+    """Discovery. SHOULD, not MUST — the two conformance cases for it are the only
+    non-mandatory ones."""
+    base = str(request.base_url).rstrip("/")
+    return JSONResponse({"issuer": base, "token_endpoint": f"{base}/auth/token",
+                         "grant_types_supported": ["client_credentials"],
+                         "token_endpoint_auth_methods_supported": ["client_secret_basic"]})
+
+
+@app.get("/3/footprints")
+def pact_list_footprints(request: Request, limit: int = 100, offset: int = 0,
+                         db: Session = Depends(get_db)):
+    """ListFootprints. Array filters arrive as REPEATED query keys.
+
+    Filtering is OR within a criterion and AND between criteria, with values
+    compared case-insensitively. Deprecated footprints are included unless
+    status=Active is explicitly requested.
+    """
+    from .services.pact_host import (
+        error, link_header, list_footprints, resolve_token,
+    )
+    from .services.pact_store import footprint_view
+    auth = resolve_token(db, request.headers.get("authorization"))
+    if not auth["ok"]:
+        return JSONResponse(error(auth["code"], auth["message"]), status_code=401)
+    if limit < 1 or limit > 1000:
+        return JSONResponse(error("BadRequest", "limit must be 1..1000"),
+                            status_code=400)
+    if offset < 0:
+        return JSONResponse(error("BadRequest", "offset must be >= 0"),
+                            status_code=400)
+
+    q = request.query_params
+    status = q.get("status")
+    if status and status.strip().lower() not in ("active", "deprecated"):
+        return JSONResponse(error("BadRequest",
+                                  "status must be Active or Deprecated"),
+                            status_code=400)
+    # The v2 OData $filter is deprecated in v3 and must not be honoured.
+    if any(k.startswith("$") for k in q.keys()):
+        return JSONResponse(error("BadRequest",
+                                  "the OData $filter syntax was deprecated in v3; use "
+                                  "the discrete query parameters"),
+                            status_code=400)
+
+    page = list_footprints(
+        db, auth["organisation_id"], limit=limit, offset=offset,
+        product_ids=q.getlist("productId"), company_ids=q.getlist("companyId"),
+        geographies=q.getlist("geography"),
+        classifications=q.getlist("classification"),
+        status=status, valid_on=q.get("validOn"),
+        valid_after=q.get("validAfter"), valid_before=q.get("validBefore"))
+
+    body = {"data": [footprint_view(r, include_document=True)["document"]
+                     for r in page["rows"]]}
+    headers = {}
+    if page["has_more"]:
+        keep = {k: q.getlist(k) for k in q.keys() if k not in ("offset",)}
+        base = str(request.base_url).rstrip("/")
+        headers["Link"] = link_header(base, "/3/footprints", keep,
+                                      page["next_offset"])
+    return JSONResponse(body, headers=headers)
+
+
+@app.get("/3/footprints/{footprint_id}")
+def pact_get_footprint(footprint_id: str, request: Request,
+                       db: Session = Depends(get_db)):
+    """GetFootprint by PACT id."""
+    from .models import ProductFootprint
+    from .services.pact_host import error, resolve_token
+    auth = resolve_token(db, request.headers.get("authorization"))
+    if not auth["ok"]:
+        return JSONResponse(error(auth["code"], auth["message"]), status_code=401)
+    row = db.query(ProductFootprint).filter(
+        ProductFootprint.organisation_id == auth["organisation_id"],
+        ProductFootprint.direction == "published",
+        ProductFootprint.pf_id == footprint_id).first()
+    if row is None:
+        return JSONResponse(error("NotFound", f"no footprint with id {footprint_id}"),
+                            status_code=404)
+    return JSONResponse({"data": _json.loads(row.document)})
+
+
+@app.post("/3/events")
+async def pact_events(request: Request, db: Session = Depends(get_db)):
+    """Events endpoint, CloudEvents structured content mode.
+
+    Accepted events return 200 with an empty body; anything invalid is a 4xx with
+    an Error object. A RequestCreatedEvent is answered with exactly one fulfilled
+    OR rejected callback — never a fulfilled event with an empty pfs, which has
+    minItems 1.
+    """
+    from .services.pact_host import (
+        EVENT_TYPES, error, is_cloudevents_media_type, list_footprints,
+        request_filters, resolve_token, validate_event,
+    )
+    from .services.pact_store import footprint_view
+    auth = resolve_token(db, request.headers.get("authorization"))
+    if not auth["ok"]:
+        return JSONResponse(error(auth["code"], auth["message"]), status_code=401)
+    if not is_cloudevents_media_type(request.headers.get("content-type")):
+        return JSONResponse(
+            error("BadRequest",
+                  "events must be sent in CloudEvents structured content mode with "
+                  "media type application/cloudevents+json"),
+            status_code=400)
+    try:
+        body = _json.loads(await request.body())
+    except ValueError:
+        return JSONResponse(error("BadRequest", "event body is not valid JSON"),
+                            status_code=400)
+
+    verdict = validate_event(body)
+    if not verdict["valid"]:
+        return JSONResponse(error(verdict["code"], verdict["message"]),
+                            status_code=400)
+
+    result = {"accepted": True, "event_type": verdict["event_type"]}
+    if verdict["event_type"] == EVENT_TYPES["request_created"]:
+        f = request_filters(verdict["data"])
+        page = list_footprints(db, auth["organisation_id"], limit=1000, offset=0, **f)
+        docs = [footprint_view(r, include_document=True)["document"]
+                for r in page["rows"]]
+        # The id is echoed BYTE-FOR-BYTE: the runner encodes routing data into it
+        # and recovers it by splitting on '/'.
+        result["callback"] = {
+            "would_send": "fulfilled" if docs else "rejected",
+            "request_event_id": body["id"],
+            "footprints_matched": len(docs),
+            "note": "A RequestFulfilledEvent needs at least one footprint (pfs has "
+                    "minItems 1), so an empty match sends RequestRejectedEvent "
+                    "instead — 'success with zero results' is not conformant.",
+        }
+    return JSONResponse(result)
+
+
 # --- SBTi Corporate Net-Zero Standard V2.0 -----------------------------------
 
 @app.get("/reports/sbti_v2")
