@@ -1525,3 +1525,56 @@ class PactToken(Base):
     token_hash = Column(String, nullable=False)
     expires_at = Column(String, nullable=False)     # ISO-8601 UTC
     created_at = Column(String)
+
+
+# --- Versioned classification crosswalks -------------------------------------
+
+class Crosswalk(Base):
+    """A versioned concordance table between two classification schemes.
+
+    Version-pinned because a frozen report must freeze its crosswalks exactly as
+    it freezes FX rates: NACE Rev.2.1 became mandatory for EU statistics in 2025,
+    ISIC Rev.5 and CPC 3.0 exist with thin correspondence coverage, and UNSPSC
+    governance moved from GS1 US to UNDP on 1 January 2025. A concordance revision
+    would otherwise silently move a filed figure.
+
+    `uncitable` marks a hop for which no authoritative table exists — a direct
+    UNSPSC-to-industry mapping is the case: UNSPSC classifies the PRODUCT bought
+    while NAICS/NACE/ISIC classify the ESTABLISHMENT that produced it, and every
+    table on offer is commercial or machine-generated.
+    """
+    __tablename__ = "crosswalks"
+    __table_args__ = (
+        UniqueConstraint("from_scheme", "to_scheme", "table_version",
+                         name="uq_crosswalk_scheme_version"),
+    )
+    id = Column(Integer, primary_key=True)
+    from_scheme = Column(String, nullable=False)
+    to_scheme = Column(String, nullable=False)
+    source = Column(String, nullable=False)          # publisher
+    table_version = Column(String, nullable=False)
+    licence = Column(String, nullable=True)
+    url = Column(String, nullable=True)
+    uncitable = Column(Boolean, nullable=False, default=False)
+    created_at = Column(String)
+
+
+class CrosswalkMapping(Base):
+    """One row of a concordance.
+
+    `partial` records the asterisk or free-text qualifier the source table carried:
+    93.7% of ISIC Rev.4 to NAICS 2017 rows are flagged partial and 56.3% carry a
+    note. Such a row is NOT resolvable by lookup alone, and recording it as a clean
+    correspondence is how crosswalk error becomes invisible.
+    """
+    __tablename__ = "crosswalk_mappings"
+    __table_args__ = (
+        UniqueConstraint("crosswalk_id", "from_code", "to_code",
+                         name="uq_crosswalk_mapping"),
+    )
+    id = Column(Integer, primary_key=True)
+    crosswalk_id = Column(Integer, ForeignKey("crosswalks.id"), nullable=False)
+    from_code = Column(String, nullable=False, index=True)
+    to_code = Column(String, nullable=False)
+    partial = Column(Boolean, nullable=False, default=False)
+    note = Column(Text, nullable=True)
