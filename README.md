@@ -14,9 +14,9 @@ refused with a reason instead of estimated.
 | | |
 |---|---|
 | Framework registry | 42 entries — 24 `built`, 16 `partial`, 2 `reference` |
-| API | 120 endpoints over 42 ORM models |
+| API | 122 endpoints over 42 ORM models |
 | Engine | ~25k lines Python across 76 modules |
-| Tests | 1,446, including property-based (Hypothesis) and calculation oracles |
+| Tests | 1,462, including property-based (Hypothesis) and calculation oracles |
 
 `GET /frameworks` is the authoritative inventory and each entry states its own
 `platform_support` level. `partial` means partial — the guidance says what is not
