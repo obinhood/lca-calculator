@@ -22,21 +22,32 @@ import pytest
 LANDING = pathlib.Path("frontend/src/components/Landing.tsx")
 MAIN = pathlib.Path("app/main.py")
 
+# Every page a stranger can read without signing in. The no-fabrication rule belongs to
+# all of them, not just the one that happened to exist when the rule was written — a
+# second page is exactly where a guard with one target stops guarding.
+MARKETING_PAGES = [
+    LANDING,
+    pathlib.Path("frontend/src/components/Homepage.tsx"),
+    pathlib.Path("frontend/src/components/SiteChrome.tsx"),
+]
+
 # `{ v: "122", l: "API endpoints", ... }` — the figure and the thing it counts.
 _FACT = re.compile(r'\{\s*v:\s*"([^"]+)",\s*l:\s*"([^"]+)"')
 
 
+def _strip_comments(src: str) -> str:
+    src = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)      # block + JSX comments
+    return re.sub(r"^\s*//.*$", " ", src, flags=re.M)      # line comments
+
+
 def _source_without_comments() -> str:
-    """The page's source with comments stripped.
+    """The platform page's source with comments stripped.
 
     Scanning the raw file for banned phrases matched the comment that explains why the
     page has no testimonials — a rule tripping over its own rationale. Only what a reader
     can actually see should be judged.
     """
-    src = LANDING.read_text()
-    src = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)      # block + JSX comments
-    src = re.sub(r"^\s*//.*$", " ", src, flags=re.M)        # line comments
-    return src
+    return _strip_comments(LANDING.read_text())
 
 
 def _stated() -> dict:
@@ -99,13 +110,42 @@ def test_the_landing_page_makes_no_fabricated_social_proof_claim():
     count, a testimonial or an award would refute that on the first screen — and would be
     the easiest thing in the world to add later without thinking about it.
     """
-    src = _source_without_comments().lower()
     banned = [
         "trusted by", "customers worldwide", "join thousands", "our clients",
         "testimonial", "g2 ", "capterra", "award-winning", "industry-leading",
         "rated #1", "best-in-class", "certified by",
     ]
-    hits = [b for b in banned if b in src]
-    assert not hits, (
-        f"the landing page has acquired unverifiable social proof: {hits}. Every claim on "
-        f"that page has to be checkable against this codebase.")
+    offences = {}
+    for page in MARKETING_PAGES:
+        assert page.exists(), f"{page} is listed as a marketing page but does not exist"
+        src = _strip_comments(page.read_text()).lower()
+        hits = [b for b in banned if b in src]
+        if hits:
+            offences[page.name] = hits
+    assert not offences, (
+        f"a signed-out page has acquired unverifiable social proof: {offences}. Every "
+        f"claim on those pages has to be checkable against this codebase.")
+
+
+def test_no_signed_out_page_invents_a_services_business():
+    """There is no consulting arm, implementation team or support SLA to sell.
+
+    The homepage's "ways to use it" section sits exactly where a services page would, and
+    is the most natural place for someone to later add an offering that does not exist.
+    The page says outright what is not sold; this stops the opposite creeping in beside it.
+    """
+    invented = [
+        "our consultants", "consulting services", "implementation team",
+        "dedicated account manager", "24/7 support", "managed service",
+        "professional services", "we will audit", "we certify", "our experts",
+    ]
+    offences = {}
+    for page in MARKETING_PAGES:
+        src = _strip_comments(page.read_text()).lower()
+        hits = [p for p in invented if p in src]
+        if hits:
+            offences[page.name] = hits
+    assert not offences, (
+        f"a signed-out page now advertises a service this product does not provide: "
+        f"{offences}. The platform is software you run yourself; it prepares the evidence "
+        f"an assuror works from and does not sign an opinion.")
