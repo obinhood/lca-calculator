@@ -637,3 +637,97 @@ def test_report_endpoint_can_include_the_hourly_series(env):
                               "include_hours": True}).json()
     assert len(body["hours"]) == 1
     assert body["hours"][0]["hour"] == "2027-01-01T00:00:00"
+
+
+# --- one certificate is spent once ------------------------------------------
+
+def _retire(db, org, period, cert):
+    cert.retired_at = "2027-02-01T00:00:00"
+    cert.retired_for_period_id = period.id
+    db.commit()
+
+
+def test_a_certificate_is_spent_once_across_every_region_it_can_serve(db):
+    """THE defect this ledger exists to prevent.
+
+    The pool used to be rebuilt for every (hour, region) load row and never depleted, so
+    100 kWh of certificates matched 100 kWh in region A AND 100 kWh in region B in the
+    same hour: 200 kWh matched out of 200 kWh of load, CFE 100%, hourly market-based
+    emissions 0.0. That is annual netting reintroduced across SPACE, inside the one
+    method whose whole purpose is to forbid netting.
+
+    The honest answer is 50%: there are 100 kWh of certificates and 200 kWh of load.
+    """
+    org = _org(db)
+    period = _period(db, org)
+    hour = "2027-01-01T00:00:00"
+
+    _load(db, org, hour, 100.0, region="A", point="a")
+    _load(db, org, hour, 100.0, region="B", point="b")
+    _intensity(db, hour, avg=0.4, residual=0.5, region="A")
+    _intensity(db, hour, avg=0.4, residual=0.5, region="B")
+
+    # One 100 kWh certificate in region C, deliverable to BOTH load regions.
+    c = _cert(db, org, hour, 100.0, region="C")
+    _retire(db, org, period, c)
+    db.add(DeliverabilityLink(organisation_id=org.id, from_region="C", to_region="A",
+                              basis="interconnector", rationale="test"))
+    db.add(DeliverabilityLink(organisation_id=org.id, from_region="C", to_region="B",
+                              basis="interconnector", rationale="test"))
+    db.commit()
+
+    r = match(db, org.id, period.id)
+    assert r["available"] is True, r.get("reason")
+    cfe = r["cfe"]
+
+    assert cfe["total_load_kwh"] == pytest.approx(200.0)
+    assert cfe["matched_kwh"] == pytest.approx(100.0), (
+        "100 kWh of certificates cannot match more than 100 kWh of load, however many "
+        "regions they are deliverable to")
+    assert cfe["cfe_score_pct"] == pytest.approx(50.0)
+    # The 100 kWh that went unmatched must be priced at the residual mix, not vanish.
+    assert r["emissions"]["hourly_market_based_kg_co2e"] == pytest.approx(50.0)
+
+
+def test_an_hour_counts_as_fully_matched_only_when_every_region_is(db):
+    """hours_fully_matched used to count (hour, region) buckets, so an hour with one
+    matched region and one starved region contributed a full hour to the coverage."""
+    org = _org(db)
+    period = _period(db, org)
+    hour = "2027-01-01T00:00:00"
+
+    _load(db, org, hour, 100.0, region="A", point="a")
+    _load(db, org, hour, 100.0, region="B", point="b")
+    _intensity(db, hour, region="A")
+    _intensity(db, hour, region="B")
+    c = _cert(db, org, hour, 100.0, region="A")     # serves A only
+    _retire(db, org, period, c)
+
+    r = match(db, org.id, period.id)
+    assert r["cfe"]["matched_kwh"] == pytest.approx(100.0)
+    assert r["cfe"]["hours_fully_matched"] == 0, (
+        "region B had no supply, so the hour was not fully matched")
+
+
+def test_own_region_load_is_served_before_the_certificate_is_exported(db):
+    """The allocation order is a disclosed assumption, so it is pinned."""
+    org = _org(db)
+    period = _period(db, org)
+    hour = "2027-01-01T00:00:00"
+
+    _load(db, org, hour, 100.0, region="A", point="a")
+    _load(db, org, hour, 100.0, region="B", point="b")
+    _intensity(db, hour, region="A")
+    _intensity(db, hour, region="B")
+    c = _cert(db, org, hour, 100.0, region="B")     # sits in B, deliverable to A
+    _retire(db, org, period, c)
+    db.add(DeliverabilityLink(organisation_id=org.id, from_region="B", to_region="A",
+                              basis="interconnector", rationale="test"))
+    db.commit()
+
+    r = match(db, org.id, period.id)
+    rows = {row["grid_region"]: row for row in r["hours"]}
+    assert rows["B"]["matched_kwh"] == pytest.approx(100.0), (
+        "the certificate sits in B and B has load; it is consumed there before export")
+    assert rows["A"]["matched_kwh"] == pytest.approx(0.0)
+    assert r["cfe"]["allocation"]["ledger"] == "depleting_per_hour"

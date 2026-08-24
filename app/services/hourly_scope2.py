@@ -232,64 +232,118 @@ def match(db: Session, organisation_id: int, period_id: int) -> dict:
     # in some other hour.
     surplus_kwh = 0.0
 
-    for (hour, load_region) in sorted(loads):
-        load_kwh = loads[(hour, load_region)]
-        total_load += load_kwh
-
-        servable = {load_region} | links.get(load_region, set())
-        pool, rejected = [], 0.0
+    # ONE LEDGER PER HOUR, DEPLETED AS IT IS DRAWN ON.
+    #
+    # The pool used to be rebuilt independently for every (hour, region) load row and
+    # never depleted, so a certificate deliverable to two regions was counted in full
+    # against BOTH of their loads in the same hour: 100 kWh of certificates matched
+    # 200 kWh of load, and the CFE score read 100% where the honest answer was 50%.
+    # That is annual netting reintroduced across space instead of time, inside the one
+    # method whose entire purpose is to forbid netting.
+    #
+    # ALLOCATION ORDER IS A DISCLOSED ASSUMPTION, not an implementation detail: when two
+    # load regions compete for one certificate, somebody has to lose, and who loses moves
+    # the reported figures. Own-region load is served first (a certificate issued where
+    # the load sits is consumed there before being exported), then deliverable imports in
+    # a deterministic region order. Both passes are stated in the payload.
+    for hour in sorted({h for (h, _) in loads}):
+        ledger = {}
         for (chour, cregion), items in certs.items():
-            if chour != hour:
-                continue
-            if cregion in servable:
-                pool.extend(items)
-            else:
-                rejected += sum(i["kwh"] for i in items)
-        rejected_undeliverable_kwh += rejected
+            if chour == hour:
+                ledger.setdefault(cregion, []).extend(
+                    {"kwh": i["kwh"], "rate": i["kg_co2e_per_kwh"]} for i in items)
 
-        available = sum(i["kwh"] for i in pool)
-        matched = min(load_kwh, available)
-        unmatched = load_kwh - matched
-        matched_total += matched
-        surplus_kwh += max(0.0, available - load_kwh)
-        if load_kwh > _EPS_KWH and unmatched <= _EPS_KWH:
+        regions = sorted(r for (h, r) in loads if h == hour)
+        remaining = {r: loads[(hour, r)] for r in regions}
+        matched_by = {r: 0.0 for r in regions}
+        emissions_by = {r: 0.0 for r in regions}
+        cross_by = {r: 0.0 for r in regions}
+        available_by = {r: 0.0 for r in regions}
+        for r in regions:
+            servable = {r} | links.get(r, set())
+            available_by[r] = sum(i["kwh"] for cr, its in ledger.items()
+                                  if cr in servable for i in its)
+            total_load += remaining[r]
+
+        def _draw(region, cert_region):
+            """Move kWh out of one region's remaining supply into one region's load."""
+            need = remaining[region]
+            for item in ledger.get(cert_region, []):
+                if need <= _EPS_KWH:
+                    break
+                take = min(need, item["kwh"])
+                if take <= _EPS_KWH:
+                    continue
+                item["kwh"] -= take
+                need -= take
+                matched_by[region] += take
+                emissions_by[region] += take * item["rate"]
+                if cert_region != region:
+                    cross_by[region] += take
+            remaining[region] = need
+
+        for r in regions:                       # pass 1: own region
+            _draw(r, r)
+        for r in regions:                       # pass 2: deliverable imports
+            for cregion in sorted(links.get(r, set())):
+                if cregion != r:
+                    _draw(r, cregion)
+
+        # Certificates in regions that could not serve ANY load this hour, plus whatever
+        # nobody drew. Surplus never carries to another hour — that restriction is the
+        # reform — and it is reported because it is exactly what annual netting would
+        # have allowed to offset some other hour's deficit.
+        deliverable_to_someone = set()
+        for r in regions:
+            deliverable_to_someone |= {r} | links.get(r, set())
+        for cregion, its in ledger.items():
+            leftover = sum(i["kwh"] for i in its)
+            if cregion in deliverable_to_someone:
+                surplus_kwh += leftover
+            else:
+                rejected_undeliverable_kwh += leftover
+
+        if regions and all(remaining[r] <= _EPS_KWH for r in regions) \
+                and any(loads[(hour, r)] > _EPS_KWH for r in regions):
+            # Counts HOURS, not (hour, region) buckets: an hour is fully matched only
+            # when every region's load in it was matched.
             hours_fully_matched += 1
-        if matched > _EPS_KWH:
-            cross_region_matched_kwh += min(
-                matched,
-                sum(i["kwh"] for (ch, cr), its in certs.items() if ch == hour
-                    and cr in servable and cr != load_region for i in its))
 
-        # Matched kWh carry the certificates' own intensity — usually zero, but a
-        # certificate is an attribute claim and its stated intensity is respected.
-        if available > _EPS_KWH and matched > _EPS_KWH:
-            weighted = sum(i["kwh"] * i["kg_co2e_per_kwh"] for i in pool) / available
-            matched_emissions += matched * weighted
+        for r in regions:
+            load_kwh = loads[(hour, r)]
+            matched = matched_by[r]
+            unmatched = remaining[r]
+            matched_total += matched
+            cross_region_matched_kwh += cross_by[r]
+            matched_emissions += emissions_by[r]
 
-        info = intensity.get((hour, load_region))
-        residual = (info or {}).get("residual")
-        if unmatched > _EPS_KWH:
-            if residual is None:
-                # NEVER substitute the average here: residual >= average always, so
-                # falling back would understate. The hour is reported as unpriced.
-                unpriced_kwh += unmatched
-                unpriced_hours.add(hour)
-                if info is None:
-                    residual_missing_regions.add(f"{load_region} (no intensity row)")
+            info = intensity.get((hour, r))
+            residual = (info or {}).get("residual")
+            if unmatched > _EPS_KWH:
+                if residual is None:
+                    # NEVER substitute the average here: residual >= average always, so
+                    # falling back would understate. The hour is reported as unpriced.
+                    unpriced_kwh += unmatched
+                    unpriced_hours.add(hour)
+                    residual_missing_regions.add(
+                        f"{r} (no intensity row)" if info is None
+                        else f"{r} (no residual rate)")
                 else:
-                    residual_missing_regions.add(f"{load_region} (no residual rate)")
-            else:
-                unmatched_emissions += unmatched * residual
+                    unmatched_emissions += unmatched * residual
 
-        per_hour.append({
-            "hour": hour, "grid_region": load_region,
-            "load_kwh": round(load_kwh, 6),
-            "certificates_available_kwh": round(available, 6),
-            "matched_kwh": round(matched, 6),
-            "unmatched_kwh": round(unmatched, 6),
-            "residual_kg_co2e_per_kwh": residual,
-            "unpriced": unmatched > _EPS_KWH and residual is None,
-        })
+            per_hour.append({
+                "hour": hour, "grid_region": r,
+                "load_kwh": round(load_kwh, 6),
+                # What COULD have served this region's load. Two regions served by
+            # one certificate both see it here, so this column may sum to more than
+            # the certificates that exist; matched_kwh is the spend and never does.
+            "certificates_available_kwh": round(available_by[r], 6),
+                "matched_kwh": round(matched, 6),
+                "unmatched_kwh": round(unmatched, 6),
+                "cross_region_matched_kwh": round(cross_by[r], 6),
+                "residual_kg_co2e_per_kwh": residual,
+                "unpriced": unmatched > _EPS_KWH and residual is None,
+            })
 
     hours_with_load = len({h for (h, _) in loads})
     expected_hours = int((end - start).total_seconds() // 3600)
@@ -311,6 +365,19 @@ def match(db: Session, organisation_id: int, period_id: int) -> dict:
             "total_load_kwh": round(total_load, 6),
             "hours_fully_matched": hours_fully_matched,
             "hours_with_load": hours_with_load,
+            "hours_fully_matched_basis": (
+                "Counts HOURS, not (hour, region) buckets: an hour counts only when "
+                "EVERY region's load in it was matched."),
+            "allocation": {
+                "ledger": "depleting_per_hour",
+                "order": ["own_region_load_first", "deliverable_imports_by_region_name"],
+                "note": "Within an hour a certificate is spent ONCE. When two load "
+                        "regions can both be served by the same certificate, own-region "
+                        "load draws on it first and deliverable imports follow in a "
+                        "deterministic region order. Who wins moves the reported figures, "
+                        "so the rule is disclosed rather than left in the code. Surplus "
+                        "never carries to another hour.",
+            },
             "note": "Hourly carbon-free-energy score: matched kWh over consumed kWh, "
                     "computed hour by hour. Surplus in one hour never offsets a "
                     "deficit in another — that restriction IS the reform, and it is "
