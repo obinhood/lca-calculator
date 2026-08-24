@@ -527,14 +527,33 @@ def seed_demo_data(org: Organisation = Depends(current_org), db: Session = Depen
         except Exception:
             db.rollback()
 
-    # Always (re)compute so a run exists for the reports to read.
-    run = compute_co2e(db, org.id, gwp_set="AR6")
+    # Everything the demo used to omit: a reporting period, an hourly day with
+    # certificates, series keys, and a Scope 3 screen. Without them the demo showed a
+    # spend-and-energy calculator and none of the rest of the product — and since the
+    # intensity gates landed, an unscoped run would make SECR, CDP, ESRS E1 and EcoVadis
+    # all refuse, which is a worse advert than no demo at all.
+    from .services.demo_seed import seed_all
+    # Screen-then-compute, which is the realistic workflow: a first pass shows which
+    # Scope 3 categories actually carry lines, the screen is declared against that, and
+    # the final run freezes the screen. Guessing the set instead produced a category
+    # declared "included" with no lines — the demo shipping the defect the product
+    # exists to catch.
+    first_pass = compute_co2e(db, org.id, gwp_set="AR6")
+    extras = seed_all(db, org.id, run=first_pass)
+
+    # Always (re)compute so a run exists for the reports to read — now SCOPED to the
+    # demo reporting period, which is what every intensity ratio needs.
+    run = compute_co2e(db, org.id, gwp_set="AR6",
+                       reporting_period_id=extras["reporting_period"]["id"])
     return JSONResponse({
         "seeded_activities": seeded,
         "already_had_activities": existing > 0,
         "run_id": run.id,
         "total_co2e_kg": run.total_co2e,
-        "next": "Open the Dashboard to see the run, then the Reports tab to generate disclosures.",
+        "also_seeded": extras,
+        "next": "Open the Dashboard to see the run, then the Reports tab to generate "
+                "disclosures. Hourly Scope 2, period-over-period screening and the "
+                "Scope 3 screen now have data too.",
     })
 
 
@@ -2512,6 +2531,53 @@ def declare_series_key(series_key: str = Query(...),
     db.commit()
     return {"series_key": series_key.strip(), "activities_updated": len(rows),
             "activity_ids": [a.id for a in rows]}
+
+
+@app.post("/bills/validate")
+async def validate_utility_bill(request: Request,
+                                provenance_tier: str = "text_layer",
+                                org: Organisation = Depends(current_org)):
+    """Validate a PARSED utility bill and return candidate activity rows.
+
+    This is the validation half of bill extraction, and the half that is actually built:
+    register arithmetic, MPAN mod-11, unit sanity (kVArh and kVA are not energy), gas
+    volume-to-kWh with the calorific value, ESPI read quality, supersession of an
+    estimate by a catch-up read, and whether the invoice reconciles to its own line
+    items. THERE IS NO OCR HERE — you supply the parsed bill, from whatever read it.
+
+    That distinction is the point of `provenance_tier`: a figure lifted from an embedded
+    Factur-X attachment and one guessed by OCR must never be mistaken for each other
+    downstream, so the tier travels on every row alongside the document hash.
+
+    Rows are SUGGESTIONS. Nothing enters an inventory from here — the reconciliation
+    verdict travels with them, and a bill that does not reconcile still returns its rows
+    so a human can see what was wrong rather than being told only that it failed.
+    """
+    from .services.bill_extraction import (
+        PROVENANCE_TIERS, document_hash, reconcile, to_activity_rows,
+    )
+    if provenance_tier not in PROVENANCE_TIERS:
+        raise HTTPException(status_code=400,
+                            detail=f"provenance_tier must be one of {list(PROVENANCE_TIERS)}")
+    raw = await request.body()
+    try:
+        bill = _json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    if not isinstance(bill, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    doc_hash = document_hash(raw)
+    out = to_activity_rows(bill, doc_hash=doc_hash, provenance_tier=provenance_tier)
+    return {
+        "organisation_id": org.id,
+        "document_hash": doc_hash,
+        "provenance_tier": provenance_tier,
+        "reconciliation": reconcile(bill),
+        **out,
+        "note": "Candidate rows only — nothing has been written. Review them, then post "
+                "the ones you accept through the normal activity upload.",
+    }
 
 
 @app.get("/reports/series_screen_history")
