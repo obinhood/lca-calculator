@@ -238,16 +238,36 @@ def _factor_values(db: Session, scheme: str, codes: list,
     return out
 
 
-def dispersion_sigma(values: list) -> dict:
+def dispersion_sigma(values: list, *, cardinality: Optional[int] = None) -> dict:
     """sigma from the geometric standard deviation of a candidate set's factors.
 
     A single candidate gives exactly 0 — an unambiguous mapping adds no
     uncertainty, which is the right answer and one a fixed 1-5 score cannot give.
+
+    BUT ZERO AND UNKNOWN ARE DIFFERENT ANSWERS. Returning 0.0 whenever fewer than two
+    factor VALUES were found conflated two opposite situations: a hop that resolves to
+    exactly one code (genuinely unambiguous) and a hop that resolves to twenty-five codes
+    for which this catalogue happens to hold no factors (maximally ambiguous, and
+    unmeasured). The second reported "an unambiguous mapping adds no uncertainty" about a
+    25-way fan-out.
+
+    `cardinality` is how many codes the hop resolved to. Given it, an ambiguous hop with
+    too few values to measure returns sigma None, which the chain treats as
+    unquantifiable — the same treatment an unresolvable hop already got.
     """
     usable = [v for v in values if isinstance(v, (int, float))
               and math.isfinite(v) and v > 0]
     if len(usable) <= 1:
+        ambiguous = cardinality is not None and cardinality > 1
+        if ambiguous:
+            return {"sigma": None, "gsd": None, "n": len(usable),
+                    "cardinality": cardinality, "basis": "unmeasurable_dispersion",
+                    "note": f"the hop resolves to {cardinality} candidate codes, so it is "
+                            f"AMBIGUOUS, but this catalogue holds fewer than two usable "
+                            f"factor values for them — the dispersion is unknown, not "
+                            f"zero. Load factors for the target codes to measure it."}
         return {"sigma": 0.0, "gsd": 1.0, "n": len(usable),
+                "cardinality": cardinality,
                 "basis": "single_candidate" if usable else "no_candidates",
                 "note": "an unambiguous mapping adds no uncertainty; a fixed pedigree "
                         "score cannot express that"}
@@ -271,19 +291,26 @@ def hop_uncertainty(db: Session, *, from_scheme: str, from_code: str,
         return {**r, "sigma": None,
                 "sigma_note": "an unresolvable hop has UNKNOWN, not zero, "
                               "uncertainty — it must not be treated as clean"}
-    disp = dispersion_sigma(_factor_values(db, to_scheme, r["candidates"],
-                                           factor_source))
+    disp = dispersion_sigma(_factor_values(db, to_scheme, r["candidates"], factor_source),
+                            cardinality=len(r["candidates"] or []))
+    _sig = disp["sigma"]
+    _var = None if _sig is None else _sig ** 2
     return {
         **r,
         "dispersion": disp,
-        "sigma": disp["sigma"],
-        "variance_contribution": disp["sigma"] ** 2,
+        "sigma": _sig,
+        "variance_contribution": _var,
+        "sigma_note": (
+            "AMBIGUOUS but unmeasured: this hop fans out to several codes and the "
+            "catalogue holds too few factors for them to measure the spread. Unknown, "
+            "not zero — the chain is reported unquantifiable rather than clean."
+        ) if _sig is None else None,
         "pedigree_interoperability": {
             "indicator": "further technological correlation",
             "score": PEDIGREE_TECH_CORRELATION_SCORE,
             "official_cap_variance": PEDIGREE_TECH_CORRELATION_CAP_VARIANCE,
-            "measured_variance": round(disp["sigma"] ** 2, 6),
-            "saturated": disp["sigma"] ** 2 > PEDIGREE_TECH_CORRELATION_CAP_VARIANCE,
+            "measured_variance": None if _var is None else round(_var, 6),
+            "saturated": None if _var is None else _var > PEDIGREE_TECH_CORRELATION_CAP_VARIANCE,
             "note": "The hop is mapped onto the pedigree indicator so a reader who "
                     "expects a score gets one, but the MEASURED variance is used. "
                     "ecoinvent Table 10.5 caps this term at 0.12, roughly an order of "
@@ -306,7 +333,7 @@ def chain_uncertainty(db: Session, hops: list) -> dict:
     its weakest link.
     """
     results, total_var = [], 0.0
-    unresolved, uncitable = [], []
+    unresolved, uncitable, unmeasurable = [], [], []
     for h in hops:
         r = hop_uncertainty(db, from_scheme=h["from_scheme"],
                             from_code=h["from_code"], to_scheme=h["to_scheme"],
@@ -318,9 +345,15 @@ def chain_uncertainty(db: Session, hops: list) -> dict:
             continue
         if r.get("uncitable"):
             uncitable.append(f"{h['from_scheme']}->{h['to_scheme']}")
+        # A hop that RESOLVED but is ambiguous with too few factors to measure the spread
+        # is unknown, not zero. Adding 0.0 here would have quietly declared the chain
+        # clean — the same failure the unresolved branch above already refuses.
+        if r["variance_contribution"] is None:
+            unmeasurable.append(f"{h['from_scheme']}->{h['to_scheme']}")
+            continue
         total_var += r["variance_contribution"]
 
-    quantifiable = not unresolved
+    quantifiable = not unresolved and not unmeasurable
     return {
         "version": CROSSWALK_VERSION,
         "hops": results,
@@ -331,9 +364,11 @@ def chain_uncertainty(db: Session, hops: list) -> dict:
         "combined_gsd": round(math.exp(math.sqrt(total_var)), 4) if quantifiable else None,
         "unresolved_hops": unresolved,
         "uncitable_hops": uncitable,
-        "note": "Variances add on the log scale. An unresolvable hop makes the CHAIN "
-                "unquantifiable rather than contributing zero — a chain is only as "
-                "citable as its weakest link.",
+        "unmeasurable_hops": unmeasurable,
+        "note": "Variances add on the log scale. A hop that cannot be resolved, or that "
+                "resolves ambiguously with too few factors loaded to measure its spread, "
+                "makes the CHAIN unquantifiable rather than contributing zero — a chain "
+                "is only as citable as its weakest link.",
         "version_pinning_note": "Every hop carries its table version. A frozen report "
                                 "must freeze its crosswalk versions exactly as it "
                                 "freezes FX rates, or a concordance revision silently "

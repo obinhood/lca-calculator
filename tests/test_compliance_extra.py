@@ -90,7 +90,9 @@ def test_esos_energy_and_significant_use(db):
     assert r["report_ready"] is True
     assert r["total_energy_kwh"] == pytest.approx(4000.0)
     assert r["by_carrier_kwh"]["electricity"] == pytest.approx(3000.0)
-    assert r["significant_energy_use_pct"]["electricity"] == pytest.approx(75.0)
+    # Named for the denominator it uses: with no carriers omitted this IS the total.
+    assert r["carriers_omitted"] == []
+    assert r["share_of_reported_carriers_pct"]["electricity"] == pytest.approx(75.0)
 
 
 def test_reports_are_org_scoped(db):
