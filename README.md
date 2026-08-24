@@ -14,7 +14,7 @@ refused with a reason instead of estimated.
 | | |
 |---|---|
 | Framework registry | 42 entries — 24 `built`, 16 `partial`, 2 `reference` |
-| API | 122 endpoints over 44 ORM models |
+| API | 123 endpoints over 44 ORM models |
 | Engine | ~25k lines Python across 76 modules |
 | Tests | 1,472, including property-based (Hypothesis) and calculation oracles |
 
