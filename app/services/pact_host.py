@@ -158,6 +158,15 @@ def resolve_token(db: Session, authorization: Optional[str]) -> dict:
         return {"ok": False, "code": "BadRequest", "message": "invalid access token"}
     if row.expires_at <= _iso(_now()):
         return {"ok": False, "code": "TokenExpired", "message": "access token expired"}
+    # PactClient.revoked was written by nothing and read by nothing, while the endpoint
+    # that mints credentials promised "a partner must be revocable without touching the
+    # owner's own access" and the model said "revocation is a delete rather than a hope".
+    # A live token outlived revocation by its whole expiry window, which is precisely the
+    # window revocation exists to close.
+    client = db.query(PactClient).filter(PactClient.client_id == row.client_id).first()
+    if client is None or client.revoked:
+        return {"ok": False, "code": "AccessDenied",
+                "message": "these client credentials have been revoked"}
     return {"ok": True, "organisation_id": row.organisation_id,
             "client_id": row.client_id}
 
@@ -356,3 +365,27 @@ def build_response_event(kind: str, *, request_event_id: str, source: str,
                                 "message": "no footprints matched the request"}
     return {"type": etype, "specversion": "1.0", "id": str(uuid.uuid4()),
             "source": source, "time": _iso(_now()), "data": data}
+
+
+def revoke_client(db: Session, organisation_id: int, client_id: str) -> dict:
+    """Revoke one partner's credentials, and kill its live tokens.
+
+    Deleting the tokens as well as flagging the client is the difference between
+    revocation and a hope: a bearer token already issued is valid until it expires, so
+    leaving it in place would keep the partner reading for the rest of that window.
+    Scoped to the owning organisation — one tenant cannot revoke another's partner.
+    """
+    row = db.query(PactClient).filter(
+        PactClient.organisation_id == organisation_id,
+        PactClient.client_id == client_id).first()
+    if row is None:
+        return {"revoked": False, "reason": "client_id not found for this organisation"}
+    already = bool(row.revoked)
+    row.revoked = True
+    killed = db.query(PactToken).filter(PactToken.client_id == client_id).delete()
+    db.commit()
+    return {"revoked": True, "client_id": client_id, "already_revoked": already,
+            "tokens_invalidated": killed,
+            "note": "The client is flagged AND its live tokens are deleted. A bearer "
+                    "token already issued would otherwise stay valid until it expired, "
+                    "which is the window revocation exists to close."}

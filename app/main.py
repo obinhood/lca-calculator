@@ -2205,6 +2205,23 @@ def create_pact_client(partner_name: Optional[str] = None,
     return JSONResponse(create_client(db, org.id, partner_name))
 
 
+@app.post("/pact/clients/{client_id}/revoke")
+def revoke_pact_client(client_id: str,
+                       org: Organisation = Depends(current_org),
+                       db: Session = Depends(get_db)):
+    """Revoke one partner's client credentials and invalidate its live tokens.
+
+    The promise that a partner is revocable without touching the owner's own access had
+    no route behind it, and `PactClient.revoked` was written by nothing. Scoped to the
+    calling organisation: one tenant cannot revoke another's partner.
+    """
+    from .services.pact_host import revoke_client
+    out = revoke_client(db, org.id, client_id)
+    if not out["revoked"]:
+        raise HTTPException(status_code=404, detail=out["reason"])
+    return JSONResponse(out)
+
+
 @app.post("/auth/token")
 async def pact_token(request: Request, db: Session = Depends(get_db)):
     """OAuth2 client-credentials grant (PACT v3 section 5.5.1).

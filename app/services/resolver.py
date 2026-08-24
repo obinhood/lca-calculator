@@ -170,11 +170,36 @@ def auto_map_activity(db: Session, activity: ActivityRecord, gwp_set: str = "AR6
     ``suggested_factor_id`` and waits in the review queue ("needs_review").
     Safe to re-run on ``needs_review`` activities: the suggestion is refreshed,
     and upgrades to auto-bind if the catalog has since gained an exact match.
+
+    EVERY OUTCOME IS JOURNALLED. mapping_audit declares auto_mapped, suggested and
+    unmapped among its actions, but only the human paths (approve, override, PACT bind)
+    ever wrote an event — so an inventory bound entirely by this function produced a
+    journal with ZERO entries, while the evidence pack reported the override-log gap as
+    "CLOSED" over it. An automatic binding is still a binding decision, and it is the one
+    an assuror is most likely to want to see.
+
+    Only CHANGES are journalled. This is re-run over every unmapped activity on each
+    upload, and an append-only log that repeats itself on every no-op re-run stops being
+    readable. Writes are uncommitted: both callers bulk-commit, and committing per row
+    would be a transaction per activity across a 50,000-row file.
     """
+    from .mapping_audit import record as _audit
+    before_factor, before_status = activity.factor_id, activity.mapping_status
+
+    def _journal(action: str):
+        if activity.factor_id == before_factor and activity.mapping_status == before_status:
+            return          # nothing moved; a re-run is not a decision
+        _audit(db, activity, action, from_factor_id=before_factor,
+               from_status=before_status,
+               note=f"automatic mapping: basis={activity.mapping_basis!r} "
+                    f"confidence={activity.mapping_confidence!r}",
+               commit=False)
+
     hit = propose_mapping(db, activity.category, activity.subcategory,
                           activity.description, activity.geo, gwp_set=gwp_set)
     if hit is None:
         activity.mapping_status = "unmapped"
+        _journal("unmapped")
         return activity.mapping_status
     factor, basis, confidence = hit
     activity.mapping_basis = basis
@@ -183,7 +208,9 @@ def auto_map_activity(db: Session, activity: ActivityRecord, gwp_set: str = "AR6
         activity.factor_id = factor.id
         activity.suggested_factor_id = None
         activity.mapping_status = "auto"
+        _journal("auto_mapped")
     else:
         activity.suggested_factor_id = factor.id
         activity.mapping_status = "needs_review"
+        _journal("suggested")
     return activity.mapping_status

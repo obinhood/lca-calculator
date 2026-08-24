@@ -134,6 +134,19 @@ def import_footprint(db: Session, organisation_id: int, raw, *,
         if old is not None and old.status != "Deprecated":
             old.status = "Deprecated"
             deprecated.append(old.pf_id)
+    # THE REVERSE QUESTION, which was never asked: does anything already held name THIS
+    # footprint among the ones IT replaces? Supersession was walked in one direction only,
+    # so an out-of-order import — the correction arriving before the document it corrects,
+    # which is exactly what a backfill or a replayed feed does — left the superseded
+    # footprint Active and materialisable as a best-pedigree supplier_specific factor.
+    # A figure its own author has withdrawn would then price next year's inventory.
+    superseded_by = [r.pf_id for r in db.query(ProductFootprint).filter(
+        ProductFootprint.organisation_id == organisation_id,
+        ProductFootprint.pf_id != row.pf_id).all()
+        if row.pf_id in _preceding_ids(r)]
+    if superseded_by and row.status != "Deprecated":
+        row.status = "Deprecated"
+
     db.commit()
     db.refresh(row)
 
@@ -142,8 +155,25 @@ def import_footprint(db: Session, organisation_id: int, raw, *,
             "kg_co2e_per_unit": row.kg_co2e_per_unit_excl_biogenic,
             "declared_unit": row.declared_unit,
             "deprecated_superseded": deprecated,
+            "deprecated_on_arrival_by": superseded_by,
+            "deprecated_on_arrival_note": (
+                f"a footprint already held ({', '.join(superseded_by)}) declares this one "
+                f"among those it replaces, so it arrived already superseded and is stored "
+                f"Deprecated. It is kept, because a filed run that used it must still be "
+                f"able to show what it used."
+            ) if superseded_by else None,
             "errors": [], "warnings": verdict["warnings"],
             "reason": None}
+
+
+def _preceding_ids(row: ProductFootprint) -> set:
+    """The pf_ids a held footprint declares it replaces, from its stored document."""
+    try:
+        doc = json.loads(row.document or "{}")
+    except (ValueError, TypeError):
+        return set()
+    raw = doc.get("precedingPfIds")
+    return {str(v).strip() for v in raw if str(v).strip()} if isinstance(raw, list) else set()
 
 
 def footprint_view(row: ProductFootprint, *, include_document: bool = False) -> dict:
