@@ -700,10 +700,21 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
                 detail["factor_value"] = a.factor.value
 
             # Biogenic CO2 tracked as its own pool (ISO 14067), never in total_co2e.
-            # convert() cannot fail here — the same args already succeeded in
-            # compute_activity_co2e above — so no guard is needed.
+            #
+            # The quantity has to be derived the SAME WAY the fossil figure was, or the
+            # two sit on different bases inside one line. For a spend_based factor the
+            # fossil figure used normalize_spend — CPI-adjusted to the factor's base year
+            # and FX-converted at the base-year rate — while this branch re-derived it
+            # with a raw convert() of the recorded spend. Across currencies that is not
+            # merely a different number: convert() has no rate for GBP->USD and raises,
+            # and the comment claiming it "cannot fail here" was reasoning about the
+            # NON-spend path only. Latent today (nothing loads a spend factor carrying
+            # kg_co2_biogenic) and wrong the moment one does.
             if a.factor.kg_co2_biogenic is not None and math.isfinite(a.factor.kg_co2_biogenic):
-                qty_fu = convert(_qty, a.unit, a.factor.unit)
+                if spend_steps is not None:
+                    qty_fu = spend_steps["amount_in_factor_currency"]
+                else:
+                    qty_fu = convert(_qty, a.unit, a.factor.unit)
                 # Weighted too, or the ISO 14067 biogenic pool would sit on a different
                 # (gross) basis from the consolidated total reported beside it.
                 biogenic_gross = qty_fu * a.factor.kg_co2_biogenic

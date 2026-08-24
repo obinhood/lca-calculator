@@ -333,17 +333,38 @@ def classify_level_shifts(history: list) -> dict:
     trends must be read "for consistency with other circumstances such as the
     acquisition or disposal of facilities".
     """
+    # ADJACENCY MATTERS, and was never checked. Accumulating every finding for a series
+    # across the whole history and counting them made an INTERMITTENT anomaly — spike,
+    # back to baseline, spike again — indistinguishable from a persistent step. The
+    # intermittent case is the definitional opposite of a level shift, and it was being
+    # dropped to informational and routed away from the anomaly list.
     runs = defaultdict(list)
-    for payload in history:
+    for i, payload in enumerate(history):
         if not payload.get("available"):
             continue
         for f in payload.get("findings", []):
-            runs[(f["series_key"], f["unit"])].append(f)
+            runs[(f["series_key"], f["unit"])].append((i, f))
+
+    def _longest_consecutive(items):
+        """The longest run of CONSECUTIVE comparisons agreeing on direction."""
+        best, current = [], []
+        for idx, f in items:
+            if current and idx == current[-1][0] + 1 and f["direction"] == current[-1][1]["direction"]:
+                current.append((idx, f))
+            else:
+                current = [(idx, f)]
+            if len(current) > len(best):
+                best = list(current)
+        return best
 
     shifts, anomalies = [], []
-    for key, flags in runs.items():
+    for key, indexed in runs.items():
+        indexed.sort(key=lambda t: t[0])
+        all_flags = [f for _, f in indexed]
+        streak = _longest_consecutive(indexed)
+        flags = [f for _, f in streak]
         if len(flags) < LEVEL_SHIFT_MIN_RUNS:
-            anomalies.extend(flags)
+            anomalies.extend(all_flags)
             continue
         directions = {f["direction"] for f in flags}
         devs = [f["log_deviation"] for f in flags]
@@ -351,10 +372,14 @@ def classify_level_shifts(history: list) -> dict:
         spread = max(devs) - min(devs)
         tol = 0.5 * (min(thresholds) if thresholds else BAND_CAP)
         if len(directions) == 1 and spread < tol:
+            # Findings OUTSIDE the persistent streak are still anomalies in their own
+            # right; only the streak is reclassified.
+            anomalies.extend([f for f in all_flags if f not in flags])
             shifts.append({
                 "series_key": key[0], "unit": key[1],
                 "direction": directions.pop(),
                 "consecutive_periods": len(flags),
+                "comparisons_flagged_total": len(all_flags),
                 "log_deviation_spread": round(spread, 6),
                 "check_code": "level_shift",
                 "severity": "informational",
@@ -368,6 +393,11 @@ def classify_level_shifts(history: list) -> dict:
                         f"base-year recalculation policy.",
             })
         else:
-            anomalies.extend(flags)
+            anomalies.extend(all_flags)
     return {"level_shifts": shifts, "anomalies": anomalies,
+            "adjacency_note": "A run of comparisons counts only when they are "
+                              "CONSECUTIVE and agree on direction. An intermittent "
+                              "anomaly that reverts to baseline between spikes is the "
+                              "definitional opposite of a level shift and stays an "
+                              "anomaly.",
             "min_consecutive_periods": LEVEL_SHIFT_MIN_RUNS}
