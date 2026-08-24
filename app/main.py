@@ -3263,6 +3263,7 @@ def get_iso_14064_2_report(baseline_run_id: Optional[int] = None,
 def get_cdp_export(run_id: Optional[int] = None,
                    intensity_denominator: Optional[float] = None,
                    intensity_denominator_unit: Optional[str] = None,
+                   intensity_denominator_period_days: Optional[int] = None,
                    verification_status: str = "no_third_party_verification",
                    org: Organisation = Depends(current_org),
                    db: Session = Depends(get_db)):
@@ -3274,12 +3275,14 @@ def get_cdp_export(run_id: Optional[int] = None,
     return JSONResponse(with_guidance(cdp_export(db, org.id, run_id=run_id,
                                    intensity_denominator=intensity_denominator,
                                    intensity_denominator_unit=intensity_denominator_unit,
+                                   intensity_denominator_period_days=intensity_denominator_period_days,
                                    verification_status=verification_status)))
 
 
 @app.get("/reports/esrs_e1")
 def get_esrs_e1_report(run_id: Optional[int] = None,
                        net_revenue_millions: Optional[float] = None,
+                       revenue_period_days: Optional[int] = None,
                        revenue_currency: str = "EUR",
                        credits_as_of: Optional[str] = None,
                        org: Organisation = Depends(current_org),
@@ -3294,6 +3297,7 @@ def get_esrs_e1_report(run_id: Optional[int] = None,
                             detail="net_revenue_millions must be a finite number > 0")
     return JSONResponse(with_guidance(esrs_e1_report(db, org.id, run_id=run_id,
                                        net_revenue_millions=net_revenue_millions,
+                                       revenue_period_days=revenue_period_days,
                                        revenue_currency=revenue_currency,
                                        credits_as_of=credits_as_of)))
 
@@ -3381,15 +3385,18 @@ def export_report(framework_key: str, request: Request, format: str = "csv",
 def get_secr_report(run_id: Optional[int] = None,
                     intensity_denominator: Optional[float] = None,
                     intensity_denominator_unit: Optional[str] = None,
+                    intensity_denominator_period_days: Optional[int] = None,
                     org: Organisation = Depends(current_org),
                     db: Session = Depends(get_db)):
     """UK SECR disclosure payload with pre-submission validation gates."""
     if intensity_denominator is not None and (
             not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
         raise HTTPException(status_code=400, detail="intensity_denominator must be a finite number > 0")
-    return JSONResponse(with_guidance(secr_report(db, org.id, run_id=run_id,
-                                    intensity_denominator=intensity_denominator,
-                                    intensity_denominator_unit=intensity_denominator_unit)))
+    return JSONResponse(with_guidance(secr_report(
+        db, org.id, run_id=run_id,
+        intensity_denominator=intensity_denominator,
+        intensity_denominator_unit=intensity_denominator_unit,
+        intensity_denominator_period_days=intensity_denominator_period_days)))
 
 
 @app.post("/taxonomy/activities")

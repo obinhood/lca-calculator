@@ -110,7 +110,8 @@ def test_gri_305_5_reductions_between_immutable_runs(db, seeded):
     a.factor_id = lower.id; db.commit()
     new_run = compute_co2e(db, org.id)
     r = gri_report(db, org.id, run_id=new_run.id, base_run_id=base_run.id,
-                   intensity_denominator=1.0)
+                   intensity_denominator=1.0,
+                   intensity_denominator_period_days=365)
     red = r["gri_305_5_reductions"]
     # base waste 120 kg -> new 25 kg: reduction 95 kg = 0.095 t
     assert red["reduction_location_based_tco2e"] == pytest.approx(0.095)
@@ -124,7 +125,8 @@ def test_gri_305_5_blocks_cross_gwp_comparison(db, seeded):
     _activity(db, org.id, f.id, "electricity", 100, "kWh")
     run5 = compute_co2e(db, org.id, gwp_set="AR5")
     r = gri_report(db, org.id, run_id=run5.id, base_run_id=base_run.id,
-                   intensity_denominator=1.0)
+                   intensity_denominator=1.0,
+                   intensity_denominator_period_days=365)
     assert any("GWP" in b for b in r["blockers"])
 
 
@@ -135,7 +137,8 @@ def test_gri_base_run_is_org_scoped(db, seeded):
     _activity(db, other.id, f.id, "electricity", 10, "kWh")
     other_run = compute_co2e(db, other.id)
     r = gri_report(db, org.id, run_id=run.id, base_run_id=other_run.id,
-                   intensity_denominator=1.0)
+                   intensity_denominator=1.0,
+                   intensity_denominator_period_days=365)
     assert any("base_run_id not found" in b for b in r["blockers"])
 
 
@@ -144,6 +147,7 @@ def test_gri_base_run_is_org_scoped(db, seeded):
 def test_cdp_export_golden_values(db, seeded):
     org, run = seeded
     r = cdp_export(db, org.id, run_id=run.id, intensity_denominator=2.0,
+                   intensity_denominator_period_days=365,
                    verification_status="limited_assurance")
     a = r["answers"]
     assert a["C6.1_scope1_gross_tco2e"] == pytest.approx(0.1472)

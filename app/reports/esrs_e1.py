@@ -26,6 +26,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import CalculationRun, EmissionLineItem
+from ..services.comparability import denominator_period_comparable
 from .summary import summary, run_factor_sources
 from .scope3 import disclosed_totals_incl_financed
 from .secr import _energy_kwh
@@ -146,6 +147,7 @@ def _renewable_contractual_mwh(db: Session, run: CalculationRun) -> dict:
 
 def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
                    net_revenue_millions: Optional[float] = None,
+                   revenue_period_days: Optional[int] = None,
                    revenue_currency: str = "EUR",
                    credits_as_of: Optional[str] = None) -> dict:
     """ESRS E1 quantitative disclosure payload for one run."""
@@ -174,6 +176,14 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
             or net_revenue_millions <= 0):
         blockers.append("net_revenue_millions required: E1-6 mandates GHG intensity "
                         "per net revenue")
+    else:
+        # E1-6 divides a period-scoped total by revenue, which is a PER-PERIOD figure.
+        # Annual revenue over a quarter's emissions is an intensity 4x too low, and both
+        # inputs are individually right — nothing downstream can catch it.
+        _dp = denominator_period_comparable(db, run, revenue_period_days,
+                                            ratio_name="E1-6 GHG intensity")
+        if _dp:
+            blockers.append(_dp)
     # ESRS AR 46(i): Scope 3 must be screened across all 15 GHG Protocol categories,
     # each quantified or excluded with a justification. An UNDECLARED or NOT-MEASURED
     # category, or a Scope 3 line with no category, blocks the disclosure — this is

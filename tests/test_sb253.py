@@ -35,7 +35,14 @@ def unscreened(db):
               "electricity", 1200, "kWh")
     _activity(db, org.id, _factor(db, "gas", "kWh", 0.184).id, "gas", 800, "kWh")
     _activity(db, org.id, _factor(db, "diesel", "L", 2.676).id, "diesel", 150, "L")
-    run = compute_co2e(db, org.id)
+    # Period-scoped so the comparison below isolates what it claims to test: this fixture
+    # withholds the Scope 3 screen and the boundary, not the reporting period. Leaving the
+    # run unscoped would add a SECR-only intensity blocker SB 253 has no equivalent of.
+    from app.models import ReportingPeriod
+    p = ReportingPeriod(organisation_id=org.id, label="FY25", start_date="2025-01-01",
+                        end_date="2025-12-31", frozen=False)
+    db.add(p); db.commit(); db.refresh(p)
+    run = compute_co2e(db, org.id, reporting_period_id=p.id)
     return org, run
 
 
@@ -81,7 +88,8 @@ def test_sb253_applies_the_scope3_and_boundary_gates(db, unscreened):
     from app.reports.secr import secr_report
     org, run = unscreened
     sb = sb253_report(db, org.id, run_id=run.id, assurance_level="limited")
-    secr = secr_report(db, org.id, run_id=run.id, intensity_denominator=1.0)
+    secr = secr_report(db, org.id, run_id=run.id, intensity_denominator=1.0,
+                       intensity_denominator_period_days=365)
     assert sb["filing_ready"] is False
     # Whatever blocks SECR's boundary claim must block SB 253's too.
     assert set(secr["blockers"]) <= set(sb["blockers"])

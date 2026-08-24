@@ -69,7 +69,13 @@ def test_full_evidence_pack(db):
                             kg_co2e_per_kwh=0.0, coverage_kwh=1000.0, gwp_set="AR6",
                             start_date="2025-01-01", end_date="2025-12-31"))
     db.commit()
-    run = compute_co2e(db, org.id)
+    # Period-scoped: the Actions-pillar intensity ratio divides a period total by a
+    # per-period denominator, so the numerator's span has to be knowable.
+    from app.models import ReportingPeriod
+    _p = ReportingPeriod(organisation_id=org.id, label="FY25", start_date="2025-01-01",
+                         end_date="2025-12-31", frozen=False)
+    db.add(_p); db.commit(); db.refresh(_p)
+    run = compute_co2e(db, org.id, reporting_period_id=_p.id)
     db.add(EmissionsTarget(organisation_id=org.id, name="halve by 2030",
                            target_type="near_term", scope_coverage="1+2",
                            base_run_id=run.id, base_year=2025, target_year=2030,
@@ -81,10 +87,12 @@ def test_full_evidence_pack(db):
     db.commit()
 
     r = ecovadis_readiness(db, org.id, intensity_denominator=2.0,
+                           intensity_denominator_period_days=365,
                            denominator_unit="GBP million revenue",
                            has_environmental_policy=True, iso_14001_certified=True,
                            published_sustainability_report=True)
-    assert r["assessment_ready"] is True and r["blockers"] == []
+    assert r["assessment_ready"] is True, r["blockers"]
+    assert r["blockers"] == []
 
     # Results: dual Scope 2 reported; market lowered by the REC
     k = r["kpis"]

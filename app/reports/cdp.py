@@ -13,6 +13,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import CalculationRun
+from ..services.comparability import denominator_period_comparable
 from .summary import summary, run_factor_sources
 from .scope3 import category_tco2e
 from ..services.ghgp import scope3_completeness
@@ -23,6 +24,7 @@ from ..services.residual_mix import scope2_residual_mix_completeness
 def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
                intensity_denominator: Optional[float] = None,
                intensity_denominator_unit: Optional[str] = None,
+               intensity_denominator_period_days: Optional[int] = None,
                verification_status: str = "no_third_party_verification") -> dict:
     s = summary(db, organisation_id=organisation_id, run_id=run_id)
     run_info = s.get("run")
@@ -44,6 +46,16 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
                 and math.isfinite(intensity_denominator) and intensity_denominator > 0)
     if not denom_ok:
         blockers.append("intensity_denominator required (finite, > 0) for C6.10")
+    else:
+        # A denominator is a quantity PER PERIOD, and C6.10 divides a period-scoped total
+        # by it. GRI has gated this since it existed; C6.10 accepted a bare float, so the
+        # SAME run and the SAME denominator made one renderer refuse and this one publish
+        # a ratio out by the ratio of the spans — with both inputs individually correct.
+        _dp = denominator_period_comparable(db, run, intensity_denominator_period_days,
+                                            ratio_name="C6.10 intensity")
+        if _dp:
+            blockers.append(_dp)
+
     # CDP C6.5 IS the 15-category Scope 3 grid — screen all 15.
     blockers.extend(scope3_completeness(db, run).get("blockers", []))
     blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))

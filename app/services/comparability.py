@@ -29,6 +29,8 @@ from sqlalchemy.orm import Session
 
 from ..models import ReportingPeriod
 from .calc import _parse_iso_date
+from .boundary import boundary_comparable
+from .residual_mix import residual_mix_comparable
 
 # How far two period lengths may differ before a delta between them is refused. Stated
 # as a constant and echoed in every payload that relies on it, because a silent
@@ -191,3 +193,58 @@ def denominator_period_comparable(db: Session, run, denominator_period_days,
                 f"{max(d_run, d_den) / min(d_run, d_den):.2f}. Supply a denominator for "
                 f"the same period as the run.")
     return None
+
+
+def gwp_comparable(run_a, run_b, *, label_a: str, label_b: str,
+                   quantity: str) -> Optional[str]:
+    """A reason two runs' totals cannot be subtracted because they were characterised on
+    different GWP vintages, or None.
+
+    Was re-typed inline in three renderers, each with its own wording. One detector, one
+    sentence — the same rule `boundary_difference` states for itself.
+    """
+    if run_a.gwp_set == run_b.gwp_set:
+        return None
+    return (f"the {label_a} run used {run_a.gwp_set} and the {label_b} run used "
+            f"{run_b.gwp_set} — a change of GWP vintage moves the totals on its own, so "
+            f"the two are not comparable and {quantity} would report a change of metric "
+            f"as a real change")
+
+
+def cross_run_gates(db: Session, run_a, run_b, *, label_a: str, label_b: str,
+                    quantity: str, measures: str, prefix: str = "") -> list:
+    """EVERY reason two runs cannot be subtracted, in one call.
+
+    THE POINT OF THIS FUNCTION IS THAT THERE IS ONLY ONE OF IT.
+
+    Before it existed, each renderer that subtracted two runs assembled its own set. GRI
+    applied four gates; ISO 14064-2 re-implemented the boundary test as a bare
+    `consolidation_approach !=` comparison, which a DIVESTMENT leaves untouched, and so
+    published an entity leaving the group as a substantiated project reduction with an
+    empty blocker list; EcoVadis omitted the boundary gate entirely while its comment
+    claimed "the same comparability gates" as GRI. Every new framework entry was a fresh
+    opportunity to forget one, and nothing structurally prevented it.
+
+    So the gates are not offered as parts to be assembled. A renderer asks the question
+    "can these two runs be subtracted?" and gets every answer, or it is not asking the
+    question properly.
+
+    `prefix` is for renderers that tag their blockers by clause ("305-5: "). It changes
+    the label, never the set.
+    """
+    reasons = [
+        # Elapsed time — the dimension the arithmetic is blindest to, since both totals
+        # are correct for the span they cover.
+        period_comparable(db, run_a, run_b, label_a=label_a, label_b=label_b,
+                          quantity=quantity, measures=measures),
+        # Consolidation approach AND entity population. A divestment reads as a reduction
+        # and an acquisition as an increase, with no decarbonisation either way.
+        boundary_comparable(db, run_a, run_b, label_a=label_a, label_b=label_b,
+                            quantity=quantity),
+        gwp_comparable(run_a, run_b, label_a=label_a, label_b=label_b, quantity=quantity),
+        # The market-based total moves when uncovered load starts being priced at the
+        # residual mix instead of the grid average. A "reduction" spanning that change is
+        # a methodology artefact.
+        residual_mix_comparable(db, run_a, run_b),
+    ]
+    return [f"{prefix}{r}" if prefix else r for r in reasons if r]

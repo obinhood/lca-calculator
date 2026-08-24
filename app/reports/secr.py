@@ -24,6 +24,7 @@ from ..models import ActivityRecord, CalculationRun, EmissionLineItem
 from ..services.units import convert, UnitConversionError
 from ..services.boundary import boundary_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
+from ..services.comparability import denominator_period_comparable
 from .summary import summary, run_factor_sources
 from ..services.frozen import parse_detail
 
@@ -150,7 +151,8 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
 
 def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
                 intensity_denominator: Optional[float] = None,
-                intensity_denominator_unit: Optional[str] = None) -> dict:
+                intensity_denominator_unit: Optional[str] = None,
+                intensity_denominator_period_days: Optional[int] = None) -> dict:
     """SECR disclosure payload for one run (latest for the org by default)."""
     s = summary(db, organisation_id=organisation_id, run_id=run_id)
     run_info = s.get("run")
@@ -186,6 +188,13 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
 
     intensity = None
     if intensity_denominator and math.isfinite(intensity_denominator) and intensity_denominator > 0:
+        # SECR's ratio divides a period-scoped total by a per-period quantity. GRI gated
+        # this and SECR did not, so one renderer refused the exact denominator the other
+        # published a 4x-wrong ratio from.
+        _dp = denominator_period_comparable(db, run, intensity_denominator_period_days,
+                                            ratio_name="SECR intensity ratio")
+        if _dp:
+            blockers.append(_dp)
         intensity = {
             "tco2e_scope1_and_2_location": round((scope1_kg + scope2_loc_kg) / 1000.0
                                                  / intensity_denominator, 6),
