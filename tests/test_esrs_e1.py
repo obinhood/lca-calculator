@@ -49,7 +49,8 @@ def seeded(db):
 
 def test_esrs_e1_golden_values(db, seeded):
     org, run = seeded
-    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0)
+    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0,
+                       revenue_period_days=365)
     e = r["e1_6_gross_ghg_emissions_tco2e"]
     assert e["scope1"] == pytest.approx(0.5486)
     assert e["scope2_location_based"] == pytest.approx(0.204)
@@ -83,7 +84,8 @@ def test_esrs_e1_renewable_split_from_rec(db, seeded):
                             start_date="2025-01-01", end_date="2025-12-31"))
     db.commit()
     run = compute_co2e(db, org.id)
-    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0)
+    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0,
+                       revenue_period_days=365)
     energy = r["e1_5_energy_consumption"]
     # 700 of 1200 kWh contractually covered by the REC -> 0.7 MWh renewable
     assert energy["electricity_renewable_contractual_mwh"] == pytest.approx(0.7)
@@ -102,7 +104,8 @@ def test_esrs_e1_biogenic_separate(db, seeded):
                        unit="kg", geo="GB", factor_id=f.id)
     db.add(a); db.commit()
     run = compute_co2e(db, org.id)
-    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0)
+    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0,
+                       revenue_period_days=365)
     e = r["e1_6_gross_ghg_emissions_tco2e"]
     assert e["biogenic_co2_separate"] == pytest.approx(0.02)    # 20 kg, own line
     # and never netted into the gross totals
@@ -113,7 +116,8 @@ def test_esrs_e1_blocks_partial_run(db, seeded):
     org, _ = seeded
     _activity(db, org.id, None, "widgets", 5, "kg")             # unmapped
     run = compute_co2e(db, org.id)
-    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0)
+    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0,
+                       revenue_period_days=365)
     assert r["disclosure_ready"] is False
     assert any("PARTIAL" in b for b in r["blockers"])
 

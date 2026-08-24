@@ -1,6 +1,7 @@
 import pytest
 
-from app.models import EmissionFactor, ActivityRecord, Organisation, MarketInstrument
+from app.models import (EmissionFactor, ActivityRecord, Organisation, MarketInstrument,
+                        ReportingPeriod)
 from app.services.calc import compute_co2e
 from app.reports.secr import secr_report, DIESEL_KWH_PER_LITRE_DEMO
 
@@ -37,14 +38,20 @@ def seeded(db):
     _activity(db, org.id, f_el.id, "electricity", 1200, "kWh")
     _activity(db, org.id, f_gas.id, "gas", 800, "kWh")
     _activity(db, org.id, f_d.id, "diesel", 150, "L")
-    run = compute_co2e(db, org.id)
+    # Scoped to a reporting year: SECR's intensity ratio divides a period-scoped total by
+    # a per-period denominator, so the numerator's span has to be knowable.
+    p = ReportingPeriod(organisation_id=org.id, label="FY25", start_date="2025-01-01",
+                        end_date="2025-12-31", frozen=False)
+    db.add(p); db.commit(); db.refresh(p)
+    run = compute_co2e(db, org.id, reporting_period_id=p.id)
     return org, run
 
 
 def test_secr_golden_values(db, seeded):
     org, run = seeded
     r = secr_report(db, org.id, run_id=run.id,
-                    intensity_denominator=2.0, intensity_denominator_unit="£M revenue")
+                    intensity_denominator=2.0, intensity_denominator_unit="£M revenue",
+                    intensity_denominator_period_days=365)
     e = r["emissions_tco2e"]
     # Scope 1: gas 800*0.184 + diesel 150*2.676 = 147.2 + 401.4 = 548.6 kg
     assert e["scope1"] == pytest.approx(0.5486)
@@ -77,7 +84,8 @@ def test_secr_blocks_partial_run(db, seeded):
     org, run0 = seeded
     _activity(db, org.id, None, "widgets", 5, "kg")     # unmapped
     run = compute_co2e(db, org.id)
-    r = secr_report(db, org.id, run_id=run.id, intensity_denominator=1.0)
+    r = secr_report(db, org.id, run_id=run.id, intensity_denominator=1.0,
+                    intensity_denominator_period_days=365)
     assert r["disclosure_ready"] is False
     assert any("PARTIAL" in b for b in r["blockers"])
     assert any("coverage" in b for b in r["blockers"])
@@ -87,7 +95,8 @@ def test_secr_blocks_stale_run(db, seeded):
     org, run = seeded
     f_el = db.query(EmissionFactor).filter(EmissionFactor.category == "electricity").first()
     _activity(db, org.id, f_el.id, "electricity", 999, "kWh")   # added AFTER run
-    r = secr_report(db, org.id, run_id=run.id, intensity_denominator=1.0)
+    r = secr_report(db, org.id, run_id=run.id, intensity_denominator=1.0,
+                    intensity_denominator_period_days=365)
     assert r["disclosure_ready"] is False
     assert any("STALE" in b for b in r["blockers"])
 
@@ -99,7 +108,8 @@ def test_secr_market_based_reflects_rec(db, seeded):
                             start_date="2025-01-01", end_date="2025-12-31"))
     db.commit()
     run = compute_co2e(db, org.id)
-    r = secr_report(db, org.id, run_id=run.id, intensity_denominator=1.0)
+    r = secr_report(db, org.id, run_id=run.id, intensity_denominator=1.0,
+                    intensity_denominator_period_days=365)
     e = r["emissions_tco2e"]
     assert e["scope2_location_based"] == pytest.approx(0.204)
     assert e["scope2_market_based"] == pytest.approx(0.0)       # REC-covered

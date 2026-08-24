@@ -26,7 +26,9 @@ from sqlalchemy.orm import Session
 from ..models import CalculationRun, EmissionsTarget, MarketInstrument, AssuranceEngagement
 from ..services.boundary import boundary_completeness, boundary_comparable
 from ..services.residual_mix import residual_mix_comparable
-from ..services.comparability import period_comparable, period_payload
+from ..services.comparability import (period_comparable, period_payload,
+                                      cross_run_gates,
+                                      denominator_period_comparable)
 from .summary import summary
 from .secr import _energy_kwh
 
@@ -50,6 +52,7 @@ def _status(evidence: list, gaps: list) -> str:
 def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] = None,
                        baseline_run_id: Optional[int] = None,
                        intensity_denominator: Optional[float] = None,
+                       intensity_denominator_period_days: Optional[int] = None,
                        denominator_unit: str = "revenue",
                        has_environmental_policy: bool = False,
                        iso_14001_certified: bool = False,
@@ -112,6 +115,11 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
                             "expected for a strong Environment score")
     intensity = None
     if intensity_denominator and intensity_denominator > 0:
+        # Same per-period rule as every other intensity ratio in this codebase.
+        _dp = denominator_period_comparable(db, run, intensity_denominator_period_days,
+                                            ratio_name="EcoVadis intensity")
+        if _dp:
+            blockers.append(_dp)
         intensity = round((scope1 + scope2_loc) / 1000.0 / intensity_denominator, 6)
         results_evidence.append(f"Intensity: {intensity} tCO2e (Scope 1+2 location) "
                                 f"per {denominator_unit}")
@@ -158,24 +166,10 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
         elif (base.total_co2e or 0.0) <= 0:
             actions_gaps.append("baseline run has no emissions to compare against")
         else:
-            if base.gwp_set != run.gwp_set:
-                blockers.append(
-                    f"trend_vs_baseline: the baseline run used {base.gwp_set} GWP but this "
-                    f"run used {run.gwp_set} — a trend across GWP vintages is a change of "
-                    f"metric, not a measured reduction; recompute both on one vintage")
-            if (_rm := residual_mix_comparable(db, base, run)):
-                blockers.append(f"trend_vs_baseline: {_rm}")
-            if (_pc := period_comparable(db, base, run, label_a="baseline",
-                                         label_b="current", quantity="the trend",
-                                         measures="a measured reduction")):
-                blockers.append(f"trend_vs_baseline: {_pc}")
-            # The comment above claims "the same comparability gates" as GRI 305-5. GRI
-            # applies FOUR; this block applied three. The missing one is the boundary:
-            # a divestment between the two runs is the single most flattering thing that
-            # can happen to an Actions-pillar trend, and it is not action.
-            if (_bc := boundary_comparable(db, base, run, label_a="baseline",
-                                           label_b="current", quantity="the trend")):
-                blockers.append(f"trend_vs_baseline: {_bc}")
+            blockers.extend(cross_run_gates(
+                db, base, run, label_a="baseline", label_b="current",
+                quantity="the trend", measures="a measured reduction",
+                prefix="trend_vs_baseline: "))
             trend_comparability = period_payload(
                 db, base, run, key_a="baseline", key_b="current",
                 note="A trend is only evidence of action if the two runs cover the same "

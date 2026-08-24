@@ -28,7 +28,7 @@ from ..services.residual_mix import (
 )
 from ..services.comparability import (
     PERIOD_TOLERANCE_PCT, period_comparable, period_payload, period_info,
-    denominator_period_comparable,
+    denominator_period_comparable, cross_run_gates,
 )
 from .secr import _energy_kwh
 
@@ -126,28 +126,9 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
             }
             # Elapsed time — the dimension the arithmetic is blindest to, since both
             # totals are correct for the span they cover.
-            _pc = period_comparable(db, base, run, label_a="base", label_b="reporting",
-                                    quantity="the 305-5 reduction", measures="abatement")
-            if _pc:
-                blockers.append(f"305-5: {_pc}")
-            # Consolidation approach and entity population: a divestment reads as a
-            # reduction and an acquisition as an increase, with no decarbonisation either
-            # way. Same detector SBTi uses to re-base a target (GHGP Ch.5).
-            _bc = boundary_comparable(db, base, run, label_a="base", label_b="reporting",
-                                      quantity="the 305-5 reduction")
-            if _bc:
-                blockers.append(f"305-5: {_bc}")
-            if base.gwp_set != run.gwp_set:
-                blockers.append(f"305-5 base run used {base.gwp_set} but this run used "
-                                f"{run.gwp_set} — reductions across GWP vintages are not "
-                                f"comparable")
-            # Same class of trap as the GWP check above: the market-based total moves when
-            # uncovered Scope 2 load starts being priced at the residual mix instead of the
-            # grid average. A 'reduction' spanning that change is a methodology artefact,
-            # not abatement.
-            _rm = residual_mix_comparable(db, base, run)
-            if _rm:
-                blockers.append(f"305-5: {_rm}")
+            blockers.extend(cross_run_gates(
+                db, base, run, label_a="base", label_b="reporting",
+                quantity="the 305-5 reduction", measures="abatement", prefix="305-5: "))
     energy = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
     energy_mwh = {c: round(energy[c] / 1000.0, 6) for c in ("electricity", "gas", "diesel")}
     total_mwh = round(energy["total_kwh"] / 1000.0, 6)
