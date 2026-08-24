@@ -2408,6 +2408,7 @@ async def pact_events(request: Request, db: Session = Depends(get_db)):
 
 @app.get("/reports/sbti_v2")
 def get_sbti_v2_report(run_id: Optional[int] = None,
+                       base_run_id: Optional[int] = None,
                        turnover_eur: Optional[float] = None,
                        fte: Optional[int] = None,
                        balance_sheet_eur: Optional[float] = None,
@@ -2429,9 +2430,18 @@ def get_sbti_v2_report(run_id: Optional[int] = None,
             .order_by(CalculationRun.id.desc()).first()
     if run is None:
         raise HTTPException(status_code=404, detail="run not found for this organisation")
+    base_run = None
+    if base_run_id is not None:
+        base_run = db.query(CalculationRun).filter(
+            CalculationRun.id == base_run_id,
+            CalculationRun.organisation_id == org.id).first()
+        if base_run is None:
+            raise HTTPException(status_code=404,
+                                detail="base_run_id not found for this organisation")
     return JSONResponse(with_guidance(sbti_v2_report(
         db, run, turnover_eur=turnover_eur, fte=fte,
-        balance_sheet_eur=balance_sheet_eur, high_income_country=high_income_country)))
+        balance_sheet_eur=balance_sheet_eur, high_income_country=high_income_country,
+        base_run=base_run)))
 
 
 @app.post("/sbti_v2/scope2_conformance")
@@ -2502,6 +2512,44 @@ def declare_series_key(series_key: str = Query(...),
     db.commit()
     return {"series_key": series_key.strip(), "activities_updated": len(rows),
             "activity_ids": [a.id for a in rows]}
+
+
+@app.get("/reports/series_screen_history")
+def get_series_screen_history(period_ids: str = Query(...),
+                              org: Organisation = Depends(current_org),
+                              db: Session = Depends(get_db)):
+    """Screen an ORDERED run of periods and reclassify persistent deviations.
+
+    `period_ids` is a comma-separated list in chronological order, oldest first.
+
+    compare() screens ONE pair and cannot see a persistent shift — with two periods
+    there is no way to tell a step from a spike. classify_level_shifts needs an
+    accumulated history, and nothing assembled one, so the ISAE 3410 A101 treatment the
+    module documented was unreachable: a site being commissioned was filed as a data
+    defect every period, forever.
+    """
+    from .services.series_screen import compare, classify_level_shifts
+    ids = [p.strip() for p in period_ids.split(",") if p.strip()]
+    try:
+        ids = [int(p) for p in ids]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="period_ids must be integers")
+    if len(ids) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail="at least three periods are required: a level shift is a deviation "
+                   "persisting across consecutive comparisons, and two periods yield "
+                   "only one comparison")
+    payloads = []
+    for baseline, current in zip(ids, ids[1:]):
+        payloads.append(compare(db, org.id, current, baseline))
+    out = classify_level_shifts(payloads)
+    return {"period_ids": ids,
+            "comparisons": payloads,
+            "level_shifts": out["level_shifts"],
+            "anomalies": out["anomalies"],
+            "min_consecutive_periods": out["min_consecutive_periods"],
+            "adjacency_note": out["adjacency_note"]}
 
 
 @app.get("/activities/series")

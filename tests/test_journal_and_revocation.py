@@ -188,3 +188,36 @@ def test_one_tenant_cannot_revoke_another_tenants_partner(db):
     assert out["revoked"] is False
     assert pact_host.issue_token(db, created["client_id"],
                                  created["client_secret"])["ok"] is True
+
+
+# --- the last two orphans: built, correct, and unreachable -------------------------------
+
+def test_the_c8_3_recalculation_trigger_is_reachable_from_an_endpoint():
+    """README listed C8.3 triggers as shipped while recalculation_triggers() had ZERO
+    callers outside its own tests — measurable, correct, and unreachable."""
+    import inspect
+    from app.reports import sbti_v2 as report
+    src = inspect.getsource(report)
+    assert "recalculation_triggers(" in src, (
+        "sbti_v2_report must call it, or no endpoint can ever emit a C8.3 trigger")
+    import app.main as main_mod
+    assert any(getattr(r, "path", "") == "/reports/sbti_v2" for r in main_mod.app.routes)
+
+
+def test_omitting_the_base_run_omits_the_answer_rather_than_denying_it():
+    """A bare False would say 'no recalculation is required'. We were not asked."""
+    import inspect
+    src = inspect.getsource(__import__("app.reports.sbti_v2", fromlist=["x"]))
+    assert "recalculation = None" in src
+    assert "NOT that no recalculation is due" in src
+
+
+def test_the_level_shift_classifier_is_reachable_from_an_endpoint():
+    """classify_level_shifts needs an accumulated history and nothing assembled one, so
+    a site being commissioned was filed as a data defect every period, forever."""
+    import app.main as main_mod
+    paths = {getattr(r, "path", "") for r in main_mod.app.routes}
+    assert "/reports/series_screen_history" in paths
+    import inspect
+    src = inspect.getsource(main_mod.get_series_screen_history)
+    assert "classify_level_shifts" in src

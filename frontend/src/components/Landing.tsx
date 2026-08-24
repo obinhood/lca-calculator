@@ -200,7 +200,7 @@ export default function Landing({ onSignIn, onGetStarted, onNavigate }:
         <div className="mk-facts">
           {[
             { v: "1,470+", l: "automated tests", d: "including property-based tests and hand-computed calculation oracles" },
-            { v: "123", l: "API endpoints", d: "everything the interface does is available programmatically" },
+            { v: "124", l: "API endpoints", d: "everything the interface does is available programmatically" },
             { v: "Immutable", l: "calculation runs", d: "a filed run is never restated — corrections supersede, they do not overwrite" },
             { v: "Fail-closed", l: "on every disclosure", d: "a gate that cannot fail is treated as a defect, not a feature" },
           ].map((f) => (

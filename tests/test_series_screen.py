@@ -467,3 +467,61 @@ def test_screen_endpoint_404s_on_an_unknown_period(env):
                    params={"current_period_id": 999999,
                            "baseline_period_id": base_id})
     assert r.status_code == 404
+
+
+# --- adjacency: an intermittent anomaly is not a level shift ------------------
+
+def _finding(series="site-A", direction="increase", dev=0.6, threshold=0.26):
+    return {"series_key": series, "unit": "kWh", "direction": direction,
+            "log_deviation": dev, "threshold": threshold, "ratio": 1.8}
+
+
+def _payload(findings):
+    return {"available": True, "findings": findings}
+
+
+def test_an_intermittent_anomaly_is_not_reclassified_as_a_level_shift():
+    """`runs` accumulated every finding for a series across the whole history and only
+    COUNTED them, so a series that spikes, returns to baseline and spikes again — the
+    definitional opposite of a step change — was filed as a level shift, dropped to
+    informational and routed away from the anomaly list."""
+    from app.services.series_screen import classify_level_shifts
+    history = [
+        _payload([_finding()]),      # spike
+        _payload([]),                # back to baseline
+        _payload([_finding()]),      # spike again
+        _payload([]),                # baseline
+        _payload([_finding()]),      # and again
+    ]
+    out = classify_level_shifts(history)
+    assert out["level_shifts"] == [], (
+        "three flags separated by clean periods are an intermittent anomaly, not a "
+        "persistent step")
+    assert len(out["anomalies"]) == 3
+
+
+def test_a_genuinely_persistent_shift_is_still_reclassified():
+    from app.services.series_screen import classify_level_shifts
+    history = [_payload([_finding(dev=0.60)]),
+               _payload([_finding(dev=0.61)]),
+               _payload([_finding(dev=0.59)])]
+    out = classify_level_shifts(history)
+    assert len(out["level_shifts"]) == 1
+    shift = out["level_shifts"][0]
+    assert shift["consecutive_periods"] == 3
+    assert shift["severity"] == "informational"
+    assert shift["routing"] == "base_year_recalculation"
+
+
+def test_flags_outside_the_streak_remain_anomalies():
+    """A series can have a persistent shift AND an unrelated spike; the spike must not
+    be absorbed into the reclassification."""
+    from app.services.series_screen import classify_level_shifts
+    history = [_payload([_finding(dev=0.60)]),
+               _payload([_finding(dev=0.61)]),
+               _payload([_finding(dev=0.59)]),
+               _payload([]),
+               _payload([_finding(dev=1.9, direction="increase")])]
+    out = classify_level_shifts(history)
+    assert len(out["level_shifts"]) == 1
+    assert len(out["anomalies"]) == 1 and out["anomalies"][0]["log_deviation"] == 1.9
