@@ -103,7 +103,12 @@ def esos_report(db: Session, organisation_id: int, run_id: Optional[int] = None)
     energy = _energy_kwh(db, run)
     total_kwh = energy["total_kwh"]
     by_carrier = {c: energy[c] for c in ("electricity", "gas", "diesel")}
-    significant = {c: round(100.0 * v / total_kwh, 1) for c, v in by_carrier.items()} if total_kwh else {}
+    # The share denominator is the REPORTED carriers, not all energy the org consumed.
+    # Where carriers are omitted those two differ, and calling the result a share of
+    # "total energy" would overstate every carrier by the same factor.
+    omitted = energy.get("carriers_omitted") or {}
+    significant = ({c: round(100.0 * v / total_kwh, 1) for c, v in by_carrier.items()}
+                   if total_kwh else {})
 
     # ESOS was the one renderer with no completeness gate at all — an incomplete or
     # stale inventory would still emit a "ready" energy figure. Same doctrine as
@@ -116,6 +121,18 @@ def esos_report(db: Session, organisation_id: int, run_id: Optional[int] = None)
     if total_kwh <= 0:
         blockers.append("no energy-carrier activity in this run")
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    # _energy_kwh MEASURES which energy-denominated carriers it could not include, and
+    # this renderer used to discard that and publish "total energy consumption" anyway —
+    # over a denominator the engine itself knew was short. ESOS Regulation 4 is an audit
+    # of TOTAL energy consumption, so an inventory known to be incomplete is not a
+    # smaller total, it is not the total. Fail closed, and name the carriers.
+    if omitted:
+        blockers.append(
+            f"energy-denominated activities in {', '.join(sorted(omitted))} are not "
+            f"included in this kWh total, though their emissions are in the figures "
+            f"beside it — ESOS assesses TOTAL energy consumption, so a total measured as "
+            f"incomplete cannot be published as one. Map these carriers or state their "
+            f"energy explicitly.")
 
     return {
         "framework": "UK ESOS",
@@ -124,7 +141,14 @@ def esos_report(db: Session, organisation_id: int, run_id: Optional[int] = None)
         "run": run_info,
         "total_energy_kwh": round(total_kwh, 3),
         "by_carrier_kwh": {c: round(v, 3) for c, v in by_carrier.items()},
-        "significant_energy_use_pct": significant,
-        "note": "Total energy consumption across the org's energy carriers; ESOS "
-                "audits significant energy use and identifies efficiency measures.",
+        # Named for the denominator it actually uses.
+        "share_of_reported_carriers_pct": significant,
+        "carriers_reported": energy.get("carriers_reported"),
+        "carriers_omitted": sorted(omitted) if omitted else [],
+        "energy_basis": energy.get("basis"),
+        "energy_notes": energy.get("notes") or [],
+        "note": "Energy consumption across the carriers this run reports. ESOS audits "
+                "significant energy use and identifies efficiency measures. Shares are "
+                "over `total_energy_kwh` — which equals total consumption only when "
+                "`carriers_omitted` is empty.",
     }

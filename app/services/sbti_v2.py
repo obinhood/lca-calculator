@@ -161,7 +161,8 @@ def company_category(*, turnover_eur: Optional[float] = None,
 
 def significance(category_emissions_tco2e: dict, *,
                  outside_minimum_boundary_tco2e: Optional[dict] = None,
-                 wtw_uplift_tco2e: Optional[dict] = None) -> dict:
+                 wtw_uplift_tco2e: Optional[dict] = None,
+                 inventoried: Optional[set] = None) -> dict:
     """Which Scope 3 categories are significant under C5.7 / C14.1.
 
     `category_emissions_tco2e` maps GHGP Scope 3 category number to tCO2e as
@@ -174,8 +175,24 @@ def significance(category_emissions_tco2e: dict, *,
     outside = outside_minimum_boundary_tco2e or {}
     wtw = wtw_uplift_tco2e or {}
 
+    # A category the inventory never covered is UNKNOWN, not zero. Reading an absent key
+    # as 0.0 removed it from the denominator, gave it a 0.0% share, declared it not
+    # significant and dropped it from the C14.1 required target boundary — every one of
+    # those a positive statement derived from an absence. It also inflates every surviving
+    # category's share, because the denominator shrank to only what happened to be
+    # measured.
+    #
+    # `inventoried` is the set of categories the Scope 3 screen actually decided on. A
+    # category present there with 0.0 was MEASURED at zero and stays in the denominator;
+    # one missing from it was never measured and suspends the answer. Callers that do not
+    # pass it keep the old behaviour, so this cannot retroactively re-grade a filed run.
+    not_inventoried = ([c for c in DENOMINATOR_CATEGORIES if c not in inventoried]
+                       if inventoried is not None else [])
+
     in_denominator, excluded_above_boundary = {}, {}
     for cat in DENOMINATOR_CATEGORIES:
+        if cat in not_inventoried:
+            continue
         accounted = float(category_emissions_tco2e.get(cat, 0.0) or 0.0)
         above = float(outside.get(cat, 0.0) or 0.0)
         uplift = float(wtw.get(cat, 0.0) or 0.0)
@@ -184,6 +201,19 @@ def significance(category_emissions_tco2e: dict, *,
         in_denominator[cat] = value
         if above:
             excluded_above_boundary[cat] = above
+
+    if not_inventoried:
+        return {
+            "determinable": False,
+            "reason": f"scope 3 categories {not_inventoried} have not been inventoried, "
+                      f"so the categories-1-14 denominator is incomplete. Every share "
+                      f"computed against it would be overstated, and a category that was "
+                      f"never measured cannot be shown to sit below 5%. Screen them "
+                      f"(quantified, or declared not-applicable with a justification) "
+                      f"and recompute.",
+            "categories_not_inventoried": not_inventoried,
+            "denominator_tco2e": None, "significant": [], "shares": {},
+        }
 
     denominator = sum(in_denominator.values())
     if denominator <= 0:
@@ -208,6 +238,7 @@ def significance(category_emissions_tco2e: dict, *,
                              "other than WTW (C5.6.b, C14.1 fn21).",
         "significant": significant,
         "shares": {c: round(s * 100, 4) for c, s in sorted(shares.items())},
+        "categories_not_inventoried": [],
         "category_15_excluded_tco2e": (None if cat15 is None
                                        else round(float(cat15), 6)),
         "excluded_above_minimum_boundary_tco2e": {
