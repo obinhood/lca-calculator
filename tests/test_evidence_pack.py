@@ -260,8 +260,9 @@ def test_gaps_are_inside_the_hash(db):
     _, run = _run(db)
     before = build_evidence_pack(db, run, uncertainty_iterations=1000)["pack"]["content_hash"]
     original = ep._evidence_gaps
-    ep._evidence_gaps = lambda: [{"item": "X", "expected_by": "y",
-                                  "why_absent": "z", "what_would_close_it": "w"}]
+    ep._evidence_gaps = lambda coverage=None: [{"item": "X", "expected_by": "y",
+                                                "why_absent": "z",
+                                                "what_would_close_it": "w"}]
     try:
         after = build_evidence_pack(db, run, uncertainty_iterations=1000)["pack"]["content_hash"]
     finally:
@@ -456,3 +457,63 @@ def test_summary_survives_a_corrupt_row(db):
     db.commit()
     s = summary(db, organisation_id=org.id, run_id=run.id)
     assert s["total_co2e"] == run.total_co2e     # totals come from co2e, not details
+
+
+# --- two stamps, because the pack contains two kinds of thing ---------------------------
+
+def test_editing_a_factor_does_not_move_the_run_stamp(db):
+    """THE defect. One hash covered everything, including four sections that read LIVE
+    tables, so renaming a factor moved the stamp of an immutable run — and an assuror
+    comparing two packs could not tell "this is a different run" from "somebody renamed
+    a factor"."""
+    from app.models import EmissionFactor
+    _, run = _run(db)
+    first = build_evidence_pack(db, run, uncertainty_iterations=1000)["pack"]
+
+    f = db.query(EmissionFactor).first()
+    f.source = f"{f.source}-RENAMED"
+    db.commit()
+
+    second = build_evidence_pack(db, run, uncertainty_iterations=1000)["pack"]
+
+    assert second["content_hash"] == first["content_hash"], (
+        "the run did not change — a run CANNOT change — so the stamp an assuror holds "
+        "the run to must not move because the catalogue was edited underneath it")
+    assert second["current_state_hash"] != first["current_state_hash"], (
+        "...but the catalogue DID change, and seeing that is the reason those sections "
+        "are in the pack at all")
+
+
+def test_the_two_stamps_cover_disjoint_sections():
+    from app.services import evidence_pack as ep
+    frozen, live = set(ep._FROZEN_SECTIONS), set(ep._CURRENT_STATE_SECTIONS)
+    assert not (frozen & live), "a section cannot be both frozen and live-derived"
+    assert frozen | live == set(ep._SECTION_ORDER), (
+        "every section must be covered by exactly one stamp, or something in the pack is "
+        "unstamped and could be edited without either hash moving")
+
+
+def test_a_closed_gap_is_measured_on_the_run_not_asserted(db):
+    """The override-log gap read 'CLOSED — journals every binding decision' while the
+    automatic binding path wrote nothing, so an inventory with an EMPTY journal carried a
+    written statement that its audit trail was complete."""
+    from app.models import MappingAuditEvent
+    _, run = _run(db)
+
+    pack = build_evidence_pack(db, run, uncertainty_iterations=1000)
+    cov = pack["journal_coverage"]
+    gap = next(g for g in pack["evidence_gaps"]
+               if g["item"] == "Override log with before/after values")
+    if cov["bound_activities"] and not cov["unjournalled_activities"]:
+        assert gap["why_absent"].startswith("CLOSED, and measured on this run")
+
+    # Now empty the journal without changing anything else.
+    db.query(MappingAuditEvent).delete()
+    db.commit()
+    after = build_evidence_pack(db, run, uncertainty_iterations=1000)
+    gap2 = next(g for g in after["evidence_gaps"]
+                if g["item"] == "Override log with before/after values")
+    if after["journal_coverage"]["bound_activities"]:
+        assert gap2["why_absent"].startswith("OPEN on this run"), (
+            f"with an empty journal the control cannot be shown to have operated; got "
+            f"{gap2['why_absent']!r}")

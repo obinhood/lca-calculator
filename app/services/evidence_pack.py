@@ -38,7 +38,7 @@ from ..models import (
 # Bumped when the pack's CONTENT or hashing changes in a way that would alter the
 # content_hash of an unchanged run. Frozen into every pack so an old hash stays
 # attributable to the assembler that produced it.
-PACK_VERSION = "evp-v4"
+PACK_VERSION = "evp-v5"
 
 # Transaction detail is the largest section by far and an inventory can carry tens
 # of thousands of lines. It is capped, and a truncated pack SAYS SO in its own
@@ -390,13 +390,69 @@ _SECTION_ORDER = (
     "12_mapping_audit",
 )
 
+# WHICH SECTIONS DESCRIBE THE RUN, AND WHICH DESCRIBE THE CATALOGUE TODAY.
+#
+# The pack used to stamp ONE hash over everything and call it a reproduction guarantee.
+# Four of the twelve sections read live tables — the factor register carries live factor
+# metadata, transaction detail reads live activity fields, mapping decisions read live
+# mapping status, and the audit journal is org-wide — so editing a factor moved the hash
+# of a run that had not changed. An assuror comparing two packs for one run saw a
+# mismatch and could not tell "the run was restated" (impossible; runs are immutable)
+# from "somebody renamed a factor".
+#
+# Those sections are the right thing to show — seeing that a factor was edited under a
+# filed run is exactly what an assuror is looking for. The defect was labelling them as
+# frozen. So there are two stamps: one an assuror can hold the run to, and one that is
+# expected to move.
+_FROZEN_SECTIONS = (
+    "1_inventory_statement", "2_reporting_period", "3_organisational_boundary",
+    "7_completeness_controls", "8_data_quality_and_uncertainty",
+    "9_methodology", "10_readiness_and_standard", "11_screening_register",
+)
+_CURRENT_STATE_SECTIONS = (
+    "4_transaction_detail", "5_factor_register", "6_mapping_decisions",
+    "12_mapping_audit",
+)
 
-def _evidence_gaps() -> list:
+
+def _journal_gap(coverage: Optional[dict], item: str, expected_by: str,
+                 closed_text: str) -> dict:
+    """A control is CLOSED only if this run's own journal shows it operating."""
+    if coverage is None:
+        return {"item": item, "expected_by": expected_by,
+                "why_absent": f"NOT MEASURED for this run. {closed_text}",
+                "what_would_close_it": "Render the pack with journal coverage measured."}
+    bound, journalled = coverage["bound_activities"], coverage["journalled_activities"]
+    if bound and journalled >= bound:
+        return {"item": item, "expected_by": expected_by,
+                "why_absent": f"CLOSED, and measured on this run: all {bound} bound "
+                              f"activities carry a journal entry. {closed_text}",
+                "what_would_close_it": "Already closed."}
+    if not bound:
+        return {"item": item, "expected_by": expected_by,
+                "why_absent": "NOT APPLICABLE to this run: it binds no activities, so "
+                              "there is no binding decision to journal.",
+                "what_would_close_it": "Not applicable."}
+    return {"item": item, "expected_by": expected_by,
+            "why_absent": f"OPEN on this run: {bound - journalled} of {bound} bound "
+                          f"activities have no journal entry, so the audit trail is "
+                          f"incomplete for them. {closed_text}",
+            "what_would_close_it": "Re-run automatic mapping, or record the missing "
+                                   "decisions, so every bound activity is journalled."}
+
+
+def _evidence_gaps(coverage: Optional[dict] = None) -> list:
     """What an ISAE 3410 / ISSA 5000 file expects that this platform cannot produce.
 
     Named explicitly, with the reason and the change that would close each. A pack
     that silently omitted these would read as complete to the one reader who most
     needs to know it is not.
+
+    A gap marked CLOSED is now MEASURED against this run, not asserted. The override-log
+    gap said "CLOSED — journals every binding decision" while the automatic binding path
+    wrote nothing, so an inventory with an empty journal carried a written statement that
+    its audit trail was complete. Claiming a control exists is exactly the failure this
+    list was built to prevent, and the list was committing it.
     """
     return [
         {
@@ -411,22 +467,17 @@ def _evidence_gaps() -> list:
             "what_would_close_it": "Per-user authentication with an actor id written "
                                    "onto every mutation.",
         },
-        {
-            "item": "Override log with before/after values",
-            "expected_by": "Audit trail of changes to the mapping",
-            "why_absent": "CLOSED. services/mapping_audit.py journals every binding "
-                          "decision append-only with from_factor_id and to_factor_id; "
-                          "see section 12 and GET /mappings/audit.",
-            "what_would_close_it": "Already closed.",
-        },
-        {
-            "item": "Reviewer timestamp",
-            "expected_by": "When each judgement was made",
-            "why_absent": "CLOSED. Every journalled decision carries `at`, and "
-                          "GET /mappings/audit/as_at answers what an activity was "
-                          "bound to at a given moment.",
-            "what_would_close_it": "Already closed.",
-        },
+        _journal_gap(
+            coverage, "Override log with before/after values",
+            "Audit trail of changes to the mapping",
+            "services/mapping_audit.py journals every binding decision append-only "
+            "with from_factor_id and to_factor_id; see section 12 and "
+            "GET /mappings/audit."),
+        _journal_gap(
+            coverage, "Reviewer timestamp",
+            "When each judgement was made",
+            "Every journalled decision carries `at`, and GET /mappings/audit/as_at "
+            "answers what an activity was bound to at a given moment."),
         {
             "item": "GL account and cost centre per transaction",
             "expected_by": "Reconciliation of the inventory to the financial ledger",
@@ -455,17 +506,39 @@ def _evidence_gaps() -> list:
     ]
 
 
-def _content_hash(sections: dict, gaps: list, run_id: int) -> str:
-    """SHA-256 over the pack's CONTENT — never over its generation time.
+def _hash_over(sections: dict, keys, run_id: int, extra=None) -> str:
+    """SHA-256 over a named subset of the pack — never over its generation time.
 
-    `generated_at` is excluded deliberately: a hash that moved every time the pack
-    was rendered could not verify anything, which is the whole purpose of stamping it.
+    `generated_at` is excluded deliberately: a hash that moved every time the pack was
+    rendered could not verify anything, which is the whole purpose of stamping it.
     """
     payload = {"v": PACK_VERSION, "run": run_id,
-               "sections": {k: sections[k] for k in _SECTION_ORDER if k in sections},
-               "evidence_gaps": gaps}
+               "sections": {k: sections[k] for k in keys if k in sections}}
+    if extra is not None:
+        payload["evidence_gaps"] = extra
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _content_hash(sections: dict, gaps: list, run_id: int) -> str:
+    """The stamp an assuror can hold the RUN to.
+
+    Covers only sections derived from frozen run state, so it is stable for the life of
+    the run: two calls years apart return the same value unless the run itself changed,
+    and a run cannot change. See _FROZEN_SECTIONS for why the other four are excluded.
+    """
+    return _hash_over(sections, _FROZEN_SECTIONS, run_id, extra=gaps)
+
+
+def _current_state_hash(sections: dict, run_id: int) -> str:
+    """The stamp over what the CATALOGUE says today.
+
+    Expected to move: it changes when a factor is edited, an activity re-mapped or the
+    journal appended to. Comparing it between two packs for one run is how an assuror
+    sees that something moved underneath a filed figure — which is the reason those
+    sections are in the pack at all.
+    """
+    return _hash_over(sections, _CURRENT_STATE_SECTIONS, run_id)
 
 
 def build_evidence_pack(db: Session, run: CalculationRun, *,
@@ -473,18 +546,19 @@ def build_evidence_pack(db: Session, run: CalculationRun, *,
                         uncertainty_iterations: int = 10_000) -> dict:
     """The full working-paper file for one immutable run, hash-stamped.
 
-    Two calls made back to back return the same `content_hash`. A call made years later
-    MAY NOT, and the pack no longer claims otherwise.
+    TWO STAMPS, because the pack contains two kinds of thing.
 
-    Most of the file is frozen run state, but several sections deliberately describe the
-    CURRENT catalog — the factor register carries live factor metadata, the mapping
-    sections read live mapping status and the org-wide journal. Those are the right thing
-    to show an assuror (they are how you see that a factor was edited under a filed run),
-    but it means an edit to the catalog moves the hash of a run that has not changed.
-    Stamping that as a reproduction guarantee was a false assurance in the one document
-    whose whole purpose is assurance, so it is stated instead of promised. Splitting the
-    stamp into a frozen-sections hash and a current-state hash is the real fix and is not
-    done here.
+    `content_hash` covers the sections derived from frozen run state. It is stable for the
+    life of the run: two calls years apart agree, because a run cannot change, so a
+    mismatch means the pack is not of that run.
+
+    `current_state_hash` covers the sections that deliberately describe the CURRENT
+    catalogue — the factor register, transaction detail, live mapping status and the
+    org-wide journal. Those belong in the pack: seeing that a factor was edited under a
+    filed run is exactly what an assuror is looking for. But they move, and a single hash
+    over both meant an edit to the catalogue moved the stamp of an immutable run, so an
+    assuror comparing two packs could not tell "this is a different run" from "somebody
+    renamed a factor".
     """
     from ..reports.summary import summary
     from .calc import _utcnow_iso
@@ -507,7 +581,24 @@ def build_evidence_pack(db: Session, run: CalculationRun, *,
         "11_screening_register": _s11_screening_register(db, run),
         "12_mapping_audit": _s12_mapping_audit(db, run),
     }
-    gaps = _evidence_gaps()
+    # Measure whether the journal actually covers THIS run's bound activities, rather
+    # than asserting that the control exists.
+    from ..models import ActivityRecord, MappingAuditEvent
+    _bound = {a for (a,) in db.query(ActivityRecord.id).filter(
+        ActivityRecord.organisation_id == run.organisation_id,
+        ActivityRecord.factor_id.isnot(None)).all()}
+    _journalled = {a for (a,) in db.query(MappingAuditEvent.activity_id).filter(
+        MappingAuditEvent.organisation_id == run.organisation_id).distinct().all()
+        if a in _bound}
+    journal_coverage = {
+        "bound_activities": len(_bound),
+        "journalled_activities": len(_journalled),
+        "unjournalled_activities": len(_bound) - len(_journalled),
+        "note": "Measured on this organisation's bound activities. A control is only "
+                "closed if it can be shown to have operated, not because the code that "
+                "implements it exists.",
+    }
+    gaps = _evidence_gaps(journal_coverage)
 
     return {
         "pack": {
@@ -516,18 +607,26 @@ def build_evidence_pack(db: Session, run: CalculationRun, *,
             "organisation": {"id": org.id if org else run.organisation_id,
                              "name": org.name if org else None},
             "content_hash": _content_hash(sections, gaps, run.id),
+            "current_state_hash": _current_state_hash(sections, run.id),
             "generated_at": _utcnow_iso(),
-            "hash_note": "content_hash covers every section and the evidence-gap list. "
-                         "generated_at is EXCLUDED — a hash that moved on every render "
-                         "could verify nothing. It is NOT a reproduction guarantee for "
-                         "the run: sections 4, 5, 6 and 12 describe the current catalog "
-                         "and mapping state, so an edit there moves this hash even though "
-                         "the run is immutable and its totals are unchanged. Compare two "
-                         "packs for the same run to see WHAT moved.",
+            "hash_note": "TWO stamps, because the pack contains two kinds of thing. "
+                         "content_hash covers the sections derived from FROZEN run state "
+                         f"({', '.join(_FROZEN_SECTIONS)}) plus the evidence-gap list: it "
+                         "is stable for the life of the run, and a mismatch means the "
+                         "pack is not of that run. current_state_hash covers the sections "
+                         f"describing the catalogue TODAY ({', '.join(_CURRENT_STATE_SECTIONS)}): "
+                         "it is EXPECTED to move when a factor is edited, an activity "
+                         "re-mapped or the journal appended to, and comparing it between "
+                         "two packs for one run is how you see that something moved "
+                         "underneath a filed figure. generated_at is excluded from both — "
+                         "a hash that moved on every render could verify nothing.",
+            "hashed_sections": {"content_hash": list(_FROZEN_SECTIONS),
+                                "current_state_hash": list(_CURRENT_STATE_SECTIONS)},
             "section_order": list(_SECTION_ORDER),
         },
         "sections": sections,
         "evidence_gaps": gaps,
+        "journal_coverage": journal_coverage,
         "note": "Assembled from the run's frozen state plus, where an assuror needs to "
                 "see it, the CURRENT catalog and mapping state (sections 4, 5, 6, 12). "
                 "This is the evidence an assuror "
