@@ -61,7 +61,11 @@ def upgrade() -> None:
                            "'joint_operation','associate','fixed_asset_investment',"
                            "'franchise','lease_finance','lease_operating')",
                            name="ck_entity_acct_category"),
-        sa.CheckConstraint("NOT (financial_control = 1 AND joint_financial_control = 1)",
+        # Corrected in place rather than by a follow-up migration: on Postgres the chain
+        # aborts HERE (`operator does not exist: boolean = integer`), so it can never
+        # reach a later revision that would fix it. Semantics are unchanged on SQLite,
+        # where the old `= 1` form and this one accept and reject the same rows.
+        sa.CheckConstraint("NOT (financial_control AND joint_financial_control)",
                            name="ck_entity_joint_vs_sole_fc"),
         sa.ForeignKeyConstraint(["organisation_id"], ["organisations.id"]),
         sa.PrimaryKeyConstraint("id"),

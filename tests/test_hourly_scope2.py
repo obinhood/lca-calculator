@@ -499,7 +499,7 @@ def test_hourly_data_does_not_touch_the_annual_calculation(db):
 # --- endpoints --------------------------------------------------------------
 
 @pytest.fixture
-def env():
+def env(monkeypatch):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -522,7 +522,10 @@ def env():
     main_mod.app.dependency_overrides[main_mod.get_db] = override_get_db
     client = TestClient(main_mod.app)
     key = client.post("/organisations", params={"name": "H"}).json()["api_key"]
-    hdr = {"X-API-Key": key}
+    # Grid intensity is GLOBAL reference data and is admin-gated; the tenant key
+    # alone can read it but no longer write it.
+    monkeypatch.setenv("ADMIN_API_KEY", "test-admin")
+    hdr = {"X-API-Key": key, "X-Admin-Key": "test-admin"}
     period_id = client.post("/reporting_periods", headers=hdr, params={
         "label": "D1", "start_date": "2027-01-01", "end_date": "2027-01-01"}).json()["id"]
     yield client, hdr, period_id
@@ -731,3 +734,18 @@ def test_own_region_load_is_served_before_the_certificate_is_exported(db):
         "the certificate sits in B and B has load; it is consumed there before export")
     assert rows["A"]["matched_kwh"] == pytest.approx(0.0)
     assert r["cfe"]["allocation"]["ledger"] == "depleting_per_hour"
+
+
+# --- the global-write gate ---------------------------------------------------------------
+# HourlyGridIntensity has no tenant column and the matcher takes the highest id per
+# (hour, region), so an unguarded write let any tenant replace the intensity in force
+# for everyone — a multiplier on a reported Scope 2 figure.
+
+def test_grid_intensity_needs_the_admin_credential(env):
+    client, hdr, _ = env
+    tenant_only = {k: v for k, v in hdr.items() if k != "X-Admin-Key"}
+    r = client.post("/reference/hourly_grid_intensity", headers=tenant_only, params={
+        "grid_region": "GB", "hour_start": "2027-01-01T00:00:00",
+        "kg_co2e_per_kwh_average": 0.9, "source": "Beta guess"})
+    assert r.status_code in (401, 422), \
+        "a tenant key overwrote the grid intensity every tenant's Scope 2 depends on"

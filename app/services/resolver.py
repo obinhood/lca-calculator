@@ -14,7 +14,7 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 from rapidfuzz import process, fuzz
 from typing import Optional, Tuple
-from ..models import EmissionFactor, ActivityRecord
+from ..models import EmissionFactor, ActivityRecord, factor_visible_to
 
 # GHG Protocol Scope 3 calculation-method hierarchy (lower = preferred).
 METHOD_RANK = {"supplier_specific": 0, "hybrid": 1, "average_data": 2, "spend_based": 3}
@@ -45,8 +45,15 @@ CONFIDENCE = {
 }
 
 
-def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int]):
-    """Candidate factors: never superseded, deterministically ordered.
+def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int],
+                org_id: Optional[int] = None):
+    """Candidate factors: never superseded, visible to this tenant, deterministically ordered.
+
+    `org_id` is the tenant the proposal is for. It gates visibility through
+    models.factor_visible_to(), so another tenant's PACT supplier factor can never be
+    auto-bound into this tenant's inventory — which would leak the supplier's figure
+    through the resulting line item even though the factor row itself was never served.
+    None sees platform reference data only.
 
     Order: preferred calculation method first (GHG Protocol Scope 3 hierarchy —
     supplier-specific beats average-data beats spend-based), then newest year,
@@ -57,6 +64,7 @@ def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int]):
     method_rank = case(METHOD_RANK, value=EmissionFactor.method_type, else_=2)
     q = db.query(EmissionFactor)\
         .filter(~EmissionFactor.id.in_(superseded_ids))\
+        .filter(factor_visible_to(org_id))\
         .order_by(method_rank.asc(), EmissionFactor.year.desc(), EmissionFactor.id.desc())
     if gwp_set:
         q = q.filter(EmissionFactor.gwp_set == gwp_set)
@@ -66,9 +74,11 @@ def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int]):
 
 
 def resolve_factor(db: Session, category: str, subcategory: str, geo: str,
-                   gwp_set: str = "AR6", year: Optional[int] = None) -> Optional[EmissionFactor]:
+                   gwp_set: str = "AR6", year: Optional[int] = None,
+                   org_id: Optional[int] = None) -> Optional[EmissionFactor]:
     """Legacy helper: best factor by precedence, no basis information."""
-    hit = propose_mapping(db, category, subcategory, None, geo, gwp_set=gwp_set, year=year)
+    hit = propose_mapping(db, category, subcategory, None, geo, gwp_set=gwp_set, year=year,
+                          org_id=org_id)
     return hit[0] if hit else None
 
 
@@ -79,9 +89,14 @@ def _norm_text(s: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
-def suggest_subcategory(db: Session, category: str, text: str) -> Optional[str]:
+def suggest_subcategory(db: Session, category: str, text: str,
+                        org_id: Optional[int] = None) -> Optional[str]:
+    # Scoped too: the subcategory vocabulary is derived from factor rows, and an
+    # unscoped DISTINCT would spell another tenant's supplier and product names
+    # back to this one even though no factor value is returned.
     subs = [r[0] for r in db.query(EmissionFactor.subcategory)
-            .filter(EmissionFactor.category == category).distinct().all()]
+            .filter(EmissionFactor.category == category)
+            .filter(factor_visible_to(org_id)).distinct().all()]
     subs = [s for s in subs if s]
     if not subs:
         return None
@@ -94,8 +109,9 @@ def suggest_subcategory(db: Session, category: str, text: str) -> Optional[str]:
 
 def _propose(db: Session, category: str, subcategory: Optional[str],
              description: Optional[str], geo: str, gwp_set: Optional[str],
-             year: Optional[int]) -> Optional[Tuple[EmissionFactor, str, float]]:
-    q = _base_query(db, gwp_set, year)
+             year: Optional[int],
+             org_id: Optional[int] = None) -> Optional[Tuple[EmissionFactor, str, float]]:
+    q = _base_query(db, gwp_set, year, org_id)
 
     # 1. Exact: category + subcategory-as-given (possibly empty) + geo.
     ef = q.filter(EmissionFactor.category == category,
@@ -124,7 +140,7 @@ def _propose(db: Session, category: str, subcategory: Optional[str],
     #    subcategory-blind pick.
     fuzz_text = (subcategory or "").strip() or (description or "")
     if fuzz_text:
-        sub = suggest_subcategory(db, category, fuzz_text)
+        sub = suggest_subcategory(db, category, fuzz_text, org_id)
         if sub:
             for geog in ((geo or "Global"), "Global"):
                 ef = q.filter(EmissionFactor.category == category,
@@ -148,15 +164,20 @@ def _propose(db: Session, category: str, subcategory: Optional[str],
 
 def propose_mapping(db: Session, category: str, subcategory: Optional[str],
                     description: Optional[str], geo: str, gwp_set: str = "AR6",
-                    year: Optional[int] = None) -> Optional[Tuple[EmissionFactor, str, float]]:
-    """Best factor proposal as (factor, basis, confidence); None if nothing fits."""
-    hit = _propose(db, category, subcategory, description, geo, gwp_set, year)
+                    year: Optional[int] = None,
+                    org_id: Optional[int] = None) -> Optional[Tuple[EmissionFactor, str, float]]:
+    """Best factor proposal as (factor, basis, confidence); None if nothing fits.
+
+    `org_id` scopes the candidate set to what this tenant may see (models.
+    factor_visible_to). Omitting it proposes from platform reference data only.
+    """
+    hit = _propose(db, category, subcategory, description, geo, gwp_set, year, org_id)
     if hit:
         return hit
     # Vintage fallback: nothing under the requested GWP set — propose from any
     # vintage but ALWAYS route to review (the calc engine's vintage check still
     # guards aggregate factors at run time, so this cannot silently mix sets).
-    hit = _propose(db, category, subcategory, description, geo, None, year)
+    hit = _propose(db, category, subcategory, description, geo, None, year, org_id)
     if hit:
         factor, basis, _ = hit
         return factor, f"{basis}+vintage_fallback", CONFIDENCE["vintage_fallback"]
@@ -195,8 +216,12 @@ def auto_map_activity(db: Session, activity: ActivityRecord, gwp_set: str = "AR6
                     f"confidence={activity.mapping_confidence!r}",
                commit=False)
 
+    # The activity carries its own tenant, so auto-binding is scoped without the
+    # caller having to remember: an activity can only ever bind a factor its own
+    # organisation may see.
     hit = propose_mapping(db, activity.category, activity.subcategory,
-                          activity.description, activity.geo, gwp_set=gwp_set)
+                          activity.description, activity.geo, gwp_set=gwp_set,
+                          org_id=activity.organisation_id)
     if hit is None:
         activity.mapping_status = "unmapped"
         _journal("unmapped")

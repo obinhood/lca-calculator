@@ -165,15 +165,22 @@ def materialise(db: Session, row: ProductFootprint, *,
                 "reason": "; ".join(verdict["problems"])}
 
     p = verdict["factor_preview"]
+    # Scoped to the importing tenant: two buyers of the same supplier legitimately
+    # hold the same pf_id, and an unscoped check would hand the second one the
+    # first one's private row instead of minting their own.
     existing = db.query(EmissionFactor).filter(
         EmissionFactor.source == PACT_FACTOR_SOURCE,
-        EmissionFactor.version == row.pf_id).first()
+        EmissionFactor.version == row.pf_id,
+        EmissionFactor.organisation_id == row.organisation_id).first()
     if existing is not None:
         return {"materialised": False, "idempotent": True, "factor_id": existing.id,
                 "pf_id": row.pf_id,
                 "reason": "a factor already exists for this footprint id"}
 
     factor = EmissionFactor(
+        # A supplier's PCF is commercially confidential and usually under NDA. It is
+        # the tenant who received it who may read it, nobody else.
+        organisation_id=row.organisation_id,
         source=p["source"], version=p["version"],
         geography=p["geography"], year=p["year"],
         # The category defaults to the supplier's product name so the factor is
@@ -226,8 +233,13 @@ def bind_activities(db: Session, organisation_id: int, factor_id: int,
     """
     from ..models import ActivityRecord
 
-    factor = db.get(EmissionFactor, factor_id)
+    from ..models import factor_visible_to
+    factor = db.query(EmissionFactor).filter(
+        EmissionFactor.id == factor_id,
+        factor_visible_to(organisation_id)).first()
     if factor is None or factor.source != PACT_FACTOR_SOURCE:
+        # Same answer whether the id is absent, someone else's, or not a PACT row —
+        # a distinguishable response would be an existence oracle over the table.
         return {"bound": 0, "reason": "factor_id is not a materialised PACT factor"}
 
     bound, skipped = [], []
