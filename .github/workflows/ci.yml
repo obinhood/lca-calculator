@@ -108,24 +108,57 @@ jobs:
       - run: docker build -t lca-calculator:ci .
 
   dependencies:
-    # Reporting only, deliberately. The pinned stack is ~2 years old and carries
-    # known advisories that cannot be resolved by a patch bump alone: fastapi
-    # 0.112.2 caps starlette <0.39.0, so the multipart advisories behind the
-    # ingestion endpoint need a framework upgrade, not a pin change. Blocking the
-    # build on that today would only teach people to ignore a permanently red job.
-    # Turn `continue-on-error` off once the dependency upgrade lands.
+    # Reporting only, deliberately — but REPORTING, not hiding. The pinned stack is
+    # ~2 years old and carries advisories that no patch bump can clear: fastapi
+    # 0.112.2 caps starlette <0.39.0, so the multipart DoS advisories behind the
+    # ingestion endpoint need a framework upgrade, not a pin change. A job that is
+    # red on every commit regardless of the change under review teaches people to
+    # ignore it, so the findings go to the run summary instead, where they are read.
+    #
+    # `continue-on-error` is on the STEPS, not the job: at job level the workflow
+    # goes green while the check itself still reports failure, which is the one
+    # state nobody can act on.
+    #
+    # Make this blocking once the FastAPI upgrade lands — ideally against a recorded
+    # baseline, so a NEW advisory fails the build while the known backlog does not.
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: pip install pip-audit==2.7.3
-      - run: pip-audit -r requirements.txt --desc
+      - name: Python advisories
+        id: pyaudit
+        continue-on-error: true
+        run: pip-audit -r requirements.txt 2>&1 | tee pip-audit.txt
       - name: Frontend advisories
+        id: npmaudit
+        continue-on-error: true
         working-directory: frontend
-        run: npm audit --omit=dev
+        # --package-lock-only audits the lockfile without an install, so this needs
+        # no node_modules and no setup-node.
+        run: npm audit --package-lock-only --omit=dev 2>&1 | tee ../npm-audit.txt
+      - name: Publish advisories to the run summary
+        if: always()
+        run: |
+          {
+            echo "## Dependency advisories (reporting only)"
+            echo
+            echo "Python: \`${{ steps.pyaudit.outcome }}\` · frontend: \`${{ steps.npmaudit.outcome }}\`"
+            echo
+            echo "A finding here does not fail the build. See the comment in"
+            echo ".github/workflows/ci.yml for why, and what makes it blocking."
+            echo
+            echo '### requirements.txt'
+            echo '```'
+            head -c 40000 pip-audit.txt 2>/dev/null || echo '(no output)'
+            echo '```'
+            echo '### frontend/package-lock.json'
+            echo '```'
+            head -c 10000 npm-audit.txt 2>/dev/null || echo '(no output)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   frontend:
     runs-on: ubuntu-latest
