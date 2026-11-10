@@ -46,4 +46,14 @@ EXPOSE 8000
 # platform-provided $PORT (Railway/Render set it; defaults to 8000 locally). For a
 # horizontally-scaled deploy (many container instances) move `init_db` to a release step
 # instead, so instances don't race the migration.
-CMD ["sh", "-c", "python -m scripts.init_db && exec gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:${PORT:-8000} --access-logfile - --error-logfile -"]
+#
+# NO --access-logfile, deliberately. The application now emits its own structured request
+# log (app/observability.py: method, route template, status, duration, tenant, correlation
+# id), which carries strictly more than an access line. gunicorn's access log, in contrast,
+# is written by uvicorn's worker as "path?query_string" verbatim — and a number of endpoints
+# still take narrative, person-identifying free text as QUERY parameters, so enabling it
+# would publish that text to stdout, including for requests that fail authorisation. The
+# error log stays: it carries worker/boot failures that happen outside the application.
+# Tune the application log with LOG_LEVEL (default INFO), LOG_FORMAT (json|text, default
+# json) and LOG_LEVEL_THIRD_PARTY (default WARNING).
+CMD ["sh", "-c", "python -m scripts.init_db && exec gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:${PORT:-8000} --error-logfile -"]
