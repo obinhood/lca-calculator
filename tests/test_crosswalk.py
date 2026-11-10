@@ -409,7 +409,7 @@ def test_registering_a_concordance_needs_the_admin_credential(env):
     r = client.post("/crosswalks", headers=_tenant_only(hdr), params={
         "from_scheme": "CPA", "to_scheme": "CPC", "source": "Beta internal guess",
         "table_version": "zz-beta"})
-    assert r.status_code in (401, 422), \
+    assert r.status_code == 401, \
         "a tenant key registered a global concordance table"
 
 
@@ -420,5 +420,5 @@ def test_adding_concordance_rows_needs_the_admin_credential(env):
         "table_version": "2.1"}).json()["id"]
     r = client.post(f"/crosswalks/{cid}/mappings", headers=_tenant_only(hdr),
                     json=[{"from_code": "A01", "to_code": "999"}])
-    assert r.status_code in (401, 422), \
+    assert r.status_code == 401, \
         "a tenant key added rows to a global concordance table"

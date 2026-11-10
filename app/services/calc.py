@@ -260,6 +260,12 @@ class _InstrumentPool:
             instruments, key=lambda i: (_INSTRUMENT_RANK.get(i.instrument_type, 2), i.id))
         self.remaining = {i.id: i.coverage_kwh for i in self.instruments}  # None = unbounded
         self.run_gwp_set = run_gwp_set
+        # Volume honesty (see coverage_statement): the total electricity load the pool
+        # was offered, and every instrument that was ELIGIBLE for some of it — eligible,
+        # not consumed, because an instrument the pool never reached is still a declared
+        # claim over this inventory and is exactly what a duplicate submission looks like.
+        self.load_kwh = 0.0
+        self.applicable_ids = set()
         self.skipped_vintage = sorted({
             i.id for i in self.instruments
             if i.gwp_set and run_gwp_set and i.gwp_set != run_gwp_set})
@@ -289,6 +295,55 @@ class _InstrumentPool:
                 return False
         return True
 
+    def coverage_statement(self) -> dict:
+        """Declared contractual volume against the load it was offered.
+
+        Scope 2 Guidance Ch. 4 lets a contractual instrument cover at most the
+        consumption it is matched to. Allocation alone cannot notice the converse
+        problem: that MORE certificate volume was declared than the organisation
+        consumed. Two submissions of one REC, or two RECs each covering the whole load,
+        simply queue up and the surplus is never challenged — the market figure falls to
+        the first instrument's rate and the second is silently absorbed.
+
+        So the comparison is made once per run and stated. Over-declaration is an
+        overstatement of the renewable claim, not an arithmetic detail, and it is
+        reported rather than netted away.
+
+        `determinable` is False when a CONTRACTUAL instrument declares no volume at all
+        (coverage_kwh NULL = unbounded). An unbounded certificate is a claim over the
+        whole inventory with no volume behind it, which is the 100%-renewable shape of
+        this very defect, so the question is not answered "no" — it is answered "cannot
+        be decided", and `over_declared` is None rather than False. An absent figure is
+        never a pass.
+        """
+        contractual = [i for i in self.instruments
+                       if i.instrument_type != "residual_mix"
+                       and i.id in self.applicable_ids]
+        unbounded = sorted(i.id for i in contractual if i.coverage_kwh is None)
+        declared = round(sum(i.coverage_kwh for i in contractual
+                             if i.coverage_kwh is not None), 6)
+        load = round(self.load_kwh, 6)
+        determinable = not unbounded
+        over = (declared > load) if determinable else None
+        return {
+            "load_kwh": load,
+            "declared_contractual_kwh": declared,
+            "contractual_instruments": sorted(i.id for i in contractual),
+            "unbounded_contractual_instruments": unbounded,
+            "determinable": determinable,
+            "over_declared": over,
+            "over_declared_kwh": (round(declared - load, 6) if over else
+                                  (0.0 if determinable else None)),
+            "reason": (
+                "a contractual instrument declares no coverage_kwh, so the volume "
+                "claimed over this inventory is unbounded and cannot be compared with "
+                "the load consumed" if not determinable
+                else "declared contractual coverage exceeds the electricity load it was "
+                     "offered against — more certificate volume is claimed than was "
+                     "consumed" if over
+                else "declared contractual coverage is within the load consumed"),
+        }
+
     def allocate(self, kwh: float, activity_date: Optional[str],
                  activity_market: Optional[str], grid_rate_per_kwh: float,
                  residual: Optional[dict] = None,
@@ -305,6 +360,14 @@ class _InstrumentPool:
         allocations = []
         needed = kwh
         co2e = 0.0
+        self.load_kwh += kwh
+        # Computed pool-wide, BEFORE the allocation loop, for the same reason
+        # skipped_market is: the loop breaks as soon as the load is covered, so an
+        # instrument sitting behind a duplicate would never be examined and the
+        # over-declaration it represents would be invisible.
+        for _inst in self.instruments:
+            if self._applies(_inst, activity_date, activity_market):
+                self.applicable_ids.add(_inst.id)
         # Instruments excluded because their DECLARED market differs from this
         # consumption's grid — computed pool-wide (like skipped_vintage) so the audit
         # signal is complete and id-order-independent, not dependent on whether the
@@ -940,6 +1003,7 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         # Emissions-weighted data-quality score (1 best .. 5 worst); 0.0 = no data.
         run.data_quality_score = round(dq_weighted_sum / total, 3) if total else 0.0
         run.notes = json.dumps(errors)
+        run.scope2_coverage_statement = json.dumps(pool.coverage_statement())
         run.total_co2e_non_consolidated = total_non_consolidated
 
         # --- Freeze the organisational boundary onto the run ---

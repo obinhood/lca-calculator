@@ -80,7 +80,8 @@ def _activity(db, org_id, category="electricity", geo="GB"):
 def test_factors_requires_a_key(env):
     client, db = env
     _factor(db)
-    assert client.get("/factors").status_code in (401, 422)
+    # Deterministic now: a missing key is 401, exactly like a bogus one.
+    assert client.get("/factors").status_code == 401
 
 
 def test_factors_rejects_a_bogus_key(env):
@@ -97,11 +98,12 @@ def test_factors_shows_platform_rows_but_not_another_tenants(env):
 
     r = client.get("/factors", headers={"X-API-Key": "ka"})
     assert r.status_code == 200
-    ids = {row["id"] for row in r.json()}
+    ids = {row["id"] for row in r.json()["factors"]}
     assert glob.id in ids, "platform reference data must stay readable by every tenant"
     assert mine.id not in ids, "Beta's private factor leaked to Alpha"
 
-    ids_b = {row["id"] for row in client.get("/factors", headers={"X-API-Key": "kb"}).json()}
+    ids_b = {row["id"] for row in
+             client.get("/factors", headers={"X-API-Key": "kb"}).json()["factors"]}
     assert {glob.id, mine.id} <= ids_b, "a tenant must still see their own rows"
 
 

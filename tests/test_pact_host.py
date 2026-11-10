@@ -266,7 +266,7 @@ def env():
         client.post("/pact/footprints/import", headers=hdr,
                     params={"direction": "published"}, json=d)
     creds = client.post("/pact/clients", headers=hdr,
-                        params={"partner_name": "Partner"}).json()
+                        json={"partner_name": "Partner"}).json()
     yield client, hdr, creds, docs
     main_mod.app.dependency_overrides.clear()
 

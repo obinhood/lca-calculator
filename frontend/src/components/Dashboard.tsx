@@ -31,7 +31,7 @@ export default function Dashboard({ settings, runId, onSelectRun, version, onCha
   };
 
   useEffect(() => {
-    api.runs(settings).then(setRuns)
+    api.runs(settings).then((r) => setRuns(r.runs))
       .catch((e) => { if (isAuthError(e)) onAuthError(SESSION_GONE); else setError(e.message); });
     api.summary(settings, runId).then(setSummary)
       .catch((e) => { if (!isAuthError(e)) setError(e.message); });

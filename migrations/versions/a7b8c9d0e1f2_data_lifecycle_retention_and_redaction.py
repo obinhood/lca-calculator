@@ -1,7 +1,7 @@
 """data lifecycle: per-org retention period and activity redaction tombstone
 
 Revision ID: a7b8c9d0e1f2
-Revises: f4a5b6c7d8e9
+Revises: a5b6c7d8e9f0
 Create Date: 2026-11-10 11:40:00.000000
 
 Three nullable columns, all ADDITIVE (plain ADD COLUMN). No batch_alter_table:
@@ -33,8 +33,15 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
+# Chains off a5b6c7d8e9f0 (market instrument idempotency), NOT f4a5b6c7d8e9: that
+# revision and this one were written in parallel branches and both originally claimed
+# f4a5b6c7d8e9 as their parent, which gives TWO Alembic heads once both are merged and
+# makes `alembic upgrade head` fail outright — the container then exits before gunicorn
+# starts, which is the exact failure mode the PostgreSQL work removed. The two migrations
+# touch disjoint tables (organisations/activities here, market_instruments/
+# calculation_runs there), so serialising them is safe and not merely expedient.
 revision: str = 'a7b8c9d0e1f2'
-down_revision: Union[str, None] = 'f4a5b6c7d8e9'
+down_revision: Union[str, None] = 'a5b6c7d8e9f0'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

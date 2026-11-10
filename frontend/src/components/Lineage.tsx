@@ -13,7 +13,8 @@ export default function Lineage({ settings, runId, version }:
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.runs(settings).then((rs) => {
+    api.runs(settings).then((r) => {
+      const rs = r.runs;
       setRuns(rs);
       if (!selected && rs.length) setSelected(rs[0].id);
     }).catch((e) => setError(e.message));
@@ -42,6 +43,13 @@ export default function Lineage({ settings, runId, version }:
             market {data.run.total_co2e_market?.toFixed(2)} kg · biogenic {data.run.total_biogenic_co2e?.toFixed(2)} kg.
             Every line below carries the calculation detail frozen at compute time.
           </p>
+          {data.page && data.page.has_more && (
+            <p className="muted">
+              Showing {data.page.returned} of {data.page.total_matched} line items.
+              This run is larger than one page — the rest are reachable from
+              offset {data.page.next_offset} via the API.
+            </p>
+          )}
           <table>
             <thead>
               <tr><th>Line</th><th>Activity</th><th>Scope</th><th>Method</th><th>kgCO₂e</th><th>Calc</th><th></th></tr>

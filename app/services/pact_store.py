@@ -213,6 +213,37 @@ def footprint_view(row: ProductFootprint, *, include_document: bool = False) -> 
     return out
 
 
+def list_footprints_page(db: Session, organisation_id: int, *,
+                         direction: Optional[str] = None,
+                         status: Optional[str] = None,
+                         product_id: Optional[str] = None,
+                         limit: int = 100, offset: int = 0) -> dict:
+    """One window of the held footprints.
+
+    ``product_id`` is matched against a JSON array inside the row, which SQL here cannot
+    index, so that filter alone falls back to windowing in memory — the same compromise
+    ``pact_host.list_footprints`` makes. Every other filter windows in the database.
+    """
+    from .pagination import page_of, page_of_query
+    q = db.query(ProductFootprint).filter(
+        ProductFootprint.organisation_id == organisation_id)
+    if direction:
+        q = q.filter(ProductFootprint.direction == direction)
+    if status:
+        q = q.filter(ProductFootprint.status == status)
+    q = q.order_by(ProductFootprint.id.desc())
+    if product_id:
+        needle = product_id.strip().lower()
+        hits = [r for r in q.all()
+                if any(needle == str(x).strip().lower()
+                       for x in json.loads(r.product_ids or "[]"))]
+        page = page_of(hits, limit, offset)
+    else:
+        page = page_of_query(q, limit, offset)
+    page["rows"] = [footprint_view(r) for r in page["rows"]]
+    return page
+
+
 def list_footprints(db: Session, organisation_id: int, *,
                     direction: Optional[str] = None,
                     status: Optional[str] = None,

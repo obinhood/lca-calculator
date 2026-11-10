@@ -68,6 +68,29 @@ def history(db: Session, organisation_id: int,
     } for e in q.order_by(MappingAuditEvent.id).all()]
 
 
+def history_page(db: Session, organisation_id: int,
+                 activity_id: Optional[int] = None, *,
+                 limit: int = 100, offset: int = 0) -> dict:
+    """One window of the journal, oldest first, windowed IN THE DATABASE.
+
+    ``history`` is retained for the callers that legitimately need the whole journal
+    (the evidence pack has to contain all of it); an HTTP caller gets this one.
+    """
+    from .pagination import page_of_query
+    q = db.query(MappingAuditEvent).filter(
+        MappingAuditEvent.organisation_id == organisation_id)
+    if activity_id is not None:
+        q = q.filter(MappingAuditEvent.activity_id == activity_id)
+    page = page_of_query(q.order_by(MappingAuditEvent.id), limit, offset)
+    page["rows"] = [{
+        "id": e.id, "activity_id": e.activity_id, "action": e.action,
+        "from_factor_id": e.from_factor_id, "to_factor_id": e.to_factor_id,
+        "from_status": e.from_status, "to_status": e.to_status,
+        "basis": e.basis, "confidence": e.confidence, "note": e.note, "at": e.at,
+    } for e in page["rows"]]
+    return page
+
+
 def binding_as_at(db: Session, activity_id: int, at: str) -> dict:
     """What an activity was bound to at a moment in time.
 

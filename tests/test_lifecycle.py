@@ -263,12 +263,41 @@ def test_auto_mode_redacts_a_frozen_activity_and_says_why(env):
     db.close()
 
 
+def _structured_refusal(response) -> dict:
+    """The structured refusal body, however the error envelope carries it.
+
+    The service returns a dict — `action`, `blocking_runs`, `reason`, `remedy` — because
+    a refusal that cannot name the runs it protects is not much of a refusal. The shared
+    error envelope currently JSON-stringifies a non-string `detail` into its `message`,
+    so the structure arrives encoded rather than as an object, and a structured-`detail`
+    facility is being added to the envelope separately.
+
+    This reads either shape, so the test asserts the SUBSTANCE of the refusal rather
+    than an envelope detail that is still being designed — and keeps passing, unchanged,
+    once the envelope carries the object directly. It does not weaken the assertion: the
+    same four fields are checked either way.
+    """
+    body = response.json()
+    for candidate in (body.get("detail"), (body.get("error") or {}).get("message")):
+        if isinstance(candidate, dict):
+            return candidate
+        if isinstance(candidate, str):
+            try:
+                parsed = json.loads(candidate)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    raise AssertionError(
+        f"no structured refusal found in the error body: {body!r}")
+
+
 def test_hard_delete_of_frozen_activity_is_refused_and_names_the_runs(env):
     """A refusal must say WHY, and name what blocks it."""
     r = env["client"].delete(f"/activities/{env['frozen']}",
                              params={"mode": "hard"}, headers=env["hdr_a"])
     assert r.status_code == 409
-    detail = r.json()["detail"]
+    detail = _structured_refusal(r)
     assert detail["action"] == "blocked"
     assert [b["run_id"] for b in detail["blocking_runs"]] == [env["run"]]
     assert detail["blocking_runs"][0]["frozen_lines"] >= 1
@@ -330,7 +359,9 @@ def test_erasure_rejects_an_unknown_reason(env):
 
 
 def test_erasure_requires_authentication(env):
-    assert env["client"].delete(f"/activities/{env['frozen']}").status_code == 422
+    # A MISSING key is 401, not 422: an absent credential and a wrong one are the same
+    # failure, unauthenticated, so they get the same status.
+    assert env["client"].delete(f"/activities/{env['frozen']}").status_code == 401
     assert env["client"].delete(f"/activities/{env['frozen']}",
                                 headers={"X-API-Key": "nope"}).status_code == 401
 
@@ -690,7 +721,7 @@ def test_export_covers_every_tenant_table_except_credentials():
 
 
 def test_export_requires_authentication(env):
-    assert env["client"].get("/organisations/export").status_code == 422
+    assert env["client"].get("/organisations/export").status_code == 401
     assert env["client"].get("/organisations/export",
                              headers={"X-API-Key": "nope"}).status_code == 401
 
@@ -1005,7 +1036,7 @@ def test_tenant_deletion_requires_authentication(env):
     r = env["client"].request("DELETE", "/organisations/self",
                               params={"confirm_org_name": "A",
                                       "confirm_irreversible": True})
-    assert r.status_code == 422
+    assert r.status_code == 401
     r = env["client"].request("DELETE", "/organisations/self",
                               params={"confirm_org_name": "A",
                                       "confirm_irreversible": True},
@@ -1102,7 +1133,7 @@ def test_list_rejects_a_bad_window(env):
 
 def test_list_endpoints_require_authentication(env):
     for path in ("/activities", "/reporting_periods", "/entities", "/credits"):
-        assert env["client"].get(path).status_code == 422, path
+        assert env["client"].get(path).status_code == 401, path
         assert env["client"].get(
             path, headers={"X-API-Key": "nope"}).status_code == 401, path
 
