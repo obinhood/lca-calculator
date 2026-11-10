@@ -719,6 +719,12 @@ class CalculationRun(Base):
     reporting_period_id = Column(Integer, ForeignKey("reporting_periods.id"), nullable=True)
     created_at = Column(String)  # ISO timestamp (UTC)
     gwp_set = Column(String)     # AR5 / AR6 applied
+    # Which pedigree compilation produced this run's uncertainty
+    # (services/dq.py PEDIGREE_METHOD). NULL means the run predates the
+    # correction of ecoinvent's SDg95 halving, so its intervals are twice as
+    # wide in log space as the same data yields now — comparability
+    # .pedigree_comparable() blocks subtracting across that change.
+    pedigree_method = Column(String, nullable=True)
     status = Column(String)      # pending | complete
     # frozen coverage snapshot
     total_activities = Column(Integer, default=0)

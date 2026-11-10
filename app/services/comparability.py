@@ -211,6 +211,34 @@ def gwp_comparable(run_a, run_b, *, label_a: str, label_b: str,
             f"as a real change")
 
 
+def pedigree_comparable(run_a, run_b, *, label_a: str, label_b: str,
+                        quantity: str) -> Optional[str]:
+    """A reason two runs' UNCERTAINTY cannot be compared because they were
+    compiled on different pedigree conventions, or None.
+
+    The engine previously summed ecoinvent's pedigree variance contributions
+    without the factor of a half that SDg95 = sigma_g^2 implies, so every
+    interval was exactly twice as wide in log space as the same data gives now.
+    Correcting it moves every band by that factor. A run frozen before the
+    correction keeps its own wider interval — that is the reproduction contract
+    working — but subtracting it from a corrected run reports a halving of
+    uncertainty that no change in data quality produced.
+
+    A run with no marker is not of unknown provenance: nothing wrote the field
+    before the correction, so an absent marker IS the superseded compilation.
+    Saying so is more useful to a reader than "unknown".
+    """
+    a = getattr(run_a, "pedigree_method", None)
+    b = getattr(run_b, "pedigree_method", None)
+    if a == b:
+        return None
+    _name = lambda v: v or "the superseded pedigree compilation"
+    return (f"the {label_a} run used {_name(a)} and the {label_b} run used "
+            f"{_name(b)} — the pedigree compilation changed between them, which "
+            f"rescales every uncertainty interval on its own, so {quantity} would "
+            f"report a change of method as a change in data quality")
+
+
 def cross_run_gates(db: Session, run_a, run_b, *, label_a: str, label_b: str,
                     quantity: str, measures: str, prefix: str = "") -> list:
     """EVERY reason two runs cannot be subtracted, in one call.
@@ -242,6 +270,10 @@ def cross_run_gates(db: Session, run_a, run_b, *, label_a: str, label_b: str,
         boundary_comparable(db, run_a, run_b, label_a=label_a, label_b=label_b,
                             quantity=quantity),
         gwp_comparable(run_a, run_b, label_a=label_a, label_b=label_b, quantity=quantity),
+        # The same shape as the GWP gate: a methodology change that moves the
+        # numbers without anything in the inventory moving.
+        pedigree_comparable(run_a, run_b, label_a=label_a, label_b=label_b,
+                            quantity=quantity),
         # The market-based total moves when uncovered load starts being priced at the
         # residual mix instead of the grid average. A "reduction" spanning that change is
         # a methodology artefact.
