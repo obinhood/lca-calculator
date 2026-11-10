@@ -16,8 +16,11 @@ Four defects, all of which a client discovers only in production:
 These tests pin the contract, not the implementation: they assert what a client can rely
 on seeing.
 """
+from contextlib import contextmanager
+
 import pytest
 from fastapi.testclient import TestClient
+from starlette.routing import Mount
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -607,23 +610,51 @@ def test_the_report_narrative_moved_to_the_post_form(env):
 # `error.context` to branch on.
 # =============================================================================
 
+@contextmanager
+def _temporary_route(path, endpoint, methods=("GET",)):
+    """Register a route AHEAD of the SPA catch-all, and take it out again.
+
+    `app/main.py` mounts `frontend/dist` at "/" as a catch-all whenever that directory
+    exists, and a mount registered earlier shadows every route added later. So a route
+    merely APPENDED here 404s for any developer who has run `npm run build` in this tree
+    and passes for everyone else — and CI never catches the difference, because the
+    frontend and backend jobs build in separate checkouts and the backend suite always
+    runs against a tree with no `dist`.
+
+    Inserting at the front makes it resolve either way. Asserting `!= 404` would not:
+    that passes for the wrong reason, which is how this class of bug survives.
+    """
+    app = main_mod.app
+    app.add_api_route(path, endpoint, methods=list(methods))
+    route = app.router.routes.pop()          # just appended, so it is the last one
+    app.router.routes.insert(0, route)
+    try:
+        yield
+    finally:
+        app.router.routes.remove(route)
+
+
+def _frozen_activity_refusal():              # pragma: no cover - driven via the route
+    """Stands in for the hard-delete refusal, with that endpoint's own field names, so
+    this is the fixture a sibling PR can diff its shape against."""
+    main_mod._refuse(409, "activity 7 is frozen by 2 filed runs",
+                     action="blocked",
+                     blocking_runs=[{"run_id": 3, "frozen_lines": 11},
+                                    {"run_id": 5, "frozen_lines": 2}],
+                     remedy="mode=redact")
+
+
 def test_a_structured_refusal_survives_the_envelope(env):
-    """Raised through the real app via a route registered for this test, so it exercises
-    the exception handler rather than the helper in isolation."""
+    """Raised through the real app via a real route, so it exercises the exception
+    handler rather than the helper in isolation."""
     client, db = env
     _org(db)
 
-    @main_mod.app.get("/_test/structured-refusal")
-    def _structured_refusal():                       # pragma: no cover - test route
-        main_mod._refuse(409, "activity 7 is frozen by 2 filed runs",
-                         action="blocked",
-                         blocking_runs=[{"run_id": 3, "frozen_lines": 11},
-                                        {"run_id": 5, "frozen_lines": 2}],
-                         remedy="mode=redact")
-
-    try:
+    with _temporary_route("/_test/structured-refusal", _frozen_activity_refusal):
         r = client.get("/_test/structured-refusal")
-        assert r.status_code == 409
+        assert r.status_code == 409, (
+            f"expected the refusal, got {r.status_code} — a 404 here means the route was "
+            "shadowed by the frontend/dist catch-all mount, not that the envelope broke")
         body = r.json()
 
         # The human half: still a string, every time, whatever the handler raised.
@@ -636,10 +667,29 @@ def test_a_structured_refusal_survives_the_envelope(env):
         assert ctx["remedy"] == "mode=redact"
         assert [r_["run_id"] for r_ in ctx["blocking_runs"]] == [3, 5]
         assert ctx["blocking_runs"][0]["frozen_lines"] == 11
-    finally:
-        main_mod.app.router.routes = [
-            rt for rt in main_mod.app.router.routes
-            if getattr(rt, "path", None) != "/_test/structured-refusal"]
+
+
+def test_the_temporary_route_outranks_the_spa_catch_all(env):
+    """Pins the fixture itself, because the bug it avoids is invisible without a built
+    frontend on disk: the route must sit ahead of every catch-all mount, and must be
+    gone again afterwards."""
+    client, db = env
+    _org(db)
+    with _temporary_route("/_test/ordering", _frozen_activity_refusal):
+        routes = main_mod.app.router.routes
+        ours = next(i for i, rt in enumerate(routes)
+                    if getattr(rt, "path", None) == "/_test/ordering")
+        # Asserted as "first", not as "before any Mount". `mounts` is empty on a tree
+        # with no frontend/dist, and `all()` over an empty list is True — the assertion
+        # would pass while proving nothing, in exactly the environment where the bug it
+        # guards is invisible. Being first holds in every environment.
+        assert ours == 0, "the route must precede every catch-all mount"
+        mounts = [i for i, rt in enumerate(routes) if isinstance(rt, Mount)]
+        assert all(ours < m for m in mounts)
+        assert client.get("/_test/ordering").status_code == 409
+
+    assert all(getattr(rt, "path", None) != "/_test/ordering"
+               for rt in main_mod.app.router.routes), "the route outlived its test"
 
 
 def test_a_plain_refusal_carries_no_context_key(env):
