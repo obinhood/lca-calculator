@@ -70,6 +70,21 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build the frontend, as the image does
+        # The Dockerfile builds the SPA in stage 1 and copies it to
+        # ./frontend/dist in stage 2, and app/main.py mounts StaticFiles at "/"
+        # whenever that directory exists. So in production the mount is ALWAYS
+        # active. Booting here without it tested a configuration no customer runs,
+        # and specifically could not catch the catch-all mount shadowing an API
+        # route — the mount is registered last and matches everything, so a route
+        # added after it returns 404 with no hint why.
+        working-directory: frontend
+        run: npm ci && npm run build
       - name: Schema builds on PostgreSQL
         run: |
           python -m alembic upgrade head
@@ -98,6 +113,41 @@ jobs:
           # 200 here means the catalogue, including suppliers' PACT footprints, is
           # being served to anonymous callers again.
           test "$code" = "401" -o "$code" = "422"
+      - name: The SPA mount has not swallowed the API
+        run: |
+          # With frontend/dist present the catch-all StaticFiles mount is live. It
+          # is registered LAST so the API matches first; if that order is ever
+          # inverted, the mount matches every path and the whole API disappears.
+          #
+          # ASSERT THE STATUS, NOT THE CONTENT TYPE. The first version of this step
+          # checked only that the response was JSON, and it was VACUOUS: a shadowed
+          # route is answered by StaticFiles with a 404 whose body is JSON, so every
+          # check passed against a completely broken API. Verified by moving the
+          # mount to the front and watching /healthz, /factors and /openapi.json all
+          # return 404 while the step still reported success.
+          fail=0
+          check() {   # path, expected status, human description
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8000$1")
+            ct=$(curl -s -o /dev/null -w '%{content_type}' "http://127.0.0.1:8000$1")
+            echo "$1 -> $code $ct"
+            if [ "$code" = "404" ]; then
+              echo "::error::$1 returned 404 — the SPA mount is shadowing the API"; fail=1; return
+            fi
+            case "$2" in
+              any) ;;
+              *) [ "$code" = "$2" ] || { echo "::error::$1 expected $2, got $code ($3)"; fail=1; } ;;
+            esac
+            case "$ct" in application/json*) ;; *) echo "::error::$1 served $ct, not JSON"; fail=1 ;; esac
+          }
+          check /healthz      200 "the health endpoint must answer"
+          check /openapi.json 200 "the API schema must be served"
+          # /factors is credential-gated: 401 once the error envelope is consistent,
+          # 422 before it. Either is fine; 404 is not, and that is what this catches.
+          check /factors      any "credential-gated, must not be 404"
+          # And the SPA itself is still served at /, so the single-origin image works.
+          curl -fsS http://127.0.0.1:8000/ | grep -qi '<!doctype html' \
+            || { echo "::error::the built frontend is not being served at /"; fail=1; }
+          exit $fail
 
   image:
     # The Dockerfile itself builds. Nothing here starts it: `deploy` above already
