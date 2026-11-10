@@ -127,14 +127,14 @@ def _reject_narrative_query_params(request: Request, *names: str) -> None:
     sent = sorted(n for n in names if n in request.query_params)
     if not sent:
         return
-    raise HTTPException(
-        status_code=400,
-        detail="moved to the request body and no longer read from the URL: "
-               + ", ".join(sent)
-               + ". These carry narrative or person-identifying text, which the "
-                 "production access log records verbatim — including on requests that "
-                 "fail authorisation, with no deletion path. Resend them as JSON in the "
-                 "request body.")
+    _refuse(400,
+            "moved to the request body and no longer read from the URL: "
+            + ", ".join(sent)
+            + ". These carry narrative or person-identifying text, which the production "
+              "access log records verbatim — including on requests that fail "
+              "authorisation, with no deletion path. Resend them as JSON in the request "
+              "body.",
+            moved_parameters=sent, remedy="send these keys in the JSON request body")
 
 
 def _instrument_submission_hash(organisation_id: int, instrument_type: str,
@@ -218,14 +218,47 @@ _ERROR_CODES = {400: "bad_request", 401: "unauthenticated", 403: "forbidden",
 
 
 def _error_body(status: int, message: str, code: Optional[str] = None,
-                fields: Optional[list] = None) -> dict:
+                fields: Optional[list] = None, context=None) -> dict:
     """The one body shape. `detail` for humans and for the existing clients that read
-    it; `error` for a machine that wants the status, a stable code and the field list."""
+    it; `error` for a machine that wants the status, a stable code, the offending fields
+    and — on a refusal that has something to say — the structure behind it."""
     err = {"status": status, "code": code or _ERROR_CODES.get(status, "error"),
            "message": message}
     if fields is not None:
         err["fields"] = fields
+    if context is not None:
+        err["context"] = context
     return {"detail": message, "error": err}
+
+
+def _refuse(status: int, message: str, **context):
+    """Raise a refusal that says why AND carries what the caller needs to act on it.
+
+    A refusal in this codebase names what blocks it — which filed runs froze the row you
+    tried to delete, which instrument your submission duplicates — because the caller
+    cannot do anything with "no". That structure survives into `error.context` verbatim,
+    while `detail` stays the human sentence.
+
+    `detail` is deliberately NOT the object. Making it one would give the field a third
+    shape and force every existing client, the frontend included, to reach through
+    `detail["message"]` — a worse break than the two-shaped `detail` this replaced. A
+    client reads `detail` to show a person; it reads `error.context` to branch on.
+    """
+    raise HTTPException(status_code=status, detail={"message": message, **context})
+
+
+def _detail_parts(detail):
+    """(human string, structured context or None) from whatever a handler raised."""
+    if isinstance(detail, str):
+        return detail, None
+    if isinstance(detail, dict):
+        msg = detail.get("message")
+        if not isinstance(msg, str):
+            msg = _json.dumps(detail, default=str, sort_keys=True)
+        return msg, detail
+    if isinstance(detail, (list, tuple)):
+        return _json.dumps(detail, default=str), list(detail)
+    return str(detail), None
 
 
 def _is_pact_path(request: Request) -> bool:
@@ -257,15 +290,17 @@ async def _on_validation_error(request: Request, exc: RequestValidationError):
 
 @app.exception_handler(StarletteHTTPException)
 async def _on_http_exception(request: Request, exc: StarletteHTTPException):
-    detail = exc.detail
-    message = detail if isinstance(detail, str) else _json.dumps(detail, default=str)
+    # A structured refusal keeps its structure. Flattening it to a string here would
+    # lose exactly what the caller needs on the one path this codebase least wants to
+    # lose information on — see _refuse.
+    message, context = _detail_parts(exc.detail)
     if _is_pact_path(request):
         from .services.pact_host import error as _pact_error
         code = {400: "BadRequest", 401: "Unauthorized", 403: "AccessDenied",
                 404: "NotFound"}.get(exc.status_code, "InternalError")
         return JSONResponse(_pact_error(code, message), status_code=exc.status_code,
                             headers=getattr(exc, "headers", None))
-    return JSONResponse(_error_body(exc.status_code, message),
+    return JSONResponse(_error_body(exc.status_code, message, context=context),
                         status_code=exc.status_code,
                         headers=getattr(exc, "headers", None))
 
@@ -891,16 +926,21 @@ def create_market_instrument(request: Request, instrument_type: str = Query(...)
     submission_hash = _instrument_submission_hash(
         org.id, instrument_type, kg_co2e_per_kwh, coverage_kwh, gwp_set,
         market_norm, start_date, end_date)
-    if db.query(MarketInstrument).filter(
-            MarketInstrument.organisation_id == org.id,
-            MarketInstrument.submission_hash == submission_hash).first():
-        raise HTTPException(
-            status_code=409,
-            detail="an identical market instrument is already registered for this "
-                   "organisation — a second copy would declare the same coverage twice "
-                   "and understate market-based Scope 2. If this is a genuinely "
-                   "separate certificate, submit it with its own coverage window, or "
-                   "raise the existing instrument's coverage_kwh to the combined volume.")
+    clash = db.query(MarketInstrument).filter(
+        MarketInstrument.organisation_id == org.id,
+        MarketInstrument.submission_hash == submission_hash).first()
+    if clash is not None:
+        # Names the instrument it duplicates: "no" alone leaves the caller unable to tell
+        # a replay apart from a genuine second certificate.
+        _refuse(409,
+                "an identical market instrument is already registered for this "
+                "organisation — a second copy would declare the same coverage twice and "
+                "understate market-based Scope 2. If this is a genuinely separate "
+                "certificate, submit it with its own coverage window, or raise the "
+                "existing instrument's coverage_kwh to the combined volume.",
+                conflicting_instrument_id=clash.id,
+                remedy="distinct coverage window, or raise coverage_kwh on "
+                       f"instrument {clash.id}")
     inst = MarketInstrument(organisation_id=org.id, instrument_type=instrument_type,
                             kg_co2e_per_kwh=kg_co2e_per_kwh, coverage_kwh=coverage_kwh,
                             gwp_set=gwp_set, market=market_norm,

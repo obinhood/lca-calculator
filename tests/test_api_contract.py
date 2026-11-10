@@ -592,3 +592,97 @@ def test_the_report_narrative_moved_to_the_post_form(env):
     got = client.get("/reports/iso_14064_2", headers=HDR, params=ids).json()
     no_narrative = client.post("/reports/iso_14064_2", headers=HDR, params=ids).json()
     assert got == no_narrative
+
+
+# =============================================================================
+# 3b. A structured refusal keeps its structure
+#
+# The envelope normalises `detail` to a string, which was the right fix for a field that
+# had two shapes. But this codebase refuses with STRUCTURE — a refusal names what blocks
+# it, because "no" alone leaves the caller unable to act — and flattening that to a
+# sentence would lose exactly what matters on the one path least able to afford it.
+#
+# The contract: `detail` is the human sentence, ALWAYS a string. `error.context` is the
+# structure the handler raised, verbatim. A client reads `detail` to show a person and
+# `error.context` to branch on.
+# =============================================================================
+
+def test_a_structured_refusal_survives_the_envelope(env):
+    """Raised through the real app via a route registered for this test, so it exercises
+    the exception handler rather than the helper in isolation."""
+    client, db = env
+    _org(db)
+
+    @main_mod.app.get("/_test/structured-refusal")
+    def _structured_refusal():                       # pragma: no cover - test route
+        main_mod._refuse(409, "activity 7 is frozen by 2 filed runs",
+                         action="blocked",
+                         blocking_runs=[{"run_id": 3, "frozen_lines": 11},
+                                        {"run_id": 5, "frozen_lines": 2}],
+                         remedy="mode=redact")
+
+    try:
+        r = client.get("/_test/structured-refusal")
+        assert r.status_code == 409
+        body = r.json()
+
+        # The human half: still a string, every time, whatever the handler raised.
+        assert isinstance(body["detail"], str)
+        assert "frozen by 2 filed runs" in body["detail"]
+
+        # The machine half: the structure, intact.
+        ctx = body["error"]["context"]
+        assert ctx["action"] == "blocked"
+        assert ctx["remedy"] == "mode=redact"
+        assert [r_["run_id"] for r_ in ctx["blocking_runs"]] == [3, 5]
+        assert ctx["blocking_runs"][0]["frozen_lines"] == 11
+    finally:
+        main_mod.app.router.routes = [
+            rt for rt in main_mod.app.router.routes
+            if getattr(rt, "path", None) != "/_test/structured-refusal"]
+
+
+def test_a_plain_refusal_carries_no_context_key(env):
+    """Absent structure is absent, not an empty object — a client can tell "this refusal
+    has nothing more to say" from "it has structure I failed to read"."""
+    client, db = env
+    _org(db)
+    r = client.get("/mappings/review", headers=HDR, params={"limit": 0})
+    assert r.status_code == 400
+    assert "context" not in r.json()["error"]
+
+
+def test_this_pr_uses_the_facility_for_its_own_refusals(env):
+    """Not a hook left for someone else to use: the two refusals this PR adds carry the
+    structure a caller needs to act on them."""
+    client, db = env
+    _org(db)
+
+    client.post("/market_instruments", headers=HDR, params=_instrument_params())
+    replay = client.post("/market_instruments", headers=HDR, params=_instrument_params())
+    assert replay.status_code == 409
+    existing = db.query(MarketInstrument).one()
+    assert replay.json()["error"]["context"]["conflicting_instrument_id"] == existing.id
+
+    org = db.query(Organisation).one()
+    f = _factor(db)
+    _act(db, org.id, factor_id=f.id, status="approved")
+    run = compute_co2e(db, org.id)
+    stale = client.get("/reports/iso_14064_2", headers=HDR,
+                       params={"baseline_run_id": run.id,
+                               "baseline_justification": "in the URL",
+                               "project_name": "Retrofit"})
+    assert stale.status_code == 400
+    ctx = stale.json()["error"]["context"]
+    assert ctx["moved_parameters"] == ["baseline_justification", "project_name"]
+    assert "request body" in ctx["remedy"]
+
+
+def test_the_pact_host_still_gets_a_flat_spec_message(env):
+    """/3/... serves {code, message}; a structured refusal there must still render as the
+    spec's two keys, not leak our envelope into a conformance run."""
+    client, db = env
+    _org(db)
+    r = client.get("/3/footprints", headers={"Authorization": "Bearer nope"})
+    assert set(r.json()) == {"code", "message"}
+    assert isinstance(r.json()["message"], str)
