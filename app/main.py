@@ -94,6 +94,21 @@ def _hash_key(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
+def _page_args(limit=None, offset=None):
+    """Normalise and validate a collection window, as a 400 on refusal.
+
+    One gate for every paginated endpoint, so `limit` means the same thing (1..1000,
+    never clamped) wherever a caller meets it.
+    """
+    from .services.pagination import PaginationError, params, validate
+    limit, offset = params(limit, offset)
+    try:
+        validate(limit, offset)
+    except PaginationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return limit, offset
+
+
 def current_org(x_api_key: str = Header(...), db: Session = Depends(get_db)) -> Organisation:
     """Resolve the calling organisation from its API key — the ONLY way any
     org-scoped endpoint identifies a tenant (org names are not credentials).
@@ -558,13 +573,25 @@ def seed_demo_data(org: Organisation = Depends(current_org), db: Session = Depen
 
 
 @app.get("/mappings/review")
-def list_review_queue(org: Organisation = Depends(current_org),
+def list_review_queue(request: Request, limit: Optional[int] = None,
+                      offset: Optional[int] = None,
+                      org: Organisation = Depends(current_org),
                       db: Session = Depends(get_db)):
-    acts = db.query(ActivityRecord).filter(
+    """The activities awaiting a human mapping decision.
+
+    SHAPE CHANGE: was a bare JSON array truncated at 500 rows with NOTHING in the
+    response saying it had been truncated — an org with 900 unmapped rows cleared 500 of
+    them believing the queue was empty. Now an object carrying `activities` and the
+    standard `page` block, so a short page is distinguishable from a finished queue.
+    """
+    from .services.pagination import next_link_headers, page_block, page_of_query
+    limit, offset = _page_args(limit, offset)
+    page = page_of_query(db.query(ActivityRecord).filter(
         ActivityRecord.organisation_id == org.id,
-        ActivityRecord.mapping_status == "needs_review").limit(500).all()
+        ActivityRecord.mapping_status == "needs_review").order_by(ActivityRecord.id),
+        limit, offset)
     out = []
-    for a in acts:
+    for a in page["rows"]:
         sf = a.suggested_factor
         out.append({
             "activity_id": a.id, "date": a.date, "category": a.category,
@@ -577,7 +604,8 @@ def list_review_queue(org: Organisation = Depends(current_org),
                 "geography": sf.geography, "unit": sf.unit, "value": sf.value,
             },
         })
-    return out
+    return JSONResponse({"activities": out, "page": page_block(page, limit, offset)},
+                        headers=next_link_headers(request, page))
 
 
 def _get_own_activity(db: Session, org: Organisation, activity_id: int) -> ActivityRecord:
@@ -729,39 +757,65 @@ def get_summary(run_id: Optional[int] = None,
 
 
 @app.get("/runs")
-def list_runs(org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
-    runs = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
-        .order_by(CalculationRun.id.desc()).limit(50).all()
-    return [{"id": r.id, "created_at": r.created_at, "gwp_set": r.gwp_set, "status": r.status,
-             "total_co2e": r.total_co2e, "total_co2e_market": r.total_co2e_market,
-             "mapped": r.mapped, "total_activities": r.total_activities}
-            for r in runs]
+def list_runs(request: Request, limit: Optional[int] = None, offset: Optional[int] = None,
+              org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+    """This organisation's runs, newest first.
+
+    SHAPE CHANGE: was a bare JSON array capped at 50 with nothing saying so — an org
+    with 60 runs saw 50 and had no way to learn the other 10 existed. Now an object
+    carrying `runs` and the standard `page` block.
+    """
+    from .services.pagination import next_link_headers, page_block, page_of_query
+    limit, offset = _page_args(limit, offset)
+    q = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
+        .order_by(CalculationRun.id.desc())
+    page = page_of_query(q, limit, offset)
+    body = {"runs": [{"id": r.id, "created_at": r.created_at, "gwp_set": r.gwp_set,
+                      "status": r.status, "total_co2e": r.total_co2e,
+                      "total_co2e_market": r.total_co2e_market,
+                      "mapped": r.mapped, "total_activities": r.total_activities}
+                     for r in page["rows"]],
+            "page": page_block(page, limit, offset)}
+    return JSONResponse(body, headers=next_link_headers(request, page))
 
 
 @app.get("/runs/{run_id}/lineage")
-def get_run_lineage(run_id: int, org: Organisation = Depends(current_org),
+def get_run_lineage(run_id: int, request: Request, limit: Optional[int] = None,
+                    offset: Optional[int] = None,
+                    org: Organisation = Depends(current_org),
                     db: Session = Depends(get_db)):
     """Full lineage for one immutable run: every line item with its FROZEN
     calculation detail (factor id/version, unit conversion, per-gas GWPs,
     market allocation, spend normalization, DQ) joined to its source activity.
-    The assurer drill-down: any figure -> source record -> pinned factor."""
+    The assurer drill-down: any figure -> source record -> pinned factor.
+
+    PAGINATED (default 100 line items). This response was unbounded: a large run
+    returned 65.5 MB in one body and peaked 746 MB RSS serialising it. `page.has_more`
+    and the `Link: rel="next"` header walk the rest; `run` and `exclusions` repeat on
+    every page so a page is self-describing.
+    """
     import json as _json
     from .models import CalculationRun, EmissionLineItem
     run = db.query(CalculationRun).filter(CalculationRun.id == run_id,
                                           CalculationRun.organisation_id == org.id).first()
     if run is None:
         raise HTTPException(status_code=404, detail="run not found for this organisation")
-    rows = db.query(EmissionLineItem, ActivityRecord)\
+    from .services.pagination import next_link_headers, page_block, page_of_query
+    limit, offset = _page_args(limit, offset)
+    q = db.query(EmissionLineItem, ActivityRecord)\
         .join(ActivityRecord, ActivityRecord.id == EmissionLineItem.activity_id)\
         .filter(EmissionLineItem.run_id == run.id)\
-        .order_by(EmissionLineItem.id).all()
-    return {
+        .order_by(EmissionLineItem.id)
+    page = page_of_query(q, limit, offset)
+    rows = page["rows"]
+    body = {
         "run": {"id": run.id, "created_at": run.created_at, "gwp_set": run.gwp_set,
                 "status": run.status, "total_co2e": run.total_co2e,
                 "total_co2e_market": run.total_co2e_market,
                 "total_biogenic_co2e": run.total_biogenic_co2e,
                 "reporting_period_id": run.reporting_period_id},
         "exclusions": _json.loads(run.notes or "[]"),
+        "page": page_block(page, limit, offset),
         "line_items": [{
             "id": li.id, "scope": li.scope, "method": li.method, "co2e": li.co2e,
             "detail": _json.loads(li.details or "{}"),
@@ -771,6 +825,7 @@ def get_run_lineage(run_id: int, org: Organisation = Depends(current_org),
                          "source_file": a.source_file},
         } for li, a in rows],
     }
+    return JSONResponse(body, headers=next_link_headers(request, page))
 
 
 @app.get("/runs/{run_id}/uncertainty")
@@ -2011,26 +2066,40 @@ def get_engagement(engagement_id: int, x_api_key: Optional[str] = Header(None),
 
 
 @app.get("/assurance/engagements/{engagement_id}/lineage")
-def get_engagement_lineage(engagement_id: int, x_api_key: Optional[str] = Header(None),
+def get_engagement_lineage(engagement_id: int, request: Request,
+                           limit: Optional[int] = None, offset: Optional[int] = None,
+                           x_api_key: Optional[str] = Header(None),
                            x_assurance_token: Optional[str] = Header(None),
                            db: Session = Depends(get_db)):
-    """The run's frozen lineage, readable by the assuror via the engagement token."""
+    """The run's frozen lineage, readable by the assuror via the engagement token.
+
+    PAGINATED (default 100 line items). This is the response measured at 65.5 MB with a
+    746 MB RSS peak: it serialised every line item of the run into one body, and the
+    assuror — the one caller guaranteed to open it on a large inventory — was the one who
+    paid for it. `page.has_more` and `Link: rel="next"` walk the rest.
+    """
     import json as _json
     from .models import EmissionLineItem, CalculationRun
+    from .services.pagination import next_link_headers, page_block, page_of_query
     eng, _role = _engagement_for_reader(db, engagement_id, x_api_key, x_assurance_token)
     run = db.get(CalculationRun, eng.run_id)
-    rows = db.query(EmissionLineItem, ActivityRecord)\
-        .join(ActivityRecord, ActivityRecord.id == EmissionLineItem.activity_id)\
-        .filter(EmissionLineItem.run_id == run.id).order_by(EmissionLineItem.id).all()
-    return {
+    limit, offset = _page_args(limit, offset)
+    page = page_of_query(db.query(EmissionLineItem, ActivityRecord)
+                         .join(ActivityRecord,
+                               ActivityRecord.id == EmissionLineItem.activity_id)
+                         .filter(EmissionLineItem.run_id == run.id)
+                         .order_by(EmissionLineItem.id), limit, offset)
+    body = {
         "engagement_id": eng.id, "run_id": run.id,
+        "page": page_block(page, limit, offset),
         "line_items": [{
             "id": li.id, "scope": li.scope, "method": li.method, "co2e": li.co2e,
             "detail": _json.loads(li.details or "{}"),
             "activity": {"id": a.id, "date": a.date, "category": a.category,
                          "quantity": a.quantity, "unit": a.unit, "source_file": a.source_file},
-        } for li, a in rows],
+        } for li, a in page["rows"]],
     }
+    return JSONResponse(body, headers=next_link_headers(request, page))
 
 
 def _csv_str(value) -> str:
@@ -2048,13 +2117,23 @@ def _csv_str(value) -> str:
 # --- Mapping audit trail -----------------------------------------------------
 
 @app.get("/mappings/audit")
-def get_mapping_audit(activity_id: Optional[int] = None,
+def get_mapping_audit(request: Request, activity_id: Optional[int] = None,
+                      limit: Optional[int] = None, offset: Optional[int] = None,
                       org: Organisation = Depends(current_org),
                       db: Session = Depends(get_db)):
-    """The append-only journal of factor-binding decisions, oldest first."""
-    from .services.mapping_audit import history, summary
+    """The append-only journal of factor-binding decisions, oldest first.
+
+    PAGINATED (default 100 events); `summary` counts the WHOLE journal, not the page, so
+    a reader cannot mistake one window for the complete record.
+    """
+    from .services.mapping_audit import history_page, summary
+    from .services.pagination import next_link_headers, page_block
+    limit, offset = _page_args(limit, offset)
+    page = history_page(db, org.id, activity_id, limit=limit, offset=offset)
     return JSONResponse({"summary": summary(db, org.id),
-                         "events": history(db, org.id, activity_id)})
+                         "page": page_block(page, limit, offset),
+                         "events": page["rows"]},
+                        headers=next_link_headers(request, page))
 
 
 @app.get("/mappings/audit/as_at")
@@ -2675,11 +2754,15 @@ def run_screening(materiality_pct: float = 5.0, trivial_floor_pct: float = 0.25,
 
 
 @app.get("/activities/findings")
-def list_findings(status: Optional[str] = None, severity: Optional[str] = None,
-                  check_code: Optional[str] = None,
+def list_findings(request: Request, status: Optional[str] = None,
+                  severity: Optional[str] = None, check_code: Optional[str] = None,
+                  limit: Optional[int] = None, offset: Optional[int] = None,
                   org: Organisation = Depends(current_org),
                   db: Session = Depends(get_db)):
-    """The exception register: every live finding with its expectation and threshold."""
+    """The exception register: every live finding with its expectation and threshold.
+
+    PAGINATED (default 100); `summary` counts the whole register, not the page.
+    """
     from .models import ActivityFinding
     from .services.screening import finding_view, summary
     q = db.query(ActivityFinding).filter(ActivityFinding.organisation_id == org.id)
@@ -2689,9 +2772,13 @@ def list_findings(status: Optional[str] = None, severity: Optional[str] = None,
         q = q.filter(ActivityFinding.severity == severity)
     if check_code:
         q = q.filter(ActivityFinding.check_code == check_code)
-    rows = q.order_by(ActivityFinding.id).all()
+    from .services.pagination import next_link_headers, page_block, page_of_query
+    limit, offset = _page_args(limit, offset)
+    page = page_of_query(q.order_by(ActivityFinding.id), limit, offset)
     return JSONResponse({"summary": summary(db, org.id),
-                         "findings": [finding_view(r) for r in rows]})
+                         "page": page_block(page, limit, offset),
+                         "findings": [finding_view(r) for r in page["rows"]]},
+                        headers=next_link_headers(request, page))
 
 
 @app.post("/activities/findings/{finding_id}/dispose")
@@ -2771,15 +2858,24 @@ async def import_product_footprint(request: Request,
 
 
 @app.get("/pact/footprints")
-def get_product_footprints(direction: Optional[str] = None,
+def get_product_footprints(request: Request, direction: Optional[str] = None,
                            status: Optional[str] = None,
                            product_id: Optional[str] = None,
+                           limit: Optional[int] = None, offset: Optional[int] = None,
                            org: Organisation = Depends(current_org),
                            db: Session = Depends(get_db)):
-    """Footprints this organisation holds, newest first."""
-    from .services.pact_store import list_footprints
-    return JSONResponse({"data": list_footprints(
-        db, org.id, direction=direction, status=status, product_id=product_id)})
+    """Footprints this organisation holds, newest first. PAGINATED (default 100).
+
+    `data` keeps its name and element shape; the `page` block is additive.
+    """
+    from .services.pact_store import list_footprints_page
+    from .services.pagination import next_link_headers, page_block
+    limit, offset = _page_args(limit, offset)
+    page = list_footprints_page(db, org.id, direction=direction, status=status,
+                                product_id=product_id, limit=limit, offset=offset)
+    return JSONResponse({"data": page["rows"],
+                         "page": page_block(page, limit, offset)},
+                        headers=next_link_headers(request, page))
 
 
 @app.get("/pact/footprints/{footprint_id}")
@@ -3596,17 +3692,40 @@ def get_framework_guidance(key: str):
 
 
 @app.get("/factors")
-def list_factors(db: Session = Depends(get_db), category: Optional[str] = None,
-                 geo: Optional[str] = None):
-    q = db.query(EmissionFactor)
+def list_factors(request: Request, db: Session = Depends(get_db),
+                 category: Optional[str] = None, geo: Optional[str] = None,
+                 q: Optional[str] = None,
+                 limit: Optional[int] = None, offset: Optional[int] = None,
+                 org: Organisation = Depends(current_org)):
+    """The emission factor catalogue, searchable and paginated.
+
+    SHAPE CHANGE: was a bare JSON array capped at 200 with no search. The mapping
+    override dropdown passes no filter, so only the first 200 of 180+ catalogue rows were
+    ever reachable from it and the rest could not be chosen at all. `q` matches category,
+    subcategory, source and geography case-insensitively.
+    """
+    from .services.pagination import next_link_headers, page_block, page_of_query
+    limit, offset = _page_args(limit, offset)
+    query = db.query(EmissionFactor)
     if category:
-        q = q.filter(EmissionFactor.category == category)
+        query = query.filter(EmissionFactor.category == category)
     if geo:
-        q = q.filter(EmissionFactor.geography == geo)
-    facs = q.limit(200).all()
-    return [{"id": f.id, "src": f.source, "ver": f.version, "geo": f.geography, "year": f.year,
-             "cat": f.category, "subcat": f.subcategory, "unit": f.unit, "gwp": f.gwp_set,
-             "value": f.value} for f in facs]
+        query = query.filter(EmissionFactor.geography == geo)
+    if q and q.strip():
+        from sqlalchemy import func as _func, or_ as _or
+        needle = f"%{q.strip().lower()}%"
+        query = query.filter(_or(
+            _func.lower(EmissionFactor.category).like(needle),
+            _func.lower(EmissionFactor.subcategory).like(needle),
+            _func.lower(EmissionFactor.source).like(needle),
+            _func.lower(EmissionFactor.geography).like(needle)))
+    page = page_of_query(query.order_by(EmissionFactor.id), limit, offset)
+    body = {"factors": [{"id": f.id, "src": f.source, "ver": f.version,
+                         "geo": f.geography, "year": f.year, "cat": f.category,
+                         "subcat": f.subcategory, "unit": f.unit, "gwp": f.gwp_set,
+                         "value": f.value} for f in page["rows"]],
+            "page": page_block(page, limit, offset)}
+    return JSONResponse(body, headers=next_link_headers(request, page))
 
 
 # --- Single-service frontend (optional) ---------------------------------------------------
