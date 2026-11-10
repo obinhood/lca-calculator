@@ -74,6 +74,21 @@ async def _rate_limit_mw(request, call_next):
                 status_code=429, headers={"Retry-After": str(retry_after)})
     return await call_next(request)
 
+# Structured application logging + request correlation (app/observability.py owns the
+# whole concern: configuration, the correlation id and the tenant id). Registered LAST of
+# the HTTP middlewares, which makes it the OUTERMOST one, so it stamps a correlation id
+# onto — and emits one log line for — even the 429s and 401s produced by the layers below.
+# It records the matched ROUTE TEMPLATE and never the query string: a number of endpoints
+# still take narrative, person-identifying free text as query parameters, and that text
+# must not reach a log line.
+from .observability import (
+    bind_tenant as _bind_tenant,
+    configure_logging as _configure_logging,
+    install_observability as _install_observability,
+)
+_configure_logging()
+_install_observability(app)
+
 # Schema is managed by alembic (scripts/init_db.py runs `upgrade head` + seeds).
 # A create_all here would create unstamped tables and diverge from the migration
 # chain, so it was removed deliberately.
@@ -102,6 +117,8 @@ def current_org(x_api_key: str = Header(...), db: Session = Depends(get_db)) -> 
         Organisation.api_key_hash == _hash_key(x_api_key)).first()
     if org is None or org.api_key_revoked:
         raise HTTPException(status_code=401, detail="invalid or revoked API key")
+    # Attribute every log line for this request to the tenant it authenticated as.
+    _bind_tenant(org.id)
     return org
 
 
