@@ -20,7 +20,6 @@ import re
 import pytest
 
 LANDING = pathlib.Path("frontend/src/components/Landing.tsx")
-MAIN = pathlib.Path("app/main.py")
 
 # Every page a stranger can read without signing in. The no-fabrication rule belongs to
 # all of them, not just the one that happened to exist when the rule was written — a
@@ -63,16 +62,41 @@ def _as_int(s: str) -> int:
     return int(digits)
 
 
+def _actual_operations() -> int:
+    """Operations the running app actually serves.
+
+    Counted from the registered routes rather than by grepping `@app.<verb>(` in
+    app/main.py. The decorator grep was a proxy for the real surface, and it silently
+    stopped being one the moment routes began to be registered through
+    `app.add_api_route` (the 19 paginated list endpoints are a loop over a table, not 19
+    decorators). It undercounted by exactly those 19 — which is still a figure the
+    codebase disagrees with, just in the flattering direction, and this file exists to
+    stop that.
+
+    FastAPI's own docs routes are excluded: they are the framework's, not this API's.
+    HEAD and OPTIONS are excluded because they are generated, not authored.
+    """
+    from fastapi.routing import APIRoute
+
+    from app.main import app
+    builtin = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+    return len([
+        (r.path, m)
+        for r in app.routes if isinstance(r, APIRoute)
+        for m in r.methods
+        if m not in ("HEAD", "OPTIONS") and r.path not in builtin
+    ])
+
+
 def test_the_landing_page_states_the_real_endpoint_count():
     stated = _stated()
     assert "API endpoints" in stated, (
         "the rigour section no longer carries an endpoint figure — if it was removed on "
         "purpose, delete this test; if it was renamed, update the label here")
-    actual = len(re.findall(r"^@app\.(?:get|post|put|delete|patch)\(", MAIN.read_text(),
-                            re.MULTILINE))
+    actual = _actual_operations()
     assert _as_int(stated["API endpoints"]) == actual, (
-        f"the landing page says {stated['API endpoints']} API endpoints; app/main.py "
-        f"defines {actual}. Update frontend/src/components/Landing.tsx.")
+        f"the landing page says {stated['API endpoints']} API endpoints; the app serves "
+        f"{actual}. Update frontend/src/components/Landing.tsx.")
 
 
 def test_the_landing_page_states_the_real_test_count(request):

@@ -43,6 +43,14 @@ class Organisation(Base):
     # cannot be defaulted or back-filled — fabricating one is the very failure this fixes —
     # so it is NULL until a human writes it.
     consolidation_approach_reason = Column(Text, nullable=True)
+    # --- Data lifecycle (GDPR Art. 5(1)(e) storage limitation) -------------------------
+    # How many days of activity history this tenant wants kept. NULL is the ONLY default
+    # and means "keep indefinitely" — NOT "keep zero". A processor must never invent a
+    # retention period on the controller's behalf, and a defaulted number here would
+    # start erasing a customer's inventory because nobody filled a form in.
+    # Applied only when a caller explicitly runs POST /retention/apply; there is no
+    # scheduler, so nothing is ever deleted by the mere passage of time.
+    retention_days = Column(Integer, nullable=True)
 
 class ActivityRecord(Base):
     __tablename__ = "activities"
@@ -124,6 +132,18 @@ class ActivityRecord(Base):
     # not enforce the TENANT match anyway — which is the check that actually matters.
     # Existence + org ownership are validated at the API boundary and re-checked by the gate.
     entity_id = Column(Integer, nullable=True, index=True)
+
+    # --- Erasure tombstone (GDPR Art. 17 / Art. 28(3)(g)) -----------------------------
+    # Set when this row's FREE TEXT was erased but the row itself had to stay because a
+    # filed calculation run froze it. NULL = never redacted. See services/lifecycle.py
+    # for why redaction and not deletion, and why this cannot move a published figure:
+    # activities_fingerprint() hashes id/factor/quantity/unit/date/category/... and
+    # deliberately NOT description or source_file, so a redacted row leaves every
+    # existing run's staleness signal bit-identical.
+    #
+    # These two columns are NOT in that fingerprint either, for the same reason.
+    redacted_at = Column(String, nullable=True)        # ISO timestamp (UTC)
+    redaction_reason = Column(String, nullable=True)   # erasure_request | retention | ...
 
     factor = relationship("EmissionFactor", back_populates="activities",
                           foreign_keys=[factor_id])

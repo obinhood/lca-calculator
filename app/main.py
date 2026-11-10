@@ -3651,6 +3651,311 @@ def list_factors(org: Organisation = Depends(current_org),
              "value": f.value} for f in facs]
 
 
+# =========================================================================================
+# DATA LIFECYCLE: read-back, correction, erasure, retention, portability, tenant deletion
+# =========================================================================================
+# The platform had 125 operations and ZERO DELETE/PUT/PATCH: nothing deleted a tenant or a
+# record anywhere, and there was no list endpoint for 20+ object types, so an onboarding
+# typo was permanent and invisible and a GDPR Art. 28(3)(g) deletion request could not be
+# honoured by API or by DBA.
+#
+# The deletion POLICY — when a record is hard-deleted, when its personal data is redacted
+# instead, and when deletion is refused outright — lives in services/lifecycle.py together
+# with the evidence for it. Read that module docstring before changing anything here; the
+# short version is that a filed calculation run freezes a figure but not the free text, so
+# the text can go while the row stays and the run keeps reproducing byte-identically.
+#
+# Everything here is organisation-scoped through `current_org`, and the list endpoints get
+# their scoping from ONE factory below rather than each handler remembering it.
+
+from .services import lifecycle as _lifecycle
+from .services.calc import _utcnow_iso as _lc_now
+
+LIST_PAGE_DEFAULT = 50
+LIST_PAGE_MAX = 500
+
+
+def _list_page(db: Session, org: Organisation, model, limit: int, offset: int,
+               order_desc: bool = True) -> dict:
+    """One page of the CALLING org's rows of `model`.
+
+    The organisation filter is applied HERE, not by the caller. The review's worst
+    finding class was handlers that resolve the caller's organisation and then never use
+    it, so no list endpoint below is given the chance to forget: it names a model and
+    gets a scoped page back.
+
+    limit/offset with has_more/next_offset, matching pact_list_footprints — the one good
+    pagination example already in the codebase — so every paginated endpoint in the
+    platform answers "is there more?" identically.
+    """
+    if limit < 1 or limit > LIST_PAGE_MAX:
+        raise HTTPException(status_code=400,
+                            detail=f"limit must be 1..{LIST_PAGE_MAX}")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    q = db.query(model).filter(model.organisation_id == org.id)
+    q = q.order_by(model.id.desc() if order_desc else model.id)
+    page = _lifecycle.paginate(q, limit, offset)
+    cols = model.__table__.columns
+    return {
+        "items": [_lifecycle.safe_row({c.name: getattr(r, c.name) for c in cols})
+                  for r in page["rows"]],
+        "total_matched": page["total_matched"],
+        "limit": limit, "offset": offset,
+        "has_more": page["has_more"],
+        "next_offset": page["next_offset"] if page["has_more"] else None,
+    }
+
+
+# --- read-back ---------------------------------------------------------------------------
+# One GET per tenant-owned object type that had a POST but no way to read it back. Without
+# these a preparer could create a record and never see it again, so a typo in an uploaded
+# inventory was uncorrectable and invisible. Registered from a table rather than written
+# out 19 times, so every one is identically scoped, paginated and credential-filtered.
+#
+# Each entry is (route path, model, operation id). Models are imported lazily inside the
+# factory call so this block stays appendable without touching the import header above.
+
+def _register_list_endpoints():
+    from .models import (
+        ActivityRecord as _Act, AssuranceEngagement as _AsEng, CarbonCredit as _Cred,
+        CbamGood as _Cbam, DeliverabilityLink as _Deliv, EmissionsTarget as _Tgt,
+        FinancedPosition as _Fin, GranularCertificate as _Gc, HourlyLoad as _Hl,
+        LcaAssessment as _Lca, MarketInstrument as _Mi, NatureSite as _NSite,
+        NatureTarget as _NTgt, PactClient as _PClient, RemovalRecord as _Rem,
+        ReportingEntity as _Ent, ReportingPeriod as _Per,
+        Scope3CategoryDeclaration as _S3Decl, TaxonomyActivity as _Tax,
+    )
+    specs = (
+        ("/activities", _Act, "list_activities"),
+        ("/reporting_periods", _Per, "list_reporting_periods"),
+        ("/entities", _Ent, "list_reporting_entities"),
+        ("/market_instruments", _Mi, "list_market_instruments"),
+        ("/lca/assessments", _Lca, "list_lca_assessments"),
+        ("/finance/positions", _Fin, "list_financed_positions"),
+        ("/removals", _Rem, "list_removal_records"),
+        ("/scope3/declarations", _S3Decl, "list_scope3_declarations"),
+        ("/nature/sites", _NSite, "list_nature_sites"),
+        ("/nature/targets", _NTgt, "list_nature_targets"),
+        ("/assurance/engagements", _AsEng, "list_assurance_engagements"),
+        ("/pact/clients", _PClient, "list_pact_clients"),
+        ("/hourly/certificates", _Gc, "list_granular_certificates"),
+        ("/hourly/loads", _Hl, "list_hourly_loads"),
+        ("/hourly/deliverability_links", _Deliv, "list_deliverability_links"),
+        ("/targets", _Tgt, "list_emissions_targets"),
+        ("/credits", _Cred, "list_carbon_credits"),
+        ("/taxonomy/activities", _Tax, "list_taxonomy_activities"),
+        ("/cbam/goods", _Cbam, "list_cbam_goods"),
+    )
+
+    def _make(model):
+        def handler(limit: int = Query(LIST_PAGE_DEFAULT), offset: int = Query(0),
+                    org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+            return _list_page(db, org, model, limit, offset)
+        return handler
+
+    for path, model, name in specs:
+        app.add_api_route(
+            path, _make(model), methods=["GET"], name=name,
+            summary=f"List the calling organisation's {model.__tablename__}",
+            description=(
+                "Paginated with limit/offset; `has_more` and `next_offset` say whether "
+                "more remain. Scoped to the calling organisation. Credential columns "
+                "are never returned."),
+        )
+
+
+_register_list_endpoints()
+
+
+# --- erasure ----------------------------------------------------------------------------
+
+@app.delete("/activities/{activity_id}")
+def delete_activity(activity_id: int,
+                    mode: str = Query("auto", pattern="^(auto|hard|redact)$"),
+                    reason: str = Query("erasure_request"),
+                    org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+    """Erase one activity. The first DELETE this API has ever had.
+
+    `mode=auto` (default) hard-deletes the row when NO calculation run froze it, and
+    redacts its personal free text when one did. `mode=hard` refuses with 409 rather
+    than redacting, and the refusal NAMES the runs that block it. `mode=redact` always
+    redacts.
+
+    Why a frozen activity is redacted rather than deleted: a filed run's figures come
+    from the frozen line items, but the SECR/ESOS energy total and the evidence pack's
+    transaction detail INNER JOIN the live activities table, so deleting the row makes
+    those lines silently vanish from a disclosure that was already filed. Redaction
+    clears only `description` and `source_file` — neither of which is in
+    activities_fingerprint() — so every filed run stays bit-identical. The full argument
+    is in services/lifecycle.py.
+    """
+    if reason not in _lifecycle.REDACTION_REASONS:
+        raise HTTPException(
+            status_code=400,
+            detail="reason must be one of " + ", ".join(_lifecycle.REDACTION_REASONS))
+    out = _lifecycle.erase_activity(db, org.id, activity_id,
+                                    mode=mode, reason=reason, now=_lc_now())
+    if out["action"] == "not_found":
+        raise HTTPException(status_code=404,
+                            detail="activity not found for this organisation")
+    if out["action"] == "blocked":
+        # 409, and the body names every blocking run. A bare refusal would leave the
+        # caller unable to find out which filed disclosure they would have broken.
+        raise HTTPException(status_code=409, detail=out)
+    return out
+
+
+# --- retention --------------------------------------------------------------------------
+
+@app.post("/organisations/retention")
+def set_retention(retention_days: Optional[int] = Query(None),
+                  clear: bool = Query(False),
+                  org: Organisation = Depends(current_org),
+                  db: Session = Depends(get_db)):
+    """Set (or clear) this organisation's activity retention period, in days.
+
+    NULL means keep indefinitely and is the only default — a processor must not invent a
+    retention period on the controller's behalf. Setting it does NOT delete anything:
+    there is no scheduler, and retention is applied only when a caller explicitly runs
+    POST /retention/apply after inspecting POST /retention/preview.
+    """
+    if clear:
+        org.retention_days = None
+    else:
+        if retention_days is None:
+            raise HTTPException(
+                status_code=400,
+                detail="pass retention_days, or clear=true to keep data indefinitely")
+        if retention_days < 1:
+            raise HTTPException(status_code=400, detail="retention_days must be >= 1")
+        org.retention_days = retention_days
+    db.commit()
+    return {"organisation_id": org.id, "retention_days": org.retention_days,
+            "note": ("NULL means keep indefinitely. Nothing is deleted until "
+                     "POST /retention/apply is called explicitly.")}
+
+
+@app.post("/retention/preview")
+def preview_retention(as_of: Optional[str] = Query(None),
+                      retention_days: Optional[int] = Query(None),
+                      org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """DRY RUN: exactly what applying retention would do, per outcome. Changes nothing.
+
+    Reported as three separate populations rather than one total, because "we would
+    touch 400 rows" hides that most of them can only be redacted. Rows with no usable
+    date are reported as skipped, never silently deleted — nothing shows them to be
+    outside the window, and that is cannot_determine, not yes.
+    """
+    days = retention_days if retention_days is not None else org.retention_days
+    if days is None:
+        raise HTTPException(
+            status_code=400,
+            detail=("no retention period set for this organisation; POST "
+                    "/organisations/retention first, or pass retention_days to preview "
+                    "a hypothetical one"))
+    if days < 1:
+        raise HTTPException(status_code=400, detail="retention_days must be >= 1")
+    try:
+        return _lifecycle.retention_candidates(db, org.id, days,
+                                               as_of or _lc_now()[:10])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/retention/apply")
+def apply_retention(confirm: bool = Query(False),
+                    as_of: Optional[str] = Query(None),
+                    org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+    """Apply this organisation's retention period. Requires confirm=true.
+
+    Hard-deletes only activities no run froze; redacts the rest. Recomputes the candidate
+    set rather than trusting a preview the client may have taken minutes ago.
+    """
+    if org.retention_days is None:
+        raise HTTPException(
+            status_code=400,
+            detail=("no retention period set for this organisation; nothing to apply. "
+                    "POST /organisations/retention first."))
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail=("retention deletes data irreversibly — call POST /retention/preview "
+                    "first, then repeat this call with confirm=true"))
+    try:
+        return _lifecycle.retention_apply(db, org.id, org.retention_days,
+                                          as_of or _lc_now()[:10], _lc_now())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# --- portability ------------------------------------------------------------------------
+
+@app.get("/organisations/export")
+def export_own_data(org: Organisation = Depends(current_org),
+                    db: Session = Depends(get_db)):
+    """Everything this organisation owns, as machine-readable JSON.
+
+    The Art. 20 portability answer and the Art. 15 subject-access substrate: a data
+    subject's rows are in `activities` and the site/commuting lines referencing them, so
+    an Art. 15 request is served by filtering this payload rather than a second
+    half-built export path.
+
+    Rows are emitted column-for-column from the table metadata, so the export cannot
+    drift as the schema grows. Credential columns are never included, and what is left
+    out is stated in the payload rather than left for the reader to notice.
+    """
+    return _lifecycle.export_tenant(db, org.id, _lc_now())
+
+
+# --- tenant deletion --------------------------------------------------------------------
+
+@app.delete("/organisations/self")
+def delete_own_organisation(confirm_org_name: str = Query(...),
+                            confirm_irreversible: bool = Query(False),
+                            org: Organisation = Depends(current_org),
+                            db: Session = Depends(get_db)):
+    """Delete this organisation and EVERYTHING belonging to it. IRREVERSIBLE.
+
+    Two confirmations, matching the existing /organisations/revoke_key precedent: the
+    org's own name, and an explicit acknowledgement that this cannot be undone. Both are
+    logged with the row counts before deletion.
+
+    Authenticated by the tenant's OWN key rather than the platform admin key on purpose.
+    Art. 28(3)(g) is an obligation owed TO the controller, and require_admin returns 503
+    when ADMIN_API_KEY is unset (the default) — gating erasure behind it would make the
+    customer's own right unexercisable on most deployments.
+
+    FK-safe by construction: the order is derived from the table metadata (children
+    first), not hand-maintained. Verified rather than trusted — every org-scoped table is
+    re-counted afterwards and `verified_no_orphans` reports the result, so a caller is
+    never told "deleted" over rows that survived.
+    """
+    if confirm_org_name != org.name:
+        raise HTTPException(status_code=400, detail="confirm_org_name does not match")
+    if not confirm_irreversible:
+        raise HTTPException(
+            status_code=400,
+            detail=("this deletes every record belonging to this organisation and cannot "
+                    "be undone — GET /organisations/export first if you want a copy, "
+                    "then repeat with confirm_irreversible=true"))
+    org_id, org_name = org.id, org.name
+    out = _lifecycle.delete_tenant(db, org_id, org_name, _lc_now())
+    if not out["verified_no_orphans"]:
+        # The scan found rows the deletion did not account for. Report it as a server
+        # error with the evidence: claiming success here is exactly the fail-open
+        # verdict this codebase treats as a defect.
+        raise HTTPException(status_code=500, detail={
+            "message": ("tenant deletion left rows behind — this is a bug; the "
+                        "remaining tables are listed"),
+            **out})
+    return out
+
+
 # --- Single-service frontend (optional) ---------------------------------------------------
 # When a built frontend exists (frontend/dist, produced by `npm run build`), serve it from
 # the SAME origin as the API so one container/host is a complete demo. This mount is added
