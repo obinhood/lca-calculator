@@ -54,7 +54,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import Crosswalk, CrosswalkMapping, EmissionFactor
+from ..models import Crosswalk, CrosswalkMapping, EmissionFactor, factor_visible_to
 
 CROSSWALK_VERSION = "xw-v1"
 
@@ -214,7 +214,8 @@ def resolve(db: Session, *, from_scheme: str, from_code: str, to_scheme: str,
 
 
 def _factor_values(db: Session, scheme: str, codes: list,
-                  factor_source: Optional[str] = None) -> list:
+                  factor_source: Optional[str] = None,
+                  org_id: Optional[int] = None) -> list:
     """Factor values keyed to a set of target codes, for the dispersion measure.
 
     Matched on the CODE, not on the scheme name. A NAICS-keyed factor's `source`
@@ -226,7 +227,8 @@ def _factor_values(db: Session, scheme: str, codes: list,
     if not codes:
         return []
     q = db.query(EmissionFactor).filter(
-        EmissionFactor.method_type == "spend_based")
+        EmissionFactor.method_type == "spend_based",
+        factor_visible_to(org_id))
     if factor_source:
         q = q.filter(EmissionFactor.source.ilike(f"%{factor_source}%"))
     wanted = {_norm(c) for c in codes}
@@ -283,7 +285,8 @@ def dispersion_sigma(values: list, *, cardinality: Optional[int] = None) -> dict
 
 def hop_uncertainty(db: Session, *, from_scheme: str, from_code: str,
                     to_scheme: str, table_version: Optional[str] = None,
-                    factor_source: Optional[str] = None) -> dict:
+                    factor_source: Optional[str] = None,
+                    org_id: Optional[int] = None) -> dict:
     """The full uncertainty statement for one crosswalk hop."""
     r = resolve(db, from_scheme=from_scheme, from_code=from_code,
                 to_scheme=to_scheme, table_version=table_version)
@@ -291,7 +294,8 @@ def hop_uncertainty(db: Session, *, from_scheme: str, from_code: str,
         return {**r, "sigma": None,
                 "sigma_note": "an unresolvable hop has UNKNOWN, not zero, "
                               "uncertainty — it must not be treated as clean"}
-    disp = dispersion_sigma(_factor_values(db, to_scheme, r["candidates"], factor_source),
+    disp = dispersion_sigma(_factor_values(db, to_scheme, r["candidates"], factor_source,
+                                           org_id),
                             cardinality=len(r["candidates"] or []))
     _sig = disp["sigma"]
     _var = None if _sig is None else _sig ** 2
@@ -325,7 +329,8 @@ def hop_uncertainty(db: Session, *, from_scheme: str, from_code: str,
     }
 
 
-def chain_uncertainty(db: Session, hops: list) -> dict:
+def chain_uncertainty(db: Session, hops: list,
+                      org_id: Optional[int] = None) -> dict:
     """Combine a chain of hops, e.g. chart of accounts -> UNSPSC -> CPC -> ISIC.
 
     Variances add on the log scale. An UNRESOLVABLE hop makes the whole chain
@@ -338,7 +343,8 @@ def chain_uncertainty(db: Session, hops: list) -> dict:
         r = hop_uncertainty(db, from_scheme=h["from_scheme"],
                             from_code=h["from_code"], to_scheme=h["to_scheme"],
                             table_version=h.get("table_version"),
-                            factor_source=h.get("factor_source"))
+                            factor_source=h.get("factor_source"),
+                            org_id=org_id)
         results.append(r)
         if not r["resolved"]:
             unresolved.append(f"{h['from_scheme']}->{h['to_scheme']}")
@@ -376,7 +382,8 @@ def chain_uncertainty(db: Session, hops: list) -> dict:
     }
 
 
-def effective_resolution(db: Session, scheme: str) -> dict:
+def effective_resolution(db: Session, scheme: str,
+                         org_id: Optional[int] = None) -> dict:
     """Distinct factor VALUES behind a scheme's codes.
 
     Reported because nominal key precision is often cosmetic: the EPA supply-chain
@@ -386,7 +393,8 @@ def effective_resolution(db: Session, scheme: str) -> dict:
     """
     rows = db.query(EmissionFactor).filter(
         EmissionFactor.method_type == "spend_based",
-        EmissionFactor.source.ilike(f"%{scheme}%")).all()
+        EmissionFactor.source.ilike(f"%{scheme}%"),
+        factor_visible_to(org_id)).all()
     codes = {(_norm(f.subcategory) or _norm(f.category)) for f in rows}
     values = {round(f.value, 9) for f in rows
               if f.value is not None and math.isfinite(f.value)}
@@ -422,7 +430,9 @@ def activity_verdict(db: Session, activity) -> Optional[dict]:
         return {"declared": True, "quantifiable": False,
                 "reason": "crosswalk_chain must be a non-empty array of hops"}
     try:
-        out = chain_uncertainty(db, hops)
+        # The activity names its own tenant, so the frozen verdict is scoped
+        # without activity_verdict's callers having to pass anything.
+        out = chain_uncertainty(db, hops, getattr(activity, "organisation_id", None))
     except (KeyError, TypeError) as exc:
         return {"declared": True, "quantifiable": False,
                 "reason": f"malformed hop: {exc}"}

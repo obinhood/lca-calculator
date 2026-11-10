@@ -1,5 +1,13 @@
 name: CI
 
+# The gap this pipeline used to have: it ran Python 3.9 against SQLite only, never
+# built the image and never started gunicorn — so the one configuration customers
+# actually deploy (Python 3.11 + PostgreSQL + gunicorn, per the Dockerfile) was
+# tested nowhere. A boolean-vs-integer CHECK constraint and four integer defaults on
+# BOOLEAN columns therefore sat in the migration chain: valid on SQLite, rejected by
+# Postgres, aborting `alembic upgrade head` at revision 26 of 43 so the container
+# exited before gunicorn started. `deploy` below is the job that would have caught it.
+
 on:
   push:
     branches: ["**"]
@@ -12,9 +20,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          # Matches the Dockerfile's python:3.11-slim. Was 3.9, which went
+          # end-of-life in October 2025 and is not what production runs.
+          python-version: "3.11"
           cache: pip
       - run: pip install -r requirements-dev.txt
+      - name: Lint (errors only)
+        run: |
+          pip install ruff==0.8.6
+          # Syntax errors, undefined names and broken comparisons — the checks that
+          # catch real defects, and which this codebase already passes. Deliberately
+          # NOT a style pass: a 25k-line codebase that has never been linted would
+          # turn red on formatting and the signal would be ignored.
+          # F401 (unused import) currently reports 37 and is left out on purpose —
+          # it is cleanliness, not correctness, and some of those imports exist for
+          # their registration side effect. Clean the backlog, then add F401 here.
+          ruff check --select E9,F63,F7,F82 --statistics app/ scripts/ tests/
       - name: Run test suite
         run: python -m pytest -q
       - name: Migration chain sanity (fresh DB via alembic + seed)
@@ -22,6 +43,122 @@ jobs:
           rm -f carbon_mvp.db
           python -m scripts.init_db
           python -m alembic check
+
+  deploy:
+    # The production configuration, end to end: the real engine, the real
+    # interpreter, the real boot command. Fails if the app cannot actually start.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lca
+          POSTGRES_PASSWORD: lca
+          POSTGRES_DB: lca
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg2://lca:lca@localhost:5432/lca
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Schema builds on PostgreSQL
+        run: |
+          python -m alembic upgrade head
+          python -m alembic check          # no ORM-vs-migration drift on this engine either
+      - name: Migrations are reversible on PostgreSQL
+        run: |
+          python -m alembic downgrade base
+          python -m alembic upgrade head
+      - name: The container's own boot command
+        run: python -m scripts.init_db     # exactly the first half of the Dockerfile CMD
+      - name: gunicorn serves a healthy app
+        run: |
+          gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 2 \
+            -b 127.0.0.1:8000 --access-logfile - --error-logfile - &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/healthz && break
+            sleep 1
+          done
+          # /healthz reports 503 when the pool cannot reach the database, so a 200
+          # with database:true is a real check and not a liveness stub.
+          curl -fsS http://127.0.0.1:8000/healthz | tee /dev/stderr | grep -q '"database":true'
+      - name: The factor catalogue is not public
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/factors)
+          echo "GET /factors (no credential) -> $code"
+          # 200 here means the catalogue, including suppliers' PACT footprints, is
+          # being served to anonymous callers again.
+          test "$code" = "401" -o "$code" = "422"
+
+  image:
+    # The Dockerfile itself builds. Nothing here starts it: `deploy` above already
+    # exercises the same command against a real Postgres, faster.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t lca-calculator:ci .
+
+  dependencies:
+    # Reporting only, deliberately — but REPORTING, not hiding. The pinned stack is
+    # ~2 years old and carries advisories that no patch bump can clear: fastapi
+    # 0.112.2 caps starlette <0.39.0, so the multipart DoS advisories behind the
+    # ingestion endpoint need a framework upgrade, not a pin change. A job that is
+    # red on every commit regardless of the change under review teaches people to
+    # ignore it, so the findings go to the run summary instead, where they are read.
+    #
+    # `continue-on-error` is on the STEPS, not the job: at job level the workflow
+    # goes green while the check itself still reports failure, which is the one
+    # state nobody can act on.
+    #
+    # Make this blocking once the FastAPI upgrade lands — ideally against a recorded
+    # baseline, so a NEW advisory fails the build while the known backlog does not.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pip-audit==2.7.3
+      - name: Python advisories
+        id: pyaudit
+        continue-on-error: true
+        run: pip-audit -r requirements.txt 2>&1 | tee pip-audit.txt
+      - name: Frontend advisories
+        id: npmaudit
+        continue-on-error: true
+        working-directory: frontend
+        # --package-lock-only audits the lockfile without an install, so this needs
+        # no node_modules and no setup-node.
+        run: npm audit --package-lock-only --omit=dev 2>&1 | tee ../npm-audit.txt
+      - name: Publish advisories to the run summary
+        if: always()
+        run: |
+          {
+            echo "## Dependency advisories (reporting only)"
+            echo
+            echo "Python: \`${{ steps.pyaudit.outcome }}\` · frontend: \`${{ steps.npmaudit.outcome }}\`"
+            echo
+            echo "A finding here does not fail the build. See the comment in"
+            echo ".github/workflows/ci.yml for why, and what makes it blocking."
+            echo
+            echo '### requirements.txt'
+            echo '```'
+            head -c 40000 pip-audit.txt 2>/dev/null || echo '(no output)'
+            echo '```'
+            echo '### frontend/package-lock.json'
+            echo '```'
+            head -c 10000 npm-audit.txt 2>/dev/null || echo '(no output)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   frontend:
     runs-on: ubuntu-latest

@@ -34,6 +34,18 @@ _BASIC_UNCERTAINTY_BY_CATEGORY = {
 }
 _BASIC_UNCERTAINTY_DEFAULT = 1.05
 
+# Which pedigree compilation produced a line's sigma. Frozen onto every scored
+# line and onto the run, so two runs can be checked for comparability without
+# re-deriving anything.
+#
+#   (absent)             the superseded compilation: the variance contributions
+#                        were summed WITHOUT ecoinvent's factor of a half, so
+#                        sigma was 2x the true shape parameter and every
+#                        published 95% interval was twice as wide in log space.
+#   ecoinvent_sdg95_v2   sigma = 0.5 * sqrt(SUM (ln Ui)^2 + (ln Ub)^2), per
+#                        ecoinvent's SDg95 = sigma_g^2 definition.
+PEDIGREE_METHOD = "ecoinvent_sdg95_v2"
+
 # GHG Protocol calculation method -> reliability indicator (1 = best).
 _METHOD_RELIABILITY = {
     "supplier_specific": 1,
@@ -120,7 +132,23 @@ def score(ind: dict, category: Optional[str] = None) -> dict:
     worst = max(vals)
     ub = _BASIC_UNCERTAINTY_BY_CATEGORY.get((category or "").lower(),
                                             _BASIC_UNCERTAINTY_DEFAULT)
-    logvar = sum(math.log(_UF[k][ind[k] - 1]) ** 2 for k in _UF) + math.log(ub) ** 2
+    # THE HALVING IS NOT OPTIONAL. ecoinvent compiles the pedigree contributions
+    # into SDg95 = sigma_g^2 — the factor the 95% interval is built from,
+    # [median / SDg95, median * SDg95] — and NOT into the lognormal shape
+    # parameter:
+    #     SDg95 = exp( sqrt( SUM (ln Ui)^2 + (ln Ub)^2 ) )  and  SDg95 = exp(2*sigma)
+    #     => sigma = 0.5 * sqrt( SUM (ln Ui)^2 + (ln Ub)^2 )
+    # Omitting that factor of a half made every published interval exactly twice
+    # as wide in log space, and mislabelled sigma_g^2 as `gsd`.
+    #
+    # The repository already stated the correct convention in the other module
+    # that uses this table: services/crosswalk.py pins the worst "further
+    # technological correlation" cell at variance 0.12, and
+    #     (ln 2.00 / 2)^2 = 0.120113   while   (ln 2.00)^2 = 0.480453
+    # so 0.12 is only reachable on the halved convention. The two modules
+    # disagreed; crosswalk.py was right.
+    logvar = 0.25 * (sum(math.log(_UF[k][ind[k] - 1]) ** 2 for k in _UF)
+                     + math.log(ub) ** 2)
     sigma = math.sqrt(logvar)
     if overall <= 2 and worst <= 3:
         rating = "high"
@@ -134,7 +162,15 @@ def score(ind: dict, category: Optional[str] = None) -> dict:
         "worst_indicator": worst,
         "rating": rating,
         "basic_uncertainty": ub,
+        # Frozen onto every line so a reader can tell WHICH convention produced
+        # the band. Runs computed before the halving was corrected carry no
+        # marker, and comparability.pedigree_comparable() blocks subtracting one
+        # of those from one of these — the correction moves every interval by a
+        # factor of two, which would otherwise read as a real change in data
+        # quality.
+        "method": PEDIGREE_METHOD,
         "sigma_log": round(sigma, 4),
+        # The true geometric standard deviation now: exp(sigma), not exp(2*sigma).
         "gsd": round(math.exp(sigma), 4),
         "ci95_low_mult": round(math.exp(-1.96 * sigma), 4),
         "ci95_high_mult": round(math.exp(1.96 * sigma), 4),

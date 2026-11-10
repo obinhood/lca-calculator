@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import (
     Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun,
-    MarketInstrument, FxRate, PriceIndex,
+    MarketInstrument, FxRate, PriceIndex, factor_visible_to,
 )
 from .services import applicability
 from .services.ingestion import parse_csv
@@ -615,6 +615,22 @@ def _get_own_activity(db: Session, org: Organisation, activity_id: int) -> Activ
     return a
 
 
+def _visible_factor(db: Session, org: Organisation, factor_id: int) -> EmissionFactor:
+    """A factor this tenant may bind: platform reference data, or their own.
+
+    Binding is a read of the value: a line item built on a factor carries that
+    factor's number into the tenant's own run and lineage. So an id naming another
+    tenant's PACT footprint must not resolve here, and must 404 exactly as a
+    nonexistent id does — otherwise the response distinguishes "someone else's" from
+    "no such row" and becomes an existence oracle over the table.
+    """
+    f = db.query(EmissionFactor).filter(
+        EmissionFactor.id == factor_id, factor_visible_to(org.id)).first()
+    if f is None:
+        raise HTTPException(status_code=404, detail="emission factor not found")
+    return f
+
+
 @app.post("/mappings/{activity_id}/approve")
 def approve_mapping(activity_id: int, org: Organisation = Depends(current_org),
                     db: Session = Depends(get_db)):
@@ -636,9 +652,7 @@ def override_mapping(activity_id: int, factor_id: int = Query(...),
                      org: Organisation = Depends(current_org),
                      db: Session = Depends(get_db)):
     a = _get_own_activity(db, org, activity_id)
-    factor = db.get(EmissionFactor, factor_id)
-    if factor is None:
-        raise HTTPException(status_code=404, detail="emission factor not found")
+    factor = _visible_factor(db, org, factor_id)
     from .services.mapping_audit import record as _audit
     prev_factor, prev_status = a.factor_id, a.mapping_status
     a.factor_id = factor.id
@@ -1211,9 +1225,7 @@ def add_lca_item(assessment_id: int, stage: str = Query(...),
                                    f"(EN standards require a module code like A1-A3, C3, B6)")
     if not (0.0 <= allocation_factor <= 1.0):
         raise HTTPException(status_code=400, detail="allocation_factor must be in [0, 1]")
-    factor = db.get(EmissionFactor, factor_id)
-    if factor is None:
-        raise HTTPException(status_code=404, detail="emission factor not found")
+    factor = _visible_factor(db, org, factor_id)
     it = LcaItem(assessment_id=a.id, stage=stage, description=description, quantity=quantity,
                  unit=unit, factor_id=factor_id, allocation_factor=allocation_factor)
     db.add(it); db.commit(); db.refresh(it)
@@ -2161,9 +2173,19 @@ def get_binding_as_at(activity_id: int, at: str,
 def register_crosswalk(from_scheme: str = Query(...), to_scheme: str = Query(...),
                        source: str = Query(...), table_version: str = Query(...),
                        licence: Optional[str] = None, url: Optional[str] = None,
-                       org: Organisation = Depends(current_org),
+                       _: None = Depends(require_admin),
                        db: Session = Depends(get_db)):
-    """Register a versioned concordance table between two classification schemes."""
+    """Register a versioned concordance table between two classification schemes.
+
+    ADMIN-GATED. A concordance is published reference data (Eurostat, UN) shared by
+    every tenant, and `resolve` picks the newest registration when no version is
+    pinned — so a tenant able to register one could silently redirect another
+    tenant's unversioned lookups to a table of their own. Same gate as FX, CPI,
+    residual mix and the CBAM tables, for the same reason.
+
+    A tenant's OWN crosswalk (chart-of-accounts -> UNSPSC) is a different object and
+    needs a tenant column before it can be offered; it is not this endpoint.
+    """
     from .services.crosswalk import register
     out = register(db, from_scheme=from_scheme, to_scheme=to_scheme, source=source,
                    table_version=table_version, licence=licence, url=url)
@@ -2174,10 +2196,16 @@ def register_crosswalk(from_scheme: str = Query(...), to_scheme: str = Query(...
 
 @app.post("/crosswalks/{crosswalk_id}/mappings")
 async def add_crosswalk_mappings(crosswalk_id: int, request: Request,
-                                 org: Organisation = Depends(current_org),
+                                 _: None = Depends(require_admin),
                                  db: Session = Depends(get_db)):
     """Add concordance rows. Body is a JSON array of
-    {from_code, to_code, partial?, note?}."""
+    {from_code, to_code, partial?, note?}.
+
+    ADMIN-GATED. This handler resolved the caller's organisation and then never used
+    it: any tenant key could add rows to any tenant's table. Adding candidates widens
+    the measured dispersion of every hop through it, so one POST moved another
+    tenant's next published uncertainty band by a factor of six.
+    """
     from .services.crosswalk import add_mappings
     try:
         body = _json.loads(await request.body())
@@ -2240,7 +2268,7 @@ async def declare_crosswalk_chain(request: Request,
         a.crosswalk_chain = _json.dumps(hops)
     db.commit()
     # Show the caller what they just committed to, resolved now.
-    preview = chain_uncertainty(db, hops)
+    preview = chain_uncertainty(db, hops, org.id)
     return JSONResponse({
         "activities_updated": len(rows),
         "activity_ids": [a.id for a in rows],
@@ -2264,7 +2292,7 @@ def resolve_crosswalk(from_scheme: str, from_code: str, to_scheme: str,
     from .services.crosswalk import hop_uncertainty
     return JSONResponse(hop_uncertainty(
         db, from_scheme=from_scheme, from_code=from_code, to_scheme=to_scheme,
-        table_version=table_version))
+        table_version=table_version, org_id=org.id))
 
 
 @app.post("/crosswalks/chain")
@@ -2281,7 +2309,7 @@ async def resolve_crosswalk_chain(request: Request,
     if not isinstance(hops, list) or not hops:
         raise HTTPException(status_code=400,
                             detail="body must be a non-empty JSON array of hops")
-    return JSONResponse(chain_uncertainty(db, hops))
+    return JSONResponse(chain_uncertainty(db, hops, org.id))
 
 
 # --- PACT v3 HOST side: serving the network ----------------------------------
@@ -3127,9 +3155,15 @@ def add_hourly_grid_intensity(grid_region: str = Query(...), hour_start: str = Q
                               source: str = Query(...),
                               kg_co2e_per_kwh_residual: Optional[float] = None,
                               version: str = "1",
-                              org: Organisation = Depends(current_org),
+                              _: None = Depends(require_admin),
                               db: Session = Depends(get_db)):
-    """Reference intensity for one region-hour: grid average and residual mix."""
+    """Reference intensity for one region-hour: grid average and residual mix.
+
+    ADMIN-GATED. HourlyGridIntensity has no tenant column and the matcher takes the
+    highest id per (hour, region), so an unguarded write let any tenant replace the
+    intensity in force for everyone — a multiplier on a reported Scope 2 figure, not
+    merely on an uncertainty band.
+    """
     from .models import HourlyGridIntensity
     from .services.calc import _utcnow_iso
     from .services.hourly_scope2 import _parse_hour
@@ -3692,21 +3726,25 @@ def get_framework_guidance(key: str):
 
 
 @app.get("/factors")
-def list_factors(request: Request, db: Session = Depends(get_db),
-                 category: Optional[str] = None, geo: Optional[str] = None,
-                 q: Optional[str] = None,
-                 limit: Optional[int] = None, offset: Optional[int] = None,
-                 org: Organisation = Depends(current_org)):
-    """The emission factor catalogue, searchable and paginated.
+def list_factors(request: Request, org: Organisation = Depends(current_org),
+                 db: Session = Depends(get_db), category: Optional[str] = None,
+                 geo: Optional[str] = None, q: Optional[str] = None,
+                 limit: Optional[int] = None, offset: Optional[int] = None):
+    """The factor catalogue this tenant may see — searchable and paginated.
+
+    Authenticated, and scoped: this was the only route in the application that returned
+    rows from a customer-populated table with no credential, which republished both
+    operator-licensed catalogues and suppliers' confidential PACT footprints to anonymous
+    callers. `factor_visible_to` is the ONE definition of that rule and is applied here.
 
     SHAPE CHANGE: was a bare JSON array capped at 200 with no search. The mapping
-    override dropdown passes no filter, so only the first 200 of 180+ catalogue rows were
-    ever reachable from it and the rest could not be chosen at all. `q` matches category,
+    override dropdown passes no filter, so only the first 200 catalogue rows were ever
+    reachable from it and the rest could not be chosen at all. `q` matches category,
     subcategory, source and geography case-insensitively.
     """
     from .services.pagination import next_link_headers, page_block, page_of_query
     limit, offset = _page_args(limit, offset)
-    query = db.query(EmissionFactor)
+    query = db.query(EmissionFactor).filter(factor_visible_to(org.id))
     if category:
         query = query.filter(EmissionFactor.category == category)
     if geo:

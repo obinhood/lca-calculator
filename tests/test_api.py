@@ -196,7 +196,9 @@ def test_override_endpoint_over_http(env):
     client.post("/activities/upload_csv", headers=hdr_a,
                 files={"file": ("o.csv", io.BytesIO(csv_data.encode()), "text/csv")})
     item = client.get("/mappings/review", headers=hdr_a).json()[0]
-    factor_id = client.get("/factors").json()[0]["id"]
+    # /factors is org-scoped now: it serves platform reference data plus this
+    # tenant's own rows, and nothing without a credential.
+    factor_id = client.get("/factors", headers=hdr_a).json()[0]["id"]
     r = client.post(f"/mappings/{item['activity_id']}/override",
                     params={"factor_id": factor_id}, headers=hdr_a)
     assert r.status_code == 200
