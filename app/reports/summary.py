@@ -328,6 +328,12 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             # publish 0% renewable, with nothing anywhere saying why. Surfaced here so
             # every renderer reading scope2 inherits it.
             "instruments_excluded_by_gwp_vintage": sorted(skipped_vintage),
+            # Declared contractual volume against the load it was offered, frozen at run
+            # time. None for a run computed before the statement existed — which is
+            # "not evaluated", not "nothing to report", and the two must stay apart.
+            "coverage_statement": (
+                parse_detail(run.scope2_coverage_statement)
+                if getattr(run, "scope2_coverage_statement", None) else None),
         },
         "method_split": {
             "co2e_by_method": method_split,

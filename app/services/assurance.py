@@ -54,6 +54,31 @@ def readiness_assessment(db: Session, run: CalculationRun) -> dict:
     chk("data_quality_quantified", bool(dq.get("has_data")),
         "quantified data-quality (ecoinvent pedigree) supporting the estimate",
         f"score={dq.get('emissions_weighted_score')}")
+    # Scope 2 volume honesty. Frozen onto the run at calculation time, never re-derived
+    # from the live instrument table: a filed run's verdict must not change because a
+    # certificate was added or withdrawn afterwards.
+    #
+    # An UNEVALUATED run is not a passing run. A run frozen before this statement existed
+    # that nonetheless applied contractual instruments has no verdict, and letting it
+    # through is precisely the failure this check closes — a readiness gate that passes
+    # over an absent figure. A run that applied none has nothing to over-declare.
+    cov = (parse_detail(run.scope2_coverage_statement)
+           if getattr(run, "scope2_coverage_statement", None) else None)
+    s2 = s.get("scope2") or {}
+    if cov:
+        # `is False` on purpose: None means "could not be decided" (an unbounded
+        # contractual instrument), and an undecided claim does not pass.
+        s2_ok, s2_why = cov.get("over_declared") is False, cov.get("reason", "")
+    elif (s2.get("kwh_contractual") or 0.0) > 0:
+        s2_ok, s2_why = False, ("run was frozen before the over-declaration check "
+                                "existed and did apply contractual instruments — "
+                                "recompute the run to obtain a verdict")
+    else:
+        s2_ok, s2_why = True, "no contractual instrument applied to this run"
+    chk("scope2_declared_coverage_within_load", s2_ok,
+        "GHG Protocol Scope 2 Guidance Ch. 4 — a contractual instrument covers at most "
+        "the consumption matched to it; declaring more volume than was consumed "
+        "overstates the market-based figure", s2_why)
     chk("traceability", n_lines > 0 and n_traceable == n_lines,
         "every reported figure traceable to source records and a pinned factor version",
         f"{n_traceable}/{n_lines} line items carry a frozen factor id")

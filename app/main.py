@@ -8,13 +8,21 @@ from typing import Optional
 import pandas as pd
 from fastapi import (FastAPI, UploadFile, File, Depends, Query, Header, HTTPException,
                      Request, Response)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
 from .models import (
     Organisation, ActivityRecord, EmissionFactor, ReportingPeriod, CalculationRun,
     MarketInstrument, FxRate, PriceIndex, factor_visible_to,
+)
+from .schemas import (
+    CbamGoodBody, ConcludeBody, ConsolidationBody, DeliverabilityLinkBody,
+    DisposeFindingBody, EngagementBody, EntityBody, FindingBody, Iso140642Body,
+    LcaItemBody, MarketInstrumentBody, NatureImpactBody, PactClientBody,
+    ResolveFindingBody, Sb253Body, Scope3DeclarationBody,
 )
 from .services import applicability
 from .services.ingestion import parse_csv
@@ -70,7 +78,7 @@ async def _rate_limit_mw(request, call_next):
         allowed, retry_after = limiter.check(key, _time.monotonic())
         if not allowed:
             return JSONResponse(
-                {"detail": f"rate limit exceeded — retry in {retry_after}s"},
+                _error_body(429, f"rate limit exceeded — retry in {retry_after}s"),
                 status_code=429, headers={"Retry-After": str(retry_after)})
     return await call_next(request)
 
@@ -94,6 +102,63 @@ def _hash_key(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
+def _require_body(body, *fields: str):
+    """A narrative body that MUST be present, refused with what to send.
+
+    Declared `Optional` in the signature on purpose: a required Pydantic parameter is
+    validated before the handler runs, which would pre-empt the guard above and answer a
+    stale client with a bare "Field required" instead of saying where its parameter went.
+    """
+    if body is None:
+        raise HTTPException(
+            status_code=422,
+            detail="a JSON request body is required, carrying: " + ", ".join(fields))
+    return body
+
+
+def _reject_narrative_query_params(request: Request, *names: str) -> None:
+    """Refuse a request still sending a narrative value in the QUERY STRING.
+
+    These parameters moved into the request body. Quietly ignoring a stale client's
+    query value would DROP the assurance note or the person's name it carried, and the
+    write would report success with the narrative missing — a worse outcome than the
+    logging problem being fixed. So it is refused, loudly, naming what to send instead.
+    """
+    sent = sorted(n for n in names if n in request.query_params)
+    if not sent:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail="moved to the request body and no longer read from the URL: "
+               + ", ".join(sent)
+               + ". These carry narrative or person-identifying text, which the "
+                 "production access log records verbatim — including on requests that "
+                 "fail authorisation, with no deletion path. Resend them as JSON in the "
+                 "request body.")
+
+
+def _instrument_submission_hash(organisation_id: int, instrument_type: str,
+                                kg_co2e_per_kwh: float, coverage_kwh, gwp_set: str,
+                                market, start_date, end_date) -> str:
+    """Stable content hash identifying ONE market-instrument submission.
+
+    Over the normalised values actually stored, so a resubmission differing only in the
+    whitespace or case of a market code is still recognised as the same certificate.
+
+    `description` is deliberately EXCLUDED. It is prose attached to the certificate, not
+    part of its substance, and including it would let a retry with a corrected typo
+    create a second instrument and double the declared coverage — the exact failure this
+    hash exists to prevent. The safe direction of error here is refusing a genuine
+    second certificate, not accepting a duplicate of the first.
+    """
+    blob = _json.dumps(
+        ["mi-v1", organisation_id, instrument_type, repr(float(kg_co2e_per_kwh)),
+         None if coverage_kwh is None else repr(float(coverage_kwh)),
+         gwp_set, market, start_date, end_date],
+        separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def _page_args(limit=None, offset=None):
     """Normalise and validate a collection window, as a 400 on refusal.
 
@@ -109,15 +174,100 @@ def _page_args(limit=None, offset=None):
     return limit, offset
 
 
-def current_org(x_api_key: str = Header(...), db: Session = Depends(get_db)) -> Organisation:
+def current_org(x_api_key: Optional[str] = Header(None),
+                db: Session = Depends(get_db)) -> Organisation:
     """Resolve the calling organisation from its API key — the ONLY way any
     org-scoped endpoint identifies a tenant (org names are not credentials).
-    A revoked key is rejected even though its hash still matches."""
+    A revoked key is rejected even though its hash still matches.
+
+    A MISSING key is 401, not 422. Declared as `Header(...)` it was request-validation's
+    problem, so omitting the header entirely produced a 422 with an array-shaped body
+    while a WRONG key produced a 401 with a string — the same failure, unauthenticated,
+    reported two different ways. A client could not write one branch for "your
+    credential did not work".
+    """
+    if not x_api_key:
+        raise HTTPException(status_code=401,
+                            detail="missing API key — send it in the X-API-Key header")
     org = db.query(Organisation).filter(
         Organisation.api_key_hash == _hash_key(x_api_key)).first()
     if org is None or org.api_key_revoked:
         raise HTTPException(status_code=401, detail="invalid or revoked API key")
     return org
+
+
+# --- ONE error envelope, for every error this API returns --------------------
+#
+# `detail` was polymorphic: a STRING for everything a handler raised, and an ARRAY OF
+# OBJECTS for anything FastAPI's own request validation rejected. A client could not read
+# it without first testing its type, so clients that did not test rendered
+# "[object Object]" to their users, and clients that did had to carry two parsers for one
+# field.
+#
+# `detail` is now ALWAYS a string. Its MESSAGE CONTENT is unchanged for everything the
+# handlers raise — the frontend surfaces it verbatim (frontend/src/api.ts) — and the
+# structured material that used to displace it moves beside it, under `error.fields`,
+# where a client can reach it without the shape of `detail` depending on which layer did
+# the refusing.
+
+_ERROR_CODES = {400: "bad_request", 401: "unauthenticated", 403: "forbidden",
+                404: "not_found", 405: "method_not_allowed", 409: "conflict",
+                413: "payload_too_large", 415: "unsupported_media_type",
+                422: "validation_error", 429: "rate_limited",
+                500: "internal_error", 503: "unavailable"}
+
+
+def _error_body(status: int, message: str, code: Optional[str] = None,
+                fields: Optional[list] = None) -> dict:
+    """The one body shape. `detail` for humans and for the existing clients that read
+    it; `error` for a machine that wants the status, a stable code and the field list."""
+    err = {"status": status, "code": code or _ERROR_CODES.get(status, "error"),
+           "message": message}
+    if fields is not None:
+        err["fields"] = fields
+    return {"detail": message, "error": err}
+
+
+def _is_pact_path(request: Request) -> bool:
+    """The PACT host routes (/3/...) serve a SPEC-DEFINED error object, {code, message},
+    which a conformance runner parses. It is not ours to re-shape, so those paths keep
+    it — including when the refusal comes from request validation rather than the
+    handler, which previously leaked FastAPI's 422 array into a PACT response."""
+    return request.url.path.startswith("/3/")
+
+
+@app.exception_handler(RequestValidationError)
+async def _on_validation_error(request: Request, exc: RequestValidationError):
+    fields = []
+    for e in exc.errors():
+        loc = list(e.get("loc") or [])
+        fields.append({
+            "location": str(loc[0]) if loc else "request",
+            "name": ".".join(str(x) for x in loc[1:]) or None,
+            "message": str(e.get("msg", "")),
+            "type": str(e.get("type", "")),
+        })
+    message = "; ".join(f"{f['name'] or f['location']}: {f['message']}"
+                        for f in fields) or "invalid request"
+    if _is_pact_path(request):
+        from .services.pact_host import error as _pact_error
+        return JSONResponse(_pact_error("BadRequest", message), status_code=400)
+    return JSONResponse(_error_body(422, message, fields=fields), status_code=422)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _on_http_exception(request: Request, exc: StarletteHTTPException):
+    detail = exc.detail
+    message = detail if isinstance(detail, str) else _json.dumps(detail, default=str)
+    if _is_pact_path(request):
+        from .services.pact_host import error as _pact_error
+        code = {400: "BadRequest", 401: "Unauthorized", 403: "AccessDenied",
+                404: "NotFound"}.get(exc.status_code, "InternalError")
+        return JSONResponse(_pact_error(code, message), status_code=exc.status_code,
+                            headers=getattr(exc, "headers", None))
+    return JSONResponse(_error_body(exc.status_code, message),
+                        status_code=exc.status_code,
+                        headers=getattr(exc, "headers", None))
 
 
 @app.get("/healthz")
@@ -695,16 +845,19 @@ def freeze_reporting_period(period_id: int, org: Organisation = Depends(current_
 
 
 @app.post("/market_instruments")
-def create_market_instrument(instrument_type: str = Query(...),
+def create_market_instrument(request: Request, instrument_type: str = Query(...),
                              kg_co2e_per_kwh: float = Query(...),
                              coverage_kwh: Optional[float] = None,
                              gwp_set: str = Query("AR6"),
                              market: Optional[str] = None,
                              start_date: Optional[str] = None,
                              end_date: Optional[str] = None,
-                             description: Optional[str] = None,
+                             body: Optional[MarketInstrumentBody] = None,
                              org: Organisation = Depends(current_org),
                              db: Session = Depends(get_db)):
+    from sqlalchemy.exc import IntegrityError
+    _reject_narrative_query_params(request, "description")
+    description = body.description if body else None
     allowed = {"supplier_specific", "ppa", "rec", "residual_mix"}
     contractual = {"supplier_specific", "ppa", "rec"}
     if instrument_type not in allowed:
@@ -726,12 +879,47 @@ def create_market_instrument(instrument_type: str = Query(...),
                                 detail="contractual instruments (rec/ppa/supplier_specific) require start_date and end_date")
         if _parse_iso_date(start_date) is None or _parse_iso_date(end_date) is None:
             raise HTTPException(status_code=400, detail="dates must be ISO format YYYY-MM-DD")
+    # Idempotency, in the house style of /activities/upload_csv (hashes the file) and
+    # /credits (refuses a duplicate registry serial). A market instrument submitted twice
+    # is NOT a harmless retry: each copy declares its own coverage_kwh, the pool consumes
+    # them cumulatively, and the published market-based Scope 2 falls by the duplicate's
+    # worth — to zero where the claim is 100% renewable, while the disclosure gate
+    # passed. There is no serial-number field on this model, so the system cannot tell
+    # two identical certificates apart from one sent twice; it refuses, and says how to
+    # declare a genuinely separate one.
+    market_norm = market.strip() if market else None
+    submission_hash = _instrument_submission_hash(
+        org.id, instrument_type, kg_co2e_per_kwh, coverage_kwh, gwp_set,
+        market_norm, start_date, end_date)
+    if db.query(MarketInstrument).filter(
+            MarketInstrument.organisation_id == org.id,
+            MarketInstrument.submission_hash == submission_hash).first():
+        raise HTTPException(
+            status_code=409,
+            detail="an identical market instrument is already registered for this "
+                   "organisation — a second copy would declare the same coverage twice "
+                   "and understate market-based Scope 2. If this is a genuinely "
+                   "separate certificate, submit it with its own coverage window, or "
+                   "raise the existing instrument's coverage_kwh to the combined volume.")
     inst = MarketInstrument(organisation_id=org.id, instrument_type=instrument_type,
                             kg_co2e_per_kwh=kg_co2e_per_kwh, coverage_kwh=coverage_kwh,
-                            gwp_set=gwp_set, market=(market.strip() if market else None),
+                            gwp_set=gwp_set, market=market_norm,
                             start_date=start_date,
-                            end_date=end_date, description=description)
-    db.add(inst); db.commit(); db.refresh(inst)
+                            end_date=end_date, description=description,
+                            submission_hash=submission_hash)
+    db.add(inst)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two identical submissions racing each other both read "no existing row" above
+        # and both reach here; the unique index is what actually decides it.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="an identical market instrument is already registered for this "
+                   "organisation — a second copy would declare the same coverage twice "
+                   "and understate market-based Scope 2.")
+    db.refresh(inst)
     return {"id": inst.id, "organisation_id": org.id, "instrument_type": inst.instrument_type,
             "kg_co2e_per_kwh": inst.kg_co2e_per_kwh, "coverage_kwh": inst.coverage_kwh,
             "gwp_set": inst.gwp_set}
@@ -916,10 +1104,15 @@ def get_plain_report(run_id: Optional[int] = None,
     return PlainTextResponse("\n".join(lines))
 
 
-def require_admin(x_admin_key: str = Header(...)) -> None:
+def require_admin(x_admin_key: Optional[str] = Header(None)) -> None:
     """Reference data (FX/CPI) is GLOBAL — every tenant's spend calculations
     depend on it, so writes need the platform admin credential, not any org's
-    API key. Disabled entirely when no admin key is configured."""
+    API key. Disabled entirely when no admin key is configured.
+
+    A MISSING admin key is 401, for the same reason a missing API key is: declared
+    `Header(...)` it was request validation's refusal, so omitting the header produced a
+    422 with an array body while sending a wrong one produced a 401 with a string.
+    """
     import hmac
     import os
     admin_key = os.environ.get("ADMIN_API_KEY")
@@ -927,6 +1120,9 @@ def require_admin(x_admin_key: str = Header(...)) -> None:
         raise HTTPException(status_code=503,
                             detail="reference-data administration disabled "
                                    "(ADMIN_API_KEY not configured)")
+    if not x_admin_key:
+        raise HTTPException(status_code=401,
+                            detail="missing admin key — send it in the X-Admin-Key header")
     if not hmac.compare_digest(x_admin_key, admin_key):
         raise HTTPException(status_code=401, detail="invalid admin key")
 
@@ -1055,16 +1251,20 @@ def add_price_index(currency: str = Query(...), year: int = Query(...),
 
 
 @app.post("/cbam/goods")
-def add_cbam_good(cn_code: str = Query(...), quantity_tonnes: float = Query(...),
+def add_cbam_good(request: Request, cn_code: str = Query(...),
+                  quantity_tonnes: float = Query(...),
                   origin_country: str = Query(...), import_date: str = Query(...),
-                  description: Optional[str] = None, installation: Optional[str] = None,
                   actual_direct_t_per_t: Optional[float] = None,
                   actual_indirect_t_per_t: Optional[float] = None,
                   actual_verified: bool = False,
                   carbon_price_paid_eur_per_t: Optional[float] = None,
+                  body: Optional[CbamGoodBody] = None,
                   org: Organisation = Depends(current_org),
                   db: Session = Depends(get_db)):
     from .models import CbamGood
+    _reject_narrative_query_params(request, "description", "installation")
+    description = body.description if body else None
+    installation = body.installation if body else None
     if not math.isfinite(quantity_tonnes) or quantity_tonnes <= 0:
         raise HTTPException(status_code=400, detail="quantity_tonnes must be a finite number > 0")
     for name, v in (("actual_direct_t_per_t", actual_direct_t_per_t),
@@ -1211,12 +1411,14 @@ def _own_assessment(db: Session, org: Organisation, assessment_id: int):
 
 
 @app.post("/lca/assessments/{assessment_id}/items")
-def add_lca_item(assessment_id: int, stage: str = Query(...),
+def add_lca_item(assessment_id: int, request: Request, stage: str = Query(...),
                  quantity: float = Query(...), unit: str = Query(...),
-                 factor_id: int = Query(...), description: Optional[str] = None,
-                 allocation_factor: float = 1.0,
+                 factor_id: int = Query(...), allocation_factor: float = 1.0,
+                 body: Optional[LcaItemBody] = None,
                  org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import LcaItem
+    _reject_narrative_query_params(request, "description")
+    description = body.description if body else None
     from .services.lca import valid_stage
     a = _own_assessment(db, org, assessment_id)
     if not valid_stage(a.standard, stage):
@@ -1425,7 +1627,9 @@ def get_removals_report(run_id: Optional[int] = None,
 # --- GHG Protocol Ch.3: the organisational boundary ---------------------------
 
 @app.post("/organisations/consolidation")
-def set_consolidation_approach(approach: str = Query(...), reason: str = Query(...),
+def set_consolidation_approach(request: Request,
+                               body: Optional[ConsolidationBody] = None,
+                               approach: str = Query(...),
                                org: Organisation = Depends(current_org),
                                db: Session = Depends(get_db)):
     """Set the org's GHGP Ch.3 consolidation approach and the reason for the choice.
@@ -1435,6 +1639,8 @@ def set_consolidation_approach(approach: str = Query(...), reason: str = Query(.
     """
     from .services.boundary import APPROACHES
     from .services.ghgp import is_boilerplate, MIN_JUSTIFICATION_CHARS
+    _reject_narrative_query_params(request, "reason")
+    reason = _require_body(body, "reason").reason
     if approach not in APPROACHES:
         raise HTTPException(status_code=400, detail=f"approach must be one of {list(APPROACHES)}")
     if is_boilerplate(reason):
@@ -1453,16 +1659,16 @@ def set_consolidation_approach(approach: str = Query(...), reason: str = Query(.
 
 
 @app.post("/entities")
-def create_entity(name: str = Query(...), accounting_category: str = Query(...),
+def create_entity(request: Request, name: str = Query(...),
+                  accounting_category: str = Query(...),
                   equity_share_pct: Optional[float] = None,
-                  equity_share_basis: Optional[str] = None,
                   financial_control: Optional[bool] = None,
                   joint_financial_control: Optional[bool] = None,
                   operational_control: Optional[bool] = None,
-                  control_rationale: Optional[str] = None,
                   in_consolidated_accounting_group: Optional[bool] = None,
                   entity_ref: Optional[str] = None,
                   effective_from: Optional[str] = None, effective_to: Optional[str] = None,
+                  body: Optional[EntityBody] = None,
                   org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     """Declare an operation inside the organisational boundary (GHGP Ch.3).
 
@@ -1473,6 +1679,9 @@ def create_entity(name: str = Query(...), accounting_category: str = Query(...),
     from .models import ReportingEntity
     from .services.boundary import ACCOUNTING_CATEGORIES
     from .services.calc import _utcnow_iso
+    _reject_narrative_query_params(request, "equity_share_basis", "control_rationale")
+    equity_share_basis = body.equity_share_basis if body else None
+    control_rationale = body.control_rationale if body else None
     if accounting_category not in ACCOUNTING_CATEGORIES:
         raise HTTPException(status_code=400,
                             detail=f"accounting_category must be one of {list(ACCOUNTING_CATEGORIES)}")
@@ -1586,19 +1795,20 @@ def attribute_activities_to_entity(entity_id: int = Query(...),
 
 @app.post("/scope3/declarations")
 def upsert_scope3_declaration(
+        request: Request,
         reporting_period_id: int = Query(...), category: int = Query(..., ge=1, le=15),
-        status: str = Query(...), justification: Optional[str] = None,
+        status: str = Query(...),
         screening_estimate_tco2e: Optional[float] = None,
         materiality_threshold_pct: Optional[float] = None,
         screening_method: Optional[str] = None,
         criteria_json: Optional[str] = None,
-        method_description: Optional[str] = None,
         calculation_tools: Optional[str] = None,
         minimum_boundary_met: Optional[bool] = None,
         gross_exposure_total: Optional[float] = None,
         gross_exposure_currency: Optional[str] = None,
-        screened_at: Optional[str] = None, declared_by: Optional[str] = None,
+        screened_at: Optional[str] = None,
         temporal_basis: Optional[str] = None,
+        body: Optional[Scope3DeclarationBody] = None,
         basis_units_sold: Optional[float] = None,
         basis_lifetime_years: Optional[float] = None,
         basis_per_unit_annual_co2e_kg: Optional[float] = None,
@@ -1616,6 +1826,11 @@ def upsert_scope3_declaration(
         MIN_JUSTIFICATION_CHARS,
     )
     from .services.calc import _utcnow_iso
+    _reject_narrative_query_params(request, "justification", "method_description",
+                                   "declared_by")
+    justification = body.justification if body else None
+    method_description = body.method_description if body else None
+    declared_by = body.declared_by if body else None
     if status not in STORABLE_STATUSES:
         raise HTTPException(status_code=400,
                             detail=f"status must be one of {list(STORABLE_STATUSES)}")
@@ -1843,11 +2058,14 @@ def _own_site(db: Session, org: Organisation, site_id: int):
 
 
 @app.post("/nature/sites/{site_id}/impacts")
-def add_nature_impact(site_id: int, kind: str = Query(...), driver: str = Query(...),
-                      materiality: str = "low", description: Optional[str] = None,
+def add_nature_impact(site_id: int, request: Request, kind: str = Query(...),
+                      driver: str = Query(...), materiality: str = "low",
                       metric_value: Optional[float] = None, metric_unit: Optional[str] = None,
+                      body: Optional[NatureImpactBody] = None,
                       org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import NatureImpactDependency
+    _reject_narrative_query_params(request, "description")
+    description = body.description if body else None
     from .services.nature import valid_driver, MATERIALITY, IMPACT_DRIVERS, DEPENDENCY_SERVICES
     s = _own_site(db, org, site_id)
     if kind not in ("impact", "dependency"):
@@ -1904,11 +2122,14 @@ def get_sbtn_report(org: Organisation = Depends(current_org), db: Session = Depe
 
 
 @app.post("/assurance/engagements")
-def create_engagement(run_id: int = Query(...), standard: str = Query(...),
-                      level: str = Query(...), assuror_name: Optional[str] = None,
+def create_engagement(request: Request, run_id: int = Query(...),
+                      standard: str = Query(...), level: str = Query(...),
                       period_label: Optional[str] = None, materiality_pct: float = 5.0,
+                      body: Optional[EngagementBody] = None,
                       org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import AssuranceEngagement, CalculationRun
+    _reject_narrative_query_params(request, "assuror_name")
+    assuror_name = body.assuror_name if body else None
     from .services.calc import _utcnow_iso
     from .services.assurance_standards import (
         VALID_STANDARDS, standard_permitted, run_period_start,
@@ -1954,10 +2175,13 @@ def _own_engagement(db: Session, org: Organisation, engagement_id: int):
 
 
 @app.post("/assurance/engagements/{engagement_id}/findings")
-def add_finding(engagement_id: int, severity: str = Query(...),
-                description: str = Query(...), line_item_id: Optional[int] = None,
+def add_finding(engagement_id: int, request: Request,
+                body: Optional[FindingBody] = None,
+                severity: str = Query(...), line_item_id: Optional[int] = None,
                 org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import AssuranceFinding, EmissionLineItem
+    _reject_narrative_query_params(request, "description")
+    description = _require_body(body, "description").description
     from .services.calc import _utcnow_iso
     eng = _own_engagement(db, org, engagement_id)
     if eng.status == "concluded":
@@ -1978,9 +2202,12 @@ def add_finding(engagement_id: int, severity: str = Query(...),
 
 
 @app.post("/assurance/findings/{finding_id}/resolve")
-def resolve_finding(finding_id: int, resolution_note: str = Query(...),
+def resolve_finding(finding_id: int, request: Request,
+                    body: Optional[ResolveFindingBody] = None,
                     org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import AssuranceFinding, AssuranceEngagement
+    _reject_narrative_query_params(request, "resolution_note")
+    resolution_note = _require_body(body, "resolution_note").resolution_note
     row = db.query(AssuranceFinding, AssuranceEngagement).join(
         AssuranceEngagement, AssuranceEngagement.id == AssuranceFinding.engagement_id)\
         .filter(AssuranceFinding.id == finding_id,
@@ -1998,10 +2225,13 @@ def resolve_finding(finding_id: int, resolution_note: str = Query(...),
 
 
 @app.post("/assurance/engagements/{engagement_id}/conclude")
-def conclude_engagement(engagement_id: int, opinion: str = Query(...),
-                        opinion_note: Optional[str] = None,
+def conclude_engagement(engagement_id: int, request: Request,
+                        opinion: str = Query(...),
+                        body: Optional[ConcludeBody] = None,
                         org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
     from .models import CalculationRun, AssuranceFinding
+    _reject_narrative_query_params(request, "opinion_note")
+    opinion_note = body.opinion_note if body else None
     from .services.assurance import readiness_assessment
     from .services.calc import _utcnow_iso
     eng = _own_engagement(db, org, engagement_id)
@@ -2319,7 +2549,8 @@ async def resolve_crosswalk_chain(request: Request,
 # first test case and aborts the whole run.
 
 @app.post("/pact/clients")
-def create_pact_client(partner_name: Optional[str] = None,
+def create_pact_client(request: Request,
+                       body: Optional[PactClientBody] = None,
                        org: Organisation = Depends(current_org),
                        db: Session = Depends(get_db)):
     """Mint client credentials for one data recipient.
@@ -2328,7 +2559,9 @@ def create_pact_client(partner_name: Optional[str] = None,
     touching the owner's own access.
     """
     from .services.pact_host import create_client
-    return JSONResponse(create_client(db, org.id, partner_name))
+    _reject_narrative_query_params(request, "partner_name")
+    return JSONResponse(create_client(
+        db, org.id, body.partner_name if body else None))
 
 
 @app.post("/pact/clients/{client_id}/revoke")
@@ -2810,8 +3043,9 @@ def list_findings(request: Request, status: Optional[str] = None,
 
 
 @app.post("/activities/findings/{finding_id}/dispose")
-def dispose_finding(finding_id: int, status: str = Query(...),
-                    reason_code: str = Query(...), note: str = Query(...),
+def dispose_finding(finding_id: int, request: Request,
+                    body: Optional[DisposeFindingBody] = None,
+                    status: str = Query(...), reason_code: str = Query(...),
                     org: Organisation = Depends(current_org),
                     db: Session = Depends(get_db)):
     """Record a disposition: corrected, or accepted with a reason.
@@ -2823,6 +3057,8 @@ def dispose_finding(finding_id: int, status: str = Query(...),
     and concluded.
     """
     from .services.screening import dispose
+    _reject_narrative_query_params(request, "note")
+    note = _require_body(body, "note").note
     result = dispose(db, org.id, finding_id, status=status,
                      reason_code=reason_code, note=note)
     if result["disposed"]:
@@ -3192,13 +3428,16 @@ def add_hourly_grid_intensity(grid_region: str = Query(...), hour_start: str = Q
 
 
 @app.post("/hourly/deliverability_links")
-def create_deliverability_link(from_region: str = Query(...), to_region: str = Query(...),
-                               basis: str = Query(...), rationale: Optional[str] = None,
+def create_deliverability_link(request: Request, from_region: str = Query(...),
+                               to_region: str = Query(...), basis: str = Query(...),
+                               body: Optional[DeliverabilityLinkBody] = None,
                                org: Organisation = Depends(current_org),
                                db: Session = Depends(get_db)):
     """Declare that certificates from one region are physically deliverable to another."""
     from .models import DeliverabilityLink
     from .services.calc import _utcnow_iso
+    _reject_narrative_query_params(request, "rationale")
+    rationale = body.rationale if body else None
     if from_region.strip().upper() == to_region.strip().upper():
         raise HTTPException(status_code=400,
                             detail="same-region supply is deliverable implicitly; no link needed")
@@ -3496,12 +3735,22 @@ def get_gri_report(run_id: Optional[int] = None,
         intensity_denominator_period_days=intensity_denominator_period_days)))
 
 
+def _iso_14064_2_payload(db, organisation_id: int, *, baseline_run_id, project_run_id,
+                         leakage_tco2e, baseline_justification, project_name) -> dict:
+    """One renderer behind both the GET and the POST form, so the two cannot drift."""
+    if leakage_tco2e is not None and not math.isfinite(leakage_tco2e):
+        raise HTTPException(status_code=400, detail="leakage_tco2e must be a finite number")
+    from .reports.iso_14064_2 import iso_14064_2_report
+    return with_guidance(iso_14064_2_report(
+        db, organisation_id, baseline_run_id=baseline_run_id,
+        project_run_id=project_run_id, leakage_tco2e=leakage_tco2e,
+        baseline_justification=baseline_justification, project_name=project_name))
+
+
 @app.get("/reports/iso_14064_2")
-def get_iso_14064_2_report(baseline_run_id: Optional[int] = None,
+def get_iso_14064_2_report(request: Request, baseline_run_id: Optional[int] = None,
                            project_run_id: Optional[int] = None,
                            leakage_tco2e: Optional[float] = None,
-                           baseline_justification: Optional[str] = None,
-                           project_name: Optional[str] = None,
                            org: Organisation = Depends(current_org),
                            db: Session = Depends(get_db)):
     """ISO 14064-2 project GHG reduction = (baseline run - project run - leakage).
@@ -3510,14 +3759,36 @@ def get_iso_14064_2_report(baseline_run_id: Optional[int] = None,
     assertion. A justified baseline and a quantified leakage are required; the reduction is
     a SEPARATE account from the corporate inventory (do not double-count). See the payload's
     double_counting_warning / requirements_not_produced.
+
+    `baseline_justification` and `project_name` are narrative and have moved to the POST
+    form of this same path, which returns an IDENTICAL payload. A GET cannot carry them
+    in a body, and leaving them in the query string put a project's name and the prose
+    justifying its baseline into the access log verbatim.
     """
-    if leakage_tco2e is not None and not math.isfinite(leakage_tco2e):
-        raise HTTPException(status_code=400, detail="leakage_tco2e must be a finite number")
-    from .reports.iso_14064_2 import iso_14064_2_report
-    return JSONResponse(with_guidance(iso_14064_2_report(
+    _reject_narrative_query_params(request, "baseline_justification", "project_name")
+    return JSONResponse(_iso_14064_2_payload(
         db, org.id, baseline_run_id=baseline_run_id, project_run_id=project_run_id,
-        leakage_tco2e=leakage_tco2e, baseline_justification=baseline_justification,
-        project_name=project_name)))
+        leakage_tco2e=leakage_tco2e, baseline_justification=None, project_name=None))
+
+
+@app.post("/reports/iso_14064_2")
+def post_iso_14064_2_report(baseline_run_id: Optional[int] = None,
+                            project_run_id: Optional[int] = None,
+                            leakage_tco2e: Optional[float] = None,
+                            body: Optional[Iso140642Body] = None,
+                            org: Organisation = Depends(current_org),
+                            db: Session = Depends(get_db)):
+    """The same report as GET /reports/iso_14064_2, with the narrative in the body.
+
+    A POST that reads rather than writes, because the alternative was logging a baseline
+    justification in a URL. The payload is byte-for-byte what the GET returns for the
+    same inputs — one renderer serves both.
+    """
+    return JSONResponse(_iso_14064_2_payload(
+        db, org.id, baseline_run_id=baseline_run_id, project_run_id=project_run_id,
+        leakage_tco2e=leakage_tco2e,
+        baseline_justification=(body.baseline_justification if body else None),
+        project_name=(body.project_name if body else None)))
 
 
 @app.get("/reports/cdp")
@@ -3564,15 +3835,30 @@ def get_esrs_e1_report(run_id: Optional[int] = None,
 
 
 @app.get("/reports/sb253")
-def get_sb253_report(run_id: Optional[int] = None,
+def get_sb253_report(request: Request, run_id: Optional[int] = None,
                      assurance_level: str = "none",
-                     assurance_provider: Optional[str] = None,
                      org: Organisation = Depends(current_org),
                      db: Session = Depends(get_db)):
-    """California SB 253 (CCDAA) filing payload with pre-submission gates."""
+    """California SB 253 (CCDAA) filing payload with pre-submission gates.
+
+    `assurance_provider` names a firm and has moved to the POST form of this same path,
+    which returns an IDENTICAL payload.
+    """
+    _reject_narrative_query_params(request, "assurance_provider")
     return JSONResponse(with_guidance(sb253_report(db, org.id, run_id=run_id,
                                      assurance_level=assurance_level,
-                                     assurance_provider=assurance_provider)))
+                                     assurance_provider=None)))
+
+
+@app.post("/reports/sb253")
+def post_sb253_report(run_id: Optional[int] = None, assurance_level: str = "none",
+                      body: Optional[Sb253Body] = None,
+                      org: Organisation = Depends(current_org),
+                      db: Session = Depends(get_db)):
+    """The same report as GET /reports/sb253, with the assuror named in the body."""
+    return JSONResponse(with_guidance(sb253_report(
+        db, org.id, run_id=run_id, assurance_level=assurance_level,
+        assurance_provider=(body.assurance_provider if body else None))))
 
 
 @app.get("/compliance/{framework_key}")

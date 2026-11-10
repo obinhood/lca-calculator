@@ -399,6 +399,13 @@ class MarketInstrument(Base):
     __tablename__ = "market_instruments"
     __table_args__ = (
         CheckConstraint("kg_co2e_per_kwh >= 0", name="ck_instrument_rate_nonneg"),
+        # Idempotency, enforced in the DATABASE and not merely checked before the
+        # insert: two identical submissions racing each other both read "no existing
+        # row" and both write, which is the exact double-count this prevents. NULL is
+        # distinct from NULL in both SQLite and Postgres, so instruments written before
+        # this column existed never collide with each other.
+        UniqueConstraint("organisation_id", "submission_hash",
+                         name="uq_instrument_org_submission"),
     )
     id = Column(Integer, primary_key=True)
     organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False)
@@ -416,6 +423,11 @@ class MarketInstrument(Base):
     start_date = Column(String, nullable=True)  # ISO; window the instrument covers
     end_date = Column(String, nullable=True)
     description = Column(Text)
+    # SHA-256 over the submitted instrument's own fields. A replayed POST produces the
+    # same hash and is refused with 409 instead of adding a second identical certificate
+    # — which would declare twice the coverage and drive market-based Scope 2 down.
+    # NULL on rows written before the column existed.
+    submission_hash = Column(String, nullable=True)
 
 
 class EmissionsTarget(Base):
@@ -741,6 +753,11 @@ class CalculationRun(Base):
     # Emissions-weighted pedigree data-quality score (1 best .. 5 worst).
     data_quality_score = Column(Float, default=0.0)
     notes = Column(Text)  # JSON: per-activity exclusion reasons
+    # JSON: declared contractual coverage vs the electricity load it was offered
+    # against, frozen at run time by services.calc._InstrumentPool.coverage_statement().
+    # Frozen, not re-derived: the instrument table is live and a filed run's verdict
+    # must not change because a certificate was added or withdrawn afterwards.
+    scope2_coverage_statement = Column(Text, nullable=True)
     # Fingerprint of the org's activity set at compute time (id/factor/quantity/unit).
     # Lets a reader detect that a run is stale even when the activity COUNT is unchanged
     # (e.g. an activity was re-mapped to a different factor).

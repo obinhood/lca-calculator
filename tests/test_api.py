@@ -59,7 +59,11 @@ def env():
 
 def test_missing_or_bad_key_is_401(env):
     client, _, _, _ = env
-    assert client.get("/results/summary").status_code == 422        # header required
+    # A MISSING key is 401, like a wrong one. It used to be 422 because the header was
+    # declared required and request validation refused it before any handler ran, so the
+    # same condition — unauthenticated — reported two different statuses and two
+    # different body shapes.
+    assert client.get("/results/summary").status_code == 401
     assert client.get("/results/summary",
                       headers={"X-API-Key": "wrong"}).status_code == 401
 
@@ -134,8 +138,10 @@ def test_upload_maps_exact_and_queues_coarse(env):
     assert body["mapping"]["auto"] == 1
     assert body["mapping"]["needs_review"] == 1
 
-    queue = client.get("/mappings/review", headers=hdr_a).json()
+    page = client.get("/mappings/review", headers=hdr_a).json()
+    queue = page["activities"]
     assert len(queue) == 1
+    assert page["page"]["total_matched"] == 1 and page["page"]["has_more"] is False
     item = queue[0]
     assert item["geo"] == "DE"
     # No DE-geography factor exists, so the coarsest fallback applies.
@@ -147,7 +153,7 @@ def test_upload_maps_exact_and_queues_coarse(env):
     ra = client.post(f"/mappings/{item['activity_id']}/approve", headers=hdr_a)
     assert ra.status_code == 200
     assert ra.json()["mapping_status"] == "approved"
-    assert client.get("/mappings/review", headers=hdr_a).json() == []
+    assert client.get("/mappings/review", headers=hdr_a).json()["activities"] == []
 
 
 def test_review_queue_is_org_scoped(env):
@@ -156,8 +162,8 @@ def test_review_queue_is_org_scoped(env):
                 "2025-02-01,electricity,,office,500,kWh,DE\n")
     client.post("/activities/upload_csv", headers=hdr_a,
                 files={"file": ("a.csv", io.BytesIO(csv_data.encode()), "text/csv")})
-    queue_a = client.get("/mappings/review", headers=hdr_a).json()
-    queue_b = client.get("/mappings/review", headers=hdr_b).json()
+    queue_a = client.get("/mappings/review", headers=hdr_a).json()["activities"]
+    queue_b = client.get("/mappings/review", headers=hdr_b).json()["activities"]
     assert len(queue_a) == 1 and queue_b == []
     # B cannot approve A's activity.
     rb = client.post(f"/mappings/{queue_a[0]['activity_id']}/approve", headers=hdr_b)
@@ -195,15 +201,15 @@ def test_override_endpoint_over_http(env):
                 "2025-02-01,electricity,,office,500,kWh,DE\n")
     client.post("/activities/upload_csv", headers=hdr_a,
                 files={"file": ("o.csv", io.BytesIO(csv_data.encode()), "text/csv")})
-    item = client.get("/mappings/review", headers=hdr_a).json()[0]
+    item = client.get("/mappings/review", headers=hdr_a).json()["activities"][0]
     # /factors is org-scoped now: it serves platform reference data plus this
     # tenant's own rows, and nothing without a credential.
-    factor_id = client.get("/factors", headers=hdr_a).json()[0]["id"]
+    factor_id = client.get("/factors", headers=hdr_a).json()["factors"][0]["id"]
     r = client.post(f"/mappings/{item['activity_id']}/override",
                     params={"factor_id": factor_id}, headers=hdr_a)
     assert r.status_code == 200
     assert r.json()["mapping_status"] == "overridden"
-    assert client.get("/mappings/review", headers=hdr_a).json() == []
+    assert client.get("/mappings/review", headers=hdr_a).json()["activities"] == []
 
 
 def test_reference_writes_need_admin_key(env, monkeypatch):

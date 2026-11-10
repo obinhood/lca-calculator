@@ -96,11 +96,12 @@ def test_unqualified_gated_on_readiness_and_material_findings(env):
     eng2 = c.post("/assurance/engagements", headers=hdr_a,
                   params={"run_id": clean, "standard": "ISO_14064_3", "level": "reasonable"}).json()["id"]
     fid = c.post(f"/assurance/engagements/{eng2}/findings", headers=hdr_a,
-                 params={"severity": "material", "description": "factor vintage query"}).json()["id"]
+                 params={"severity": "material"},
+                 json={"description": "factor vintage query"}).json()["id"]
     assert c.post(f"/assurance/engagements/{eng2}/conclude", headers=hdr_a,
                   params={"opinion": "unqualified"}).status_code == 409
     c.post(f"/assurance/findings/{fid}/resolve", headers=hdr_a,
-           params={"resolution_note": "vintage confirmed correct"})
+           json={"resolution_note": "vintage confirmed correct"})
     ok = c.post(f"/assurance/engagements/{eng2}/conclude", headers=hdr_a,
                 params={"opinion": "unqualified"})
     assert ok.status_code == 200 and ok.json()["opinion"] == "unqualified"
@@ -113,7 +114,7 @@ def test_concluded_engagement_rejects_new_findings(env):
                  params={"run_id": clean, "standard": "ISAE_3410", "level": "limited"}).json()["id"]
     c.post(f"/assurance/engagements/{eng}/conclude", headers=hdr_a, params={"opinion": "unqualified"})
     r = c.post(f"/assurance/engagements/{eng}/findings", headers=hdr_a,
-               params={"severity": "minor", "description": "late note"})
+               params={"severity": "minor"}, json={"description": "late note"})
     assert r.status_code == 409
 
 
@@ -121,8 +122,8 @@ def test_assuror_token_is_read_only_and_scoped(env):
     c, hdr_a, hdr_b = env
     clean = _clean_run(c, hdr_a)
     eng = c.post("/assurance/engagements", headers=hdr_a,
-                 params={"run_id": clean, "standard": "ISSA_5000", "level": "reasonable",
-                         "assuror_name": "Example Assurance LLP"}).json()["id"]
+                 params={"run_id": clean, "standard": "ISSA_5000", "level": "reasonable"},
+                 json={"assuror_name": "Example Assurance LLP"}).json()["id"]
     token = c.post(f"/assurance/engagements/{eng}/grant_access", headers=hdr_a).json()["assurance_token"]
     tok_hdr = {"X-Assurance-Token": token}
 
@@ -137,8 +138,8 @@ def test_assuror_token_is_read_only_and_scoped(env):
 
     # The token is read-only: no write endpoint accepts it (writes need org key).
     assert c.post(f"/assurance/engagements/{eng}/findings",
-                  params={"severity": "minor", "description": "x"},
-                  headers=tok_hdr).status_code == 422  # missing X-API-Key
+                  params={"severity": "minor"}, json={"description": "x"},
+                  headers=tok_hdr).status_code == 401  # missing X-API-Key
     # A wrong token is rejected.
     assert c.get(f"/assurance/engagements/{eng}",
                  headers={"X-Assurance-Token": "wrong"}).status_code == 401
@@ -152,7 +153,8 @@ def test_engagement_tenant_isolation(env):
     # B cannot read, add findings to, or conclude A's engagement.
     assert c.get(f"/assurance/engagements/{eng}", headers=hdr_b).status_code == 401
     assert c.post(f"/assurance/engagements/{eng}/findings", headers=hdr_b,
-                  params={"severity": "minor", "description": "x"}).status_code == 404
+                  params={"severity": "minor"},
+                  json={"description": "x"}).status_code == 404
     assert c.post(f"/assurance/engagements/{eng}/conclude", headers=hdr_b,
                   params={"opinion": "adverse"}).status_code == 404
     # B cannot create an engagement over A's run.
@@ -181,12 +183,13 @@ def test_findings_frozen_after_conclusion(env):
     eng = c.post("/assurance/engagements", headers=hdr_a,
                  params={"run_id": clean, "standard": "ISAE_3410", "level": "reasonable"}).json()["id"]
     fid = c.post(f"/assurance/engagements/{eng}/findings", headers=hdr_a,
-                 params={"severity": "material", "description": "open issue"}).json()["id"]
+                 params={"severity": "material"},
+                 json={"description": "open issue"}).json()["id"]
     # Conclude qualified (blocked from unqualified by the open material finding).
     c.post(f"/assurance/engagements/{eng}/conclude", headers=hdr_a, params={"opinion": "qualified"})
     # Resolving the finding AFTER conclusion is refused — the ledger is frozen.
     r = c.post(f"/assurance/findings/{fid}/resolve", headers=hdr_a,
-               params={"resolution_note": "sneaky post-hoc edit"})
+               json={"resolution_note": "sneaky post-hoc edit"})
     assert r.status_code == 409
 
 
