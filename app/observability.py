@@ -38,11 +38,24 @@ every byte of a request:
   separate scope keys), so none of the parameters above can appear there, but a path
   *does* carry ids. It is truncated, and every control character in it is escaped, so a
   caller cannot forge a log line through it (see :func:`_inert`).
-* **Tracebacks.** The ``traceback`` field on a 500 is the exception's own text, and
-  application code may have built that message out of request data — ``int(note)`` on a
-  bad value puts the value in the ``ValueError``. This logger does not put it there and
-  cannot reliably take it out; the error log already carried the same traceback before
-  this module existed. Treat 500 records as needing the same handling as the data itself.
+* **Tracebacks.** The ``traceback`` field on a 500 is the exception's own text, so what
+  it can carry depends on who built the message.
+
+  The database's contribution is shut off at the source. SQLAlchemy appends
+  ``[parameters: (...)]`` to any DBAPI error, carrying the values bound to the failing
+  statement — so a failover, pool exhaustion, statement timeout, deadlock or
+  serialization failure landing while one of the parameters above is bound would put
+  that text here. ``app/database.py`` builds every engine through one factory that sets
+  ``hide_parameters=True``, which withholds the values and keeps the statement and the
+  exception type. This matters more for this module than for the server's own error log,
+  because a record here carries ``org_id`` and ``request_id`` in the *same* object as the
+  traceback: a leak would arrive already attributed to a named tenant.
+
+  The residual, named rather than papered over: a message that **application** code built
+  out of request data still reaches the traceback — ``int(note)`` on a bad value puts the
+  value in the ``ValueError``. That cannot be scrubbed from here without guessing at
+  which substrings are sensitive, and the error log carried the same text before this
+  module existed. Treat 500 records as needing the same handling as the data itself.
 
 The service's *other* writers of request lines are silenced here rather than left to
 contradict all of the above: see :func:`configure_logging` and ``LOG_ACCESS_LOG``.

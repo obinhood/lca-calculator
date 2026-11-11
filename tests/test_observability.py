@@ -508,12 +508,65 @@ def test_preflight_logs_a_sanitised_path_and_still_no_query_string(client, logs)
     assert "resolution_note" not in logs.text
 
 
-def test_500_record_carries_the_exception_message_a_documented_limit(logs):
-    """Pins a known limit rather than a guarantee: the traceback is the exception's own
-    text, and application code may have built that message out of request data. This
-    logger does not put it there and cannot reliably take it out — the error log already
-    carried the same traceback before this module existed. 500 records therefore need the
-    same handling as the data itself."""
+def test_db_fault_traceback_withholds_the_bound_narrative_value(logs):
+    """Where the privacy rule and the traceback rule MEET — the case the first version of
+    these tests never reached.
+
+    SQLAlchemy appends "[parameters: (...)]" to the message of any DBAPI error, carrying
+    the values bound to the failing statement. So a failover, pool exhaustion, statement
+    timeout, deadlock or serialization failure landing while a narrative value is bound
+    would put that text into the traceback. A plain RuntimeError carries no parameters,
+    which is why pinning the 500 path with one proved nothing about this.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.orm import sessionmaker
+    from app.database import _make_engine     # the app's own factory, not a literal
+
+    Session = sessionmaker(bind=_make_engine("sqlite://"))
+    app = FastAPI()
+
+    @app.get("/db")
+    def query(resolution_note: str = ""):
+        session = Session()
+        try:                                   # a DBAPI failure with the value bound
+            session.execute(text("select * from no_such_table where note = :n"),
+                            {"n": resolution_note})
+        finally:
+            session.close()
+
+    observability.install_observability(app)
+    TestClient(app, raise_server_exceptions=False).get(
+        "/db", params={"resolution_note": NARRATIVE})
+
+    record = logs.one_request()
+    assert record["status"] == 500
+    assert record["error_type"] == "OperationalError"
+    assert NARRATIVE not in record["traceback"]        # the bound value is withheld
+    assert NARRATIVE not in logs.text                  # and nowhere else in the record
+    assert "[SQL:" in record["traceback"]              # the statement is NOT withheld
+
+
+def test_every_engine_withholds_bound_parameters_from_error_messages():
+    """Covers the server branch too, which no test can otherwise reach: CI runs SQLite,
+    production runs Postgres, and the two branches take different arguments. They share
+    one factory, so asserting on the factory covers both — a per-branch assertion would
+    have left the production engine checked by nothing."""
+    from app import database
+
+    assert database.engine.hide_parameters is True            # the live engine
+    assert database._make_engine("sqlite://").hide_parameters is True
+    assert database._make_engine(                             # the server branch's shape
+        "postgresql://u:p@localhost/x", pool_pre_ping=True).hide_parameters is True
+
+
+def test_traceback_still_carries_an_app_built_message_the_named_residual(logs):
+    """The residual the module docstring names, pinned so it cannot be forgotten.
+
+    Withholding the database's bound values does not make a traceback safe in general: a
+    message that APPLICATION code built out of request data still reaches it. int() on a
+    narrative value is the simplest case. 500 records therefore need the same handling as
+    the data itself — the error log carried the same text before this module existed.
+    """
     app = FastAPI()
 
     @app.get("/boom")
@@ -526,7 +579,7 @@ def test_500_record_carries_the_exception_message_a_documented_limit(logs):
 
     record = logs.one_request()
     assert record["error_type"] == "ValueError"
-    assert NARRATIVE in record["traceback"]    # the limit, asserted so nobody claims else
+    assert NARRATIVE in record["traceback"]    # the residual, asserted so nobody claims else
     assert record["route"] == "/boom"          # the request line itself stays clean
     assert NARRATIVE not in record["msg"]
 

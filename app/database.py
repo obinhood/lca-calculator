@@ -25,14 +25,35 @@ SQLALCHEMY_DATABASE_URL = _normalise_url(
 
 _is_sqlite = SQLALCHEMY_DATABASE_URL.startswith("sqlite")
 
+def _make_engine(url: str, **kwargs):
+    """The ONE place an engine is built, so that no engine can be built without
+    ``hide_parameters``.
+
+    That is not a style choice. SQLAlchemy appends "[parameters: (...)]" to the message
+    of any DBAPI error, carrying the values bound to the failing statement. Several
+    endpoints accept narrative, person-identifying free text (assurance finding
+    descriptions, assuror names, resolution notes), so a failover, pool exhaustion,
+    statement timeout, deadlock or serialization failure landing while such a value is
+    bound puts that text into an exception message — and from there into every traceback
+    written about it, the web server's and the application's alike.
+
+    The statement ("[SQL: ...]") and the exception type survive, so a traceback keeps its
+    diagnostic value; only the bound values are withheld. Build engines through this
+    function rather than calling create_engine directly: the sqlite and server branches
+    below take different arguments, and a second call site is how one of them ends up
+    without this.
+    """
+    return create_engine(url, hide_parameters=True, **kwargs)
+
+
 if _is_sqlite:
     # check_same_thread=False lets the single-file DB be shared across FastAPI's threadpool.
-    engine = create_engine(
+    engine = _make_engine(
         SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 else:
     # Server databases: a real connection pool with pre-ping so a connection dropped by the
     # server (idle timeout, failover) is detected and replaced rather than handed out dead.
-    engine = create_engine(
+    engine = _make_engine(
         SQLALCHEMY_DATABASE_URL,
         pool_pre_ping=True,
         pool_size=int(os.environ.get("DB_POOL_SIZE", "5")),
