@@ -19,6 +19,7 @@ import pytest
 
 from app.models import (ActivityRecord, CalculationRun, EmissionFactor, Organisation,
                         ReportingEntity)
+from app.reports.comparative import prior_period_candidates
 from app.reports.esrs_e1 import esrs_e1_report
 from app.reports.secr import secr_report
 from app.services.calc import compute_co2e
@@ -410,6 +411,43 @@ def test_a_comparative_that_computed_nothing_is_refused(db, two_years):
     assert r["disclosure_ready"] is False
     # And it is not offered as a remedy either.
     assert empty.id not in [x["run_id"] for x in c["prior_periods_on_file"]]
+
+
+def test_candidates_are_not_offered_on_a_check_that_could_not_read_them(db, two_years):
+    """The candidate list may not name a run the builder would then refuse.
+
+    `_pairing_problem` returns None — "no problem" — when it cannot PARSE the two
+    periods, because ordering is `period_comparable`'s answer to give. That is right
+    inside the builder, where cross_run_gates runs immediately afterwards. In the
+    candidate list there is no afterwards, so a period with non-ISO dates was published
+    as an available comparative on the strength of a check that could not read it:
+    a property reported as held without having been observed, which is this codebase's
+    dominant defect shape.
+
+    `POST /reporting_periods` rejects non-ISO dates at the boundary, so this arrives
+    only from a legacy row or a direct write — which is exactly when a reader has no
+    other signal.
+    """
+    org, p24, _p25, r24, r25 = two_years
+    # Negative control FIRST: while the dates are ISO, FY24 IS a candidate. Without
+    # this the assertion below would pass just as happily against an empty list.
+    before = [c["run_id"] for c in prior_period_candidates(db, org.id, r25)]
+    assert r24.id in before, before
+
+    p24.start_date, p24.end_date = "01/01/2024", "31/12/2024"
+    db.commit()
+
+    after = [c["run_id"] for c in prior_period_candidates(db, org.id, r25)]
+    assert r24.id not in after, (
+        f"run #{r24.id} is still offered as a comparative although its period dates "
+        f"cannot be read; the builder refuses it. Got {after}")
+    # And the builder does refuse it — so the two agree, which is the actual property.
+    c = secr_report(db, org.id, run_id=r25.id, intensity_denominator=2.0,
+                    intensity_denominator_unit="£M revenue",
+                    intensity_denominator_period_days=365,
+                    comparative_run_id=r24.id)["prior_year_comparative"]
+    assert c["status"] == "cannot_determine"
+    assert c["figures"] is None
 
 
 def test_unknown_comparative_run_is_refused_not_ignored(db, two_years):

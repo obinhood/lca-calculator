@@ -48,8 +48,8 @@ from sqlalchemy.orm import Session
 from . import derivation as D
 from ..models import CalculationRun
 from ..services.calc import _parse_iso_date
-from ..services.comparability import (cross_run_gates, period_info, period_payload,
-                                      run_period)
+from ..services.comparability import (cross_run_gates, period_days, period_info,
+                                      period_payload, run_period)
 
 # How a comparative reports a figure it cannot compute. Mirrors the engine's convention
 # that a missing input yields a cannot-determine and never a silent zero.
@@ -121,8 +121,17 @@ def prior_period_candidates(db: Session, organisation_id: int,
     ).order_by(CalculationRun.id.desc()).all()
     # The same standard the builder applies below, for the same reason: a candidate it
     # would go on to refuse is not a remedy, it is a round trip.
+    #
+    # The date check is explicit rather than inherited from `_pairing_problem`, which
+    # returns None — "no problem" — when it cannot PARSE the two periods, because
+    # ordering is then `period_comparable`'s answer to give. That is correct inside the
+    # builder, where `cross_run_gates` runs immediately afterwards and catches it. Here
+    # there is no afterwards: a run whose period dates are not ISO would be published as
+    # an available comparative on the strength of a check that could not read it, which
+    # is the same thing as a figure's absence passing a gate.
     return [_run_descriptor(db, r) for r in rows
-            if _pairing_problem(db, r, run) is None and not _excluded_lines(r)]
+            if _pairing_problem(db, r, run) is None and not _excluded_lines(r)
+            and period_days(run_period(db, r)) is not None]
 
 
 def _pairing_problem(db: Session, prior: CalculationRun,
