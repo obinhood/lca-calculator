@@ -450,6 +450,71 @@ def test_candidates_are_not_offered_on_a_check_that_could_not_read_them(db, two_
     assert c["figures"] is None
 
 
+def test_each_half_of_the_incomplete_gate_fires_on_its_own(db, two_years):
+    """Neither condition may be load-bearing alone, and neither may be dead weight.
+
+    `prior_run_incomplete` tests the run's status AND its exclusion counters. Once the
+    engine began reporting 'complete_with_exclusions' the status branch started
+    catching the all-excluded run first — which would hide a counters branch that had
+    stopped working, and hide it precisely while the suite stayed green.
+
+    So each condition is exercised with the other disabled. The status is forced back
+    to the flat 'complete' the engine used to report, which is the state this gate was
+    written for and the one no longer reachable through the engine; and the counters
+    are stubbed to zero to leave the status branch alone.
+    """
+    from app.reports import comparative as C
+
+    org, p24, _p25, _r24, r25 = two_years
+    bad = compute_co2e(db, org.id, gwp_set="AR5", reporting_period_id=p24.id)
+    assert bad.total_co2e == pytest.approx(0.0) and bad.gwp_mismatch == 12
+
+    def _verdict():
+        return secr_report(db, org.id, run_id=r25.id, intensity_denominator=2.0,
+                           intensity_denominator_unit="£M revenue",
+                           intensity_denominator_period_days=365,
+                           comparative_run_id=bad.id)["prior_year_comparative"]
+
+    assert _verdict()["reason_code"] == "prior_run_incomplete"
+
+    # COUNTERS alone: the pre-correction status, forced back on. A gate that reads only
+    # the status passes here — that is the fail-open this branch was added to close,
+    # and it is no longer reachable through the engine, so only a test can hold it.
+    bad.status = "complete"
+    db.commit()
+    assert _verdict()["reason_code"] == "prior_run_incomplete", (
+        "the exclusion-counter branch does not fire on its own: a run that computed "
+        "NOTHING but calls itself 'complete' would be subtracted from")
+
+    # STATUS alone: counters stubbed to zero, so only the status can refuse.
+    bad.status = "complete_with_exclusions"
+    db.commit()
+    _real = C._excluded_lines
+    try:
+        C._excluded_lines = lambda r: 0
+        assert _verdict()["reason_code"] == "prior_run_incomplete", (
+            "the status branch does not fire on its own")
+    finally:
+        C._excluded_lines = _real
+
+
+def test_the_incomplete_gate_lets_a_clean_run_through(db, two_years):
+    """Negative control on the gate as a whole.
+
+    A gate that refused every comparative would pass both halves of the test above and
+    be worthless. A complete prior run must reach the comparability gates — here the
+    GWP one, which is a different refusal with a different remedy.
+    """
+    org, p24, _p25, _r24, r25 = two_years
+    clean = _ar5_prior_run(db, org, p24)
+    assert clean.status == "complete"
+    c = secr_report(db, org.id, run_id=r25.id, intensity_denominator=2.0,
+                    intensity_denominator_unit="£M revenue",
+                    intensity_denominator_period_days=365,
+                    comparative_run_id=clean.id)["prior_year_comparative"]
+    assert c["reason_code"] == "not_comparable"          # NOT prior_run_incomplete
+
+
 def test_unknown_comparative_run_is_refused_not_ignored(db, two_years):
     org, _p24, _p25, _r24, r25 = two_years
     r = secr_report(db, org.id, run_id=r25.id, intensity_denominator=2.0,
