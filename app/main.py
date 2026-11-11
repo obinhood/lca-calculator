@@ -29,7 +29,7 @@ from .services.ingestion import parse_csv
 from .services.qa import check_records
 from .services.resolver import auto_map_activity
 from .services.calc import compute_co2e, ReportingPeriodError, _parse_iso_date
-from .services.gwp import SUPPORTED_GWP_SETS
+from .services.gwp import SUPPORTED_GWP_SETS, gas_masses_for_factor
 from .services.uncertainty import (
     propagate, DEFAULT_CORRELATION, DEFAULT_ITERATIONS,
 )
@@ -4107,10 +4107,19 @@ def list_factors(request: Request, org: Organisation = Depends(current_org),
             _func.lower(EmissionFactor.source).like(needle),
             _func.lower(EmissionFactor.geography).like(needle)))
     page = page_of_query(query.order_by(EmissionFactor.id), limit, offset)
+    # `per_gas` and `gases` are what tell a caller whether `gwp` BINDS. On an
+    # aggregate-only factor the vintage is baked into `value`, so a run under a
+    # different GWP set will exclude the line; on a per-gas factor the set is applied
+    # to the masses at calculation time and `gwp` describes only the (redundant)
+    # aggregate. Without this the mapping-override dropdown shows a DEFRA factor as
+    # "AR5" whether or not it would actually compute in the reviewer's AR6 run, and a
+    # pure F-gas factor looks vintage-locked when it is not.
     body = {"factors": [{"id": f.id, "src": f.source, "ver": f.version,
                          "geo": f.geography, "year": f.year, "cat": f.category,
                          "subcat": f.subcategory, "unit": f.unit, "gwp": f.gwp_set,
-                         "value": f.value} for f in page["rows"]],
+                         "value": f.value, "per_gas": f.has_gas_breakdown,
+                         "gases": sorted(gas_masses_for_factor(f))}
+                        for f in page["rows"]],
             "page": page_block(page, limit, offset)}
     return JSONResponse(body, headers=next_link_headers(request, page))
 

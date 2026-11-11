@@ -10,11 +10,11 @@ Selection is deterministic and vintage-aware: factors that have been superseded
 (their id appears in another factor's ``supersedes_id``) are never proposed, and
 ties are broken by newest year then newest id — never by insertion order.
 """
-from sqlalchemy import case
+from sqlalchemy import case, or_, select
 from sqlalchemy.orm import Session
 from rapidfuzz import process, fuzz
 from typing import Optional, Tuple
-from ..models import EmissionFactor, ActivityRecord, factor_visible_to
+from ..models import EmissionFactor, ActivityRecord, FactorGasMass, factor_visible_to
 
 # GHG Protocol Scope 3 calculation-method hierarchy (lower = preferred).
 METHOD_RANK = {"supplier_specific": 0, "hybrid": 1, "average_data": 2, "spend_based": 3}
@@ -45,6 +45,23 @@ CONFIDENCE = {
 }
 
 
+def _has_gas_breakdown_clause():
+    """SQL for ``EmissionFactor.has_gas_breakdown`` — "this factor is vintage-free".
+
+    The ORM property cannot be used in a WHERE clause, so the same rule is expressed
+    here in SQL. It must stay in step with ``models.EmissionFactor.has_gas_breakdown``:
+    any of the three mass columns set, OR at least one ``factor_gas_masses`` row (which
+    is the only representation an SF6 or refrigerant factor has — it has no column-backed
+    mass at all, so a columns-only test would call it aggregate-only and vintage-check a
+    factor that has no vintage). tests/test_factors_gwp.py pins the two against each
+    other over a matrix of factors so they cannot drift apart silently.
+    """
+    return or_(EmissionFactor.kg_co2.isnot(None),
+               EmissionFactor.kg_ch4.isnot(None),
+               EmissionFactor.kg_n2o.isnot(None),
+               EmissionFactor.id.in_(select(FactorGasMass.factor_id)))
+
+
 def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int],
                 org_id: Optional[int] = None):
     """Candidate factors: never superseded, visible to this tenant, deterministically ordered.
@@ -67,7 +84,16 @@ def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int],
         .filter(factor_visible_to(org_id))\
         .order_by(method_rank.asc(), EmissionFactor.year.desc(), EmissionFactor.id.desc())
     if gwp_set:
-        q = q.filter(EmissionFactor.gwp_set == gwp_set)
+        # A factor's `gwp_set` describes the vintage baked into its AGGREGATE `value`.
+        # A factor carrying per-gas masses is VINTAGE-FREE — the GWP set is applied to
+        # those masses at calculation time — so for it the stamp describes a column the
+        # calculation will not read, and filtering on it would reject a factor that
+        # serves the requested set perfectly. That is not academic: the real DESNZ file
+        # is published on AR5, so under the platform's AR6 default this filter rejected
+        # every DEFRA factor, the vintage fallback below demoted each one under the
+        # auto-bind threshold, and an entire inventory went to the review queue.
+        q = q.filter(or_(EmissionFactor.gwp_set == gwp_set,
+                         _has_gas_breakdown_clause()))
     if year:
         q = q.filter(EmissionFactor.year == year)
     return q

@@ -27,7 +27,22 @@ produced.
 - **Per-gas storage with GWP applied at calculation time.** Sources disagree on
   GWP vintage (DEFRA is AR5, USEEIO v1.4 is AR6); pre-aggregated CO₂e is never
   blended across them. Per-gas masses are stored and the GWP set applied at
-  compute time, so AR5/AR6 is a switch rather than a re-import.
+  compute time, so AR5/AR6 is a switch rather than a re-import. This holds for
+  factors from the published sources, not only hand-built rows: the DESNZ adapter
+  ingests the per-gas lines DESNZ publishes, recovering each gas mass by dividing
+  its published CO₂e line by the GWP DESNZ states it used, and refuses to store a
+  breakdown unless recomposing it reproduces the published total to within the
+  file's own precision. Where a source publishes **only** an aggregate, the
+  vintage stays baked in and a run under a different set reports that line as
+  excluded with a reason rather than dropping it.
+- **All seven Kyoto gas families are representable** — CO₂, CH₄, N₂O, HFCs, PFCs,
+  SF₆ and NF₃. CO₂/CH₄/N₂O have mass columns; every other gas is a row in
+  `factor_gas_masses`, so adding a gas is data rather than a migration, and a gas
+  that was never measured stays distinguishable from one measured as zero.
+  Refrigerant **blends** (R-410A, R-404A, …) are stored by designation and their
+  GWP composed from the component values at calculation time, so a fugitive
+  refrigerant line moves between AR5 and AR6 like any other. GWP values are the
+  GHG Protocol's *IPCC Global Warming Potential Values* v2.0 (Aug 2024) table.
 - **Deterministic factor resolution** with immutable, versioned factors —
   published rows are never mutated; a correction is a new row with a
   `supersedes_id` link, so a historical run stays reproducible.
