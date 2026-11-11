@@ -1177,3 +1177,363 @@ def test_redacted_activity_is_visible_as_redacted_in_the_list(env):
     assert row["redacted_at"] is not None
     assert row["redaction_reason"] == "erasure_request"
     assert "redacted" in row["description"]
+
+
+# --- review findings: regressions --------------------------------------------------------
+# Each of these reproduced as a defect before the fix beside it. They are grouped so the
+# shape stays visible: three of the four are the same invariant — a record must not assert
+# something that did not happen, and a verdict must not certify over what it cannot see.
+
+def test_redaction_does_not_stamp_fields_that_were_never_populated(env):
+    """An absence must not be recorded as an erasure.
+
+    Stamping "[redacted ...]" over a field that was always NULL made the evidence pack
+    assert that personal data had been removed from a record that never held any —
+    invariant 1 inverted, on the one artefact whose purpose is to be shown to an assuror.
+    """
+    db = env["Session"]()
+    a = ActivityRecord(organisation_id=env["org_a"], date="2024-05-01",
+                       category="electricity", subcategory="", description=None,
+                       source_file=None, quantity=7.0, unit="kWh", geo="GB")
+    db.add(a)
+    db.commit()
+    db.refresh(a)
+    bare = a.id
+    db.close()
+
+    r = env["client"].delete(f"/activities/{bare}", params={"mode": "redact"},
+                             headers=env["hdr_a"])
+    assert r.status_code == 200
+    body = r.json()
+    assert body["fields_cleared"] == []
+    assert body["nothing_to_redact"] is True
+    assert "held no free text" in body["note"]
+
+    db = env["Session"]()
+    a = db.get(ActivityRecord, bare)
+    # The fields are untouched: still absent, not claiming an erasure.
+    assert a.description is None
+    assert a.source_file is None
+    # But the request itself is on the record.
+    assert a.redacted_at is not None
+    db.close()
+
+
+def test_redaction_still_clears_a_field_that_was_populated(env):
+    """The negative control for the test above: a real erasure must still happen."""
+    r = env["client"].delete(f"/activities/{env['frozen']}", params={"mode": "redact"},
+                             headers=env["hdr_a"])
+    body = r.json()
+    assert set(body["fields_cleared"]) == {"description", "source_file"}
+    assert "nothing_to_redact" not in body
+    db = env["Session"]()
+    a = db.get(ActivityRecord, env["frozen"])
+    assert a.description.startswith("[redacted ")
+    db.close()
+
+
+def test_a_run_that_froze_an_activity_as_an_exclusion_blocks_hard_delete(env):
+    """The reproduction contract must not be decided on half the picture.
+
+    compute_co2e writes a per-activity exclusion register to run.notes for records it
+    could not calculate — a negative quantity, an unconvertible unit, a missing
+    quantity. Those produce NO line item, so a blocker check that only joined line
+    items hard-deleted them and left the filed run's register naming an activity id
+    that no longer resolves.
+    """
+    from app.services.calc import compute_co2e
+    db = env["Session"]()
+    bad = ActivityRecord(organisation_id=env["org_a"], date="2024-06-01",
+                         category="electricity", subcategory="",
+                         description="meter read, Sam Okoro", quantity=-5.0,
+                         unit="kWh", geo="GB", factor_id=env["factor"])
+    db.add(bad)
+    db.commit()
+    db.refresh(bad)
+    bad_id = bad.id
+    run = compute_co2e(db, env["org_a"])
+    db.commit()
+    run_id = run.id
+    named = [n.get("activity_id") for n in json.loads(run.notes or "[]")
+             if isinstance(n, dict)]
+    db.close()
+    assert bad_id in named, "fixture precondition: the run must have excluded this row"
+
+    # No line item exists for it...
+    db = env["Session"]()
+    assert db.query(func.count(EmissionLineItem.id)).filter(
+        EmissionLineItem.activity_id == bad_id).scalar() == 0
+    db.close()
+
+    # ...yet the run froze a statement about it, so a hard delete is refused.
+    r = env["client"].delete(f"/activities/{bad_id}", params={"mode": "hard"},
+                             headers=env["hdr_a"])
+    assert r.status_code == 409
+    detail = _structured_refusal(r)
+    blocking = {b["run_id"]: b for b in detail["blocking_runs"]}
+    assert run_id in blocking
+    assert blocking[run_id]["frozen_as"] == "exclusion"
+    assert blocking[run_id]["exclusion_reason"]
+
+    # And auto mode redacts rather than deletes.
+    r = env["client"].delete(f"/activities/{bad_id}", headers=env["hdr_a"])
+    assert r.json()["action"] == "redacted"
+    db = env["Session"]()
+    assert db.get(ActivityRecord, bad_id) is not None
+    db.close()
+
+
+def test_a_line_and_an_exclusion_are_distinguished_not_double_counted(env):
+    """Both kinds of freeze are reported, and a run doing both is named once."""
+    blockers = None
+    db = env["Session"]()
+    blockers = L.runs_freezing_activity(db, env["frozen"])
+    db.close()
+    assert [b["frozen_as"] for b in blockers] == ["line"]
+    assert len(blockers) == len({b["run_id"] for b in blockers})
+
+
+def test_retention_apply_refuses_a_future_as_of(env):
+    """`as_of` is interchangeable with retention_days, so a future one would turn any
+    retention period into "delete everything"."""
+    c, hdr = env["client"], env["hdr_a"]
+    c.post("/organisations/retention", params={"retention_days": 36500}, headers=hdr)
+    r = c.post("/retention/apply",
+               params={"confirm": True, "as_of": "2999-01-01"}, headers=hdr)
+    assert r.status_code == 400
+    assert "in the future" in r.json()["detail"]
+    # Nothing was touched by the refused call.
+    db = env["Session"]()
+    assert db.get(ActivityRecord, env["loose"]) is not None
+    assert db.get(ActivityRecord, env["frozen"]).redacted_at is None
+    db.close()
+
+
+def test_retention_apply_still_accepts_a_past_as_of(env):
+    """The negative control: a past as_of only ever narrows the window, so it stays
+    allowed — and it is what makes these tests deterministic."""
+    c, hdr = env["client"], env["hdr_a"]
+    c.post("/organisations/retention", params={"retention_days": 30}, headers=hdr)
+    r = c.post("/retention/apply",
+               params={"confirm": True, "as_of": "2024-12-31"}, headers=hdr)
+    assert r.status_code == 200
+    assert r.json()["hard_deleted"] == [env["loose"]]
+
+
+def test_a_100_year_retention_deletes_nothing_whatever_as_of_is_passed(env):
+    """The property the bound exists to guarantee."""
+    c, hdr = env["client"], env["hdr_a"]
+    c.post("/organisations/retention", params={"retention_days": 36500}, headers=hdr)
+    for as_of in (None, "2999-01-01", "2026-01-01"):
+        params = {"confirm": True}
+        if as_of:
+            params["as_of"] = as_of
+        r = c.post("/retention/apply", params=params, headers=hdr)
+        assert r.status_code in (200, 400), (as_of, r.text)
+        if r.status_code == 200:
+            assert r.json()["counts"]["hard_deleted"] == 0, as_of
+            assert r.json()["counts"]["redacted"] == 0, as_of
+    db = env["Session"]()
+    assert db.get(ActivityRecord, env["loose"]) is not None
+    db.close()
+
+
+def test_the_orphan_verdict_can_see_the_tenant_via_tables(env):
+    """A verification that cannot observe what it verifies is worse than none, because
+    its green result gets quoted.
+
+    TENANT_VIA tables are reached through a parent that the deletion itself removes, so
+    counting them through the live parent is structurally zero whether or not a child
+    survived. The scan now takes the parent ids captured before the deletion.
+    """
+    from sqlalchemy import text
+    S = env["Session"]
+    db = S()
+    snap = L.parent_id_snapshot(db, env["org_a"])
+    assert snap.get("calculation_runs"), "fixture must have a run to orphan from"
+    # Manufacture exactly the state a missed TENANT_VIA delete would leave.
+    db.execute(text("PRAGMA foreign_keys=OFF"))
+    db.execute(text("DELETE FROM calculation_runs"))
+    db.commit()
+    surviving = db.execute(
+        text("SELECT COUNT(*) FROM emission_line_items")).scalar()
+    assert surviving > 0
+
+    blind = L.orphan_scan(db, env["org_a"])
+    seeing = L.orphan_scan(db, env["org_a"], parent_ids=snap)
+    db.close()
+
+    # Without the snapshot the orphan is invisible — and the verdict SAYS so rather
+    # than implying it checked.
+    assert "emission_line_items" not in blind["remaining"]
+    assert "emission_line_items" in blind["coverage"]["tables_not_verifiable"]
+    # With it, the orphan is found.
+    assert seeing["remaining"]["emission_line_items"] == surviving
+    assert seeing["clean"] is False
+    assert seeing["coverage"]["tables_not_verifiable"] == []
+    assert (seeing["coverage"]["tables_verified_directly"]
+            == seeing["coverage"]["tables_scanned"])
+
+
+def test_tenant_deletion_verdict_declares_full_coverage(env):
+    """The real path must verify every tenant table, not 24 of 34."""
+    db = env["Session"]()
+    _fill_every_tenant_table(db, env["org_a"])
+    db.close()
+    r = env["client"].request(
+        "DELETE", "/organisations/self",
+        params={"confirm_org_name": "A", "confirm_irreversible": True},
+        headers=env["hdr_a"])
+    assert r.status_code == 200, r.text
+    cov = r.json()["verification_coverage"]
+    assert cov["tables_not_verifiable"] == []
+    assert cov["tables_verified_directly"] == cov["tables_scanned"]
+    assert cov["tables_scanned"] == len(L._org_scoped_tables(Base.metadata)) + 1
+
+
+def test_erasure_and_retention_declare_what_they_do_not_cover(env):
+    """Both reach activities only. A payload saying just "retention applied" invited
+    the reading that the whole inventory had aged out."""
+    c, hdr = env["client"], env["hdr_a"]
+    scope_sources = []
+
+    scope_sources.append(c.delete(f"/activities/{env['frozen']}",
+                                  params={"mode": "redact"},
+                                  headers=hdr).json()["scope"])
+    c.post("/organisations/retention", params={"retention_days": 30}, headers=hdr)
+    scope_sources.append(c.post("/retention/preview", params={"as_of": "2024-12-31"},
+                                headers=hdr).json()["scope"])
+    scope_sources.append(c.post("/retention/apply",
+                                params={"confirm": True, "as_of": "2024-12-31"},
+                                headers=hdr).json()["scope"])
+
+    tenant = set(L.TENANT_DIRECT) | set(L.TENANT_VIA)
+    for scope in scope_sources:
+        assert set(scope["tables_covered"]) == set(L.ERASURE_TABLES)
+        # Derived, not hardcoded: every tenant table is either covered or named as not.
+        assert (set(scope["tables_covered"]) | set(scope["tables_not_covered"])
+                == tenant)
+        assert scope["tables_not_covered_count"] == len(scope["tables_not_covered"])
+        assert "reporting_entities" in scope["tables_not_covered"]
+
+
+def test_new_lifecycle_columns_need_no_backfill(env):
+    """Phase 0's factor-tenancy column needed a backfill because NULL there means
+    'readable by every tenant' — existing rows defaulted to permissive. Checked here
+    that none of the three columns added by this work has that shape.
+
+    retention_days NULL = keep indefinitely (a backfilled number would start deleting).
+    redacted_at / redaction_reason NULL = never redacted, which is true of every row
+    that existed before the migration. All three are conservative when absent.
+    """
+    db = env["Session"]()
+    org = db.get(Organisation, env["org_a"])
+    assert org.retention_days is None
+    # A NULL retention period must delete nothing, not everything.
+    r = env["client"].post("/retention/preview", headers=env["hdr_a"])
+    assert r.status_code == 400
+    assert "no retention period set" in r.json()["detail"]
+    # Pre-existing activities read as never redacted, not as redacted-with-no-reason.
+    for aid in (env["frozen"], env["loose"]):
+        a = db.get(ActivityRecord, aid)
+        assert a.redacted_at is None and a.redaction_reason is None
+    db.close()
+
+
+def test_source_file_is_a_bulk_selector_so_tombstones_must_be_unique(env):
+    """`source_file` IS a bulk-mutation selector, so a shared redacted value would be
+    a selector matching a whole retention sweep.
+
+    Four endpoints accept `source_file=<name>` and UPDATE every matching row, and three
+    of the fields they set (entity_id, coverage_start, coverage_end) are in
+    activities_fingerprint() — entity_id also drives the consolidation share — so a
+    wrongly-wide bulk update there moves published figures. The tombstone therefore
+    carries the activity id and no two rows can ever share one.
+    """
+    import pathlib
+    import re
+
+    # First, pin the premise: these call sites exist. If they ever go away this test
+    # should be revisited rather than silently guarding nothing.
+    selector_sites = []
+    for path in sorted(pathlib.Path("app").rglob("*.py")):
+        if path.name == "lifecycle.py":
+            continue
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            if re.search(r"ActivityRecord\.source_file\s*(==|\.in_|\.like|\.ilike)",
+                         line):
+                selector_sites.append(f"{path}:{i}")
+    assert selector_sites, (
+        "no endpoint selects on source_file any more — the uniqueness requirement below "
+        "may no longer be needed, so re-read the tombstone() rationale")
+
+    # Now the property: redact several rows in one sweep and prove no two share a value.
+    db = env["Session"]()
+    ids = []
+    for i in range(4):
+        a = ActivityRecord(organisation_id=env["org_a"], date="2024-02-0%d" % (i + 1),
+                           category="electricity", subcategory="",
+                           description="meter %d" % i, source_file="batch.csv",
+                           quantity=1.0, unit="kWh", geo="GB")
+        db.add(a)
+        db.commit()
+        db.refresh(a)
+        ids.append(a.id)
+    db.close()
+
+    # Redacted explicitly: these rows are not frozen by any run, so a retention sweep
+    # would hard-delete them and there would be no tombstone to compare.
+    c, hdr = env["client"], env["hdr_a"]
+    for aid in ids:
+        assert c.delete(f"/activities/{aid}", params={"mode": "redact"},
+                        headers=hdr).status_code == 200
+
+    db = env["Session"]()
+    rows = [db.get(ActivityRecord, i) for i in ids]
+    assert all(a is not None for a in rows)
+    values = [a.source_file for a in rows]
+    assert all(v and v.startswith("[redacted ") for v in values), values
+    assert len(set(values)) == len(values), (
+        "redacted source_file values collided, so one of them selects several rows: "
+        f"{values}")
+    assert len(set(a.description for a in rows)) == len(rows)
+    # upload_hash is deliberately NOT redacted: provenance survives without the name.
+    db.close()
+
+
+def test_a_redacted_source_file_cannot_select_a_second_row(env):
+    """The bulk endpoint is the real consumer, so exercise it rather than the column."""
+    db = env["Session"]()
+    ids = []
+    for i in range(3):
+        a = ActivityRecord(organisation_id=env["org_a"], date="2024-02-1%d" % i,
+                           category="electricity", subcategory="",
+                           description="m%d" % i, source_file="shared.csv",
+                           quantity=1.0, unit="kWh", geo="GB")
+        db.add(a)
+        db.commit()
+        db.refresh(a)
+        ids.append(a.id)
+    db.close()
+
+    c, hdr = env["client"], env["hdr_a"]
+    for aid in ids:
+        assert c.delete(f"/activities/{aid}", params={"mode": "redact"},
+                        headers=hdr).status_code == 200
+
+    db = env["Session"]()
+    stamped = db.get(ActivityRecord, ids[0]).source_file
+    db.close()
+
+    # Using one row's redacted value as a bulk selector must reach exactly that row.
+    r = c.post("/activities/coverage_window",
+               params={"source_file": stamped, "coverage_start": "2024-02-01",
+                       "coverage_end": "2024-02-28"}, headers=hdr)
+    assert r.status_code == 200, r.text
+    db = env["Session"]()
+    touched = [a for a in (db.get(ActivityRecord, i) for i in ids)
+               if a.coverage_start is not None]
+    db.close()
+    assert len(touched) == 1, (
+        f"a redacted source_file selected {len(touched)} rows; it must select at most "
+        f"the one it belongs to")

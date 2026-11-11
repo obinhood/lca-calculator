@@ -4287,9 +4287,30 @@ def apply_retention(confirm: bool = Query(False),
             status_code=400,
             detail=("retention deletes data irreversibly — call POST /retention/preview "
                     "first, then repeat this call with confirm=true"))
+    today = _lc_now()[:10]
+    effective_as_of = as_of or today
+    # `as_of` is arithmetically interchangeable with retention_days — the cutoff is
+    # as_of minus the period — so a FUTURE as_of turns any retention setting into
+    # "delete everything": 100-year retention evaluated as_of 2999 erases the whole
+    # inventory. One query parameter must not be able to override the period the
+    # organisation deliberately configured.
+    #
+    # A PAST as_of is safe and left allowed: it moves the cutoff earlier, so it can only
+    # select FEWER rows than today would, and it is what makes the tests deterministic.
+    # The preview is unbounded on purpose — it changes nothing, and asking "what would
+    # age out next year?" is a reasonable question. Apply recomputes its own window
+    # regardless, so a future-dated preview cannot be replayed into a deletion.
+    if effective_as_of > today:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"as_of {effective_as_of} is in the future, which would widen the "
+                    f"retention window past the configured "
+                    f"{org.retention_days} days and delete more than this "
+                    f"organisation's policy allows; omit it, or pass a date on or "
+                    f"before {today}"))
     try:
         return _lifecycle.retention_apply(db, org.id, org.retention_days,
-                                          as_of or _lc_now()[:10], _lc_now())
+                                          effective_as_of, _lc_now())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

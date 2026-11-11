@@ -121,6 +121,7 @@ from sqlalchemy.orm import Session
 from ..models import (
     ActivityRecord, Base, CalculationRun, EmissionLineItem, Organisation,
 )
+from .frozen import parse_list
 
 # A local logger with no format of its own. If app/observability.py is present on the
 # branch, swapping this one line to `observability.get_logger(__name__)` is the whole
@@ -161,32 +162,123 @@ def safe_row(mapping) -> dict:
     return {k: v for k, v in dict(mapping).items() if k not in NEVER_SERIALISE}
 
 
-def tombstone(at: str, reason: str) -> str:
-    """The text left in a redacted field.
+# The tables erasure and retention actually reach: `activities` and its two children.
+ERASURE_TABLES = ("activities", "activity_findings", "mapping_audit_events")
+
+
+def erasure_scope() -> dict:
+    """What an erasure or retention run covers, and what it does NOT.
+
+    Declared in every success payload. Both operations act on activity records only —
+    reporting entities, nature sites, financed positions, assurance engagements,
+    product footprints and the rest are untouched. A payload that said only "retention
+    applied" invited the reading that the whole inventory had aged out.
+
+    The uncovered count is DERIVED from the table classification, not written down, for
+    the same reason the delete order is: a hardcoded number silently stops being true
+    the next time a tenant table is added.
+    """
+    all_tenant = set(TENANT_DIRECT) | set(TENANT_VIA)
+    not_covered = sorted(all_tenant - set(ERASURE_TABLES))
+    return {
+        "tables_covered": list(ERASURE_TABLES),
+        "tables_not_covered": not_covered,
+        "tables_not_covered_count": len(not_covered),
+        "note": ("Erasure and retention act on activity records only. The tables listed "
+                 "in tables_not_covered are NOT touched — use "
+                 "DELETE /organisations/self to remove everything, or "
+                 "GET /organisations/export to see the full set first."),
+    }
+
+
+def tombstone(at: str, reason: str, activity_id: int) -> str:
+    """The text left in a redacted field. UNIQUE PER ROW, deliberately.
 
     Self-describing on purpose. An empty string or NULL would make an erased
     description indistinguishable from one that was never recorded, which is the
     silent-absence failure this platform treats as a defect everywhere else.
+
+    The activity id is in the string because `source_file` is a BULK-MUTATION SELECTOR:
+    four endpoints (/activities/coverage_window, /activities/entity,
+    /activities/crosswalk_chain, /activities/series_key) accept
+    `source_file=<name>` and UPDATE every matching row. A tombstone shared by a whole
+    retention sweep would be a selector matching all of them at once, and three of the
+    fields those endpoints set — entity_id, coverage_start, coverage_end — are in
+    activities_fingerprint(), with entity_id also driving the consolidation share. A
+    wrongly-wide bulk update there moves published figures.
+
+    Per-row uniqueness removes that entirely: no two rows ever carry the same redacted
+    value, so no redacted value can select a batch. (The converse is inherent to erasure
+    and not fixable here: a filter on the ORIGINAL filename cannot match a row whose
+    filename has been erased. That is what erasure means; `upload_hash` is deliberately
+    retained so the provenance link to the upload survives without the name.)
     """
-    return "[redacted {} - {}]".format(at, reason)
+    return "[redacted {} - {} - activity {}]".format(at, reason, activity_id)
 
 
 # --- THE shared rule --------------------------------------------------------------------
 
-def runs_freezing_activity(db: Session, activity_id: int) -> List[dict]:
+def exclusion_index(db: Session, organisation_id: int) -> Dict[int, List[dict]]:
+    """{activity_id: [runs that froze it as an EXCLUSION]} for one organisation.
+
+    A run freezes an activity in one of two ways, and only one of them leaves a line
+    item. ``compute_co2e`` writes a per-activity exclusion register to ``run.notes`` —
+    ``[{"activity_id": ..., "error": ...}]`` — for a negative quantity, an unconvertible
+    unit, a missing quantity and the rest. Those activities produce NO EmissionLineItem,
+    so a blocker check that only joins line items reports "no run froze this" and the
+    row is hard-deleted, leaving the filed run's exclusion register pointing at an
+    activity id that no longer resolves: a disclosure naming a record that does not
+    exist.
+
+    Built as an index rather than queried per activity because a retention sweep asks
+    this of every row, and ``notes`` is a JSON blob — portable JSON querying across
+    SQLite and PostgreSQL is not worth buying for this.
+    """
+    index: Dict[int, List[dict]] = {}
+    rows = db.query(CalculationRun.id, CalculationRun.created_at, CalculationRun.status,
+                    CalculationRun.reporting_period_id, CalculationRun.notes).filter(
+        CalculationRun.organisation_id == organisation_id).all()
+    for run_id, created_at, status, period_id, notes in rows:
+        for entry in parse_list(notes):
+            if not isinstance(entry, dict):
+                continue
+            aid = entry.get("activity_id")
+            if not isinstance(aid, int):
+                continue
+            index.setdefault(aid, []).append({
+                "run_id": run_id, "created_at": created_at, "status": status,
+                "reporting_period_id": period_id, "frozen_lines": 0,
+                "frozen_as": "exclusion",
+                "exclusion_reason": entry.get("error"),
+            })
+    return index
+
+
+def runs_freezing_activity(db: Session, activity_id: int,
+                           exclusions: Optional[Dict[int, List[dict]]] = None
+                           ) -> List[dict]:
     """THE definition of "a filed run depends on this activity". One rule, every path.
 
-    Returns a row per run that froze a line against this activity, newest first, with
-    enough identity for a refusal to NAME what blocks it rather than just saying no.
+    Returns a row per run that froze this activity, newest first, with enough identity
+    for a refusal to NAME what blocks it rather than just saying no.
 
     Every deletion path must consult this — single-record erasure, retention sweeps, and
     anything added later. The callers are pinned by tests/test_lifecycle.py, so a new
     deletion path that forgets it fails the suite rather than quietly breaking a filed
     disclosure. Same doctrine as models.factor_visible_to().
 
-    A run counts as freezing the activity if ANY line item references it, whatever the
-    method or scope: the SECR energy join and the evidence pack's transaction detail both
-    read location lines, and a market line is just as frozen.
+    A run freezes an activity TWO ways, and both count:
+
+      * as a LINE — any EmissionLineItem references it, whatever the method or scope.
+        The SECR energy join and the evidence pack's transaction detail read location
+        lines; a market line is just as frozen.
+      * as an EXCLUSION — the run's frozen ``notes`` register names it as an errored or
+        uncalculable record. No line item exists, but the run has filed a statement
+        ABOUT that activity id, and its coverage counters were computed over it.
+
+    Only counting lines decided the reproduction contract on half the picture. Pass
+    `exclusions` (from exclusion_index) when asking about many activities at once; it is
+    computed on demand otherwise.
     """
     rows = (db.query(CalculationRun.id, CalculationRun.created_at, CalculationRun.status,
                      CalculationRun.reporting_period_id,
@@ -197,7 +289,20 @@ def runs_freezing_activity(db: Session, activity_id: int) -> List[dict]:
                       CalculationRun.status, CalculationRun.reporting_period_id)
             .all())
     out = [{"run_id": r[0], "created_at": r[1], "status": r[2],
-            "reporting_period_id": r[3], "frozen_lines": r[4]} for r in rows]
+            "reporting_period_id": r[3], "frozen_lines": r[4],
+            "frozen_as": "line"} for r in rows]
+
+    if exclusions is None:
+        activity = db.get(ActivityRecord, activity_id)
+        exclusions = (exclusion_index(db, activity.organisation_id)
+                      if activity is not None else {})
+    seen = {r["run_id"] for r in out}
+    for entry in exclusions.get(activity_id, []):
+        # A run that BOTH lined and excluded the activity is already blocking; the line
+        # is the stronger statement, so don't double-report it.
+        if entry["run_id"] not in seen:
+            out.append(entry)
+
     # Newest first, but a NULL created_at must not sort as newest — it sorts last, and
     # stays visible either way.
     out.sort(key=lambda r: (r["created_at"] is not None, r["created_at"] or ""),
@@ -228,12 +333,18 @@ def redact_activity(db: Session, activity: ActivityRecord, reason: str, now: str
         return {"action": "already_redacted", "activity_id": activity.id,
                 "redacted_at": activity.redacted_at,
                 "redaction_reason": activity.redaction_reason}
-    mark = tombstone(now, reason)
+    mark = tombstone(now, reason, activity.id)
     cleared = []
     for field in REDACTED_FIELDS:
+        # Stamp ONLY a field that actually held something. Stamping an empty one wrote
+        # "[redacted ...]" over a NULL and made the evidence pack assert an erasure that
+        # never happened — personal data reported as removed where none existed. That is
+        # the absence-is-not-a-finding invariant inverted, and on an artefact whose whole
+        # purpose is to be shown to an assuror a fabricated erasure record is worse than
+        # no record at all. An empty field stays exactly as it was.
         if getattr(activity, field, None):
             cleared.append(field)
-        setattr(activity, field, mark)
+            setattr(activity, field, mark)
     activity.redacted_at = now
     activity.redaction_reason = reason
     if commit:
@@ -241,8 +352,18 @@ def redact_activity(db: Session, activity: ActivityRecord, reason: str, now: str
     log.info("activity redacted", extra={"fields": {
         "activity_id": activity.id, "organisation_id": activity.organisation_id,
         "reason": reason, "fields_cleared": cleared}})
-    return {"action": "redacted", "activity_id": activity.id, "redacted_at": now,
-            "redaction_reason": reason, "fields_cleared": cleared}
+    out = {"action": "redacted", "activity_id": activity.id, "redacted_at": now,
+           "redaction_reason": reason, "fields_cleared": cleared,
+           "scope": erasure_scope()}
+    if not cleared:
+        # `redacted_at` still records that the request was honoured — the row is now
+        # guaranteed free of free text, which is true and auditable — but the reader is
+        # told plainly that nothing had to be removed, so "redacted" is never mistaken
+        # for "personal data was found here".
+        out["nothing_to_redact"] = True
+        out["note"] = ("the request was applied, but this record held no free text: "
+                       "no field was overwritten and nothing was erased")
+    return out
 
 
 def _hard_delete_activity(db: Session, activity: ActivityRecord,
@@ -360,6 +481,10 @@ def retention_candidates(db: Session, organisation_id: int, retention_days: int,
     rows = db.query(ActivityRecord).filter(
         ActivityRecord.organisation_id == organisation_id).all()
 
+    # Built once for the whole sweep rather than per row: the exclusion register lives in
+    # each run's JSON `notes`, so asking per activity would re-read every run per row.
+    exclusions = exclusion_index(db, organisation_id)
+
     deletable, redactable, already, undated = [], [], [], []
     for a in rows:
         if a.date is None or _parse_iso_date(a.date) is None:
@@ -370,7 +495,7 @@ def retention_candidates(db: Session, organisation_id: int, retention_days: int,
         if a.redacted_at is not None:
             already.append(a.id)
             continue
-        if runs_freezing_activity(db, a.id):
+        if runs_freezing_activity(db, a.id, exclusions=exclusions):
             redactable.append(a.id)
         else:
             deletable.append(a.id)
@@ -378,6 +503,7 @@ def retention_candidates(db: Session, organisation_id: int, retention_days: int,
     return {
         "retention_days": retention_days, "as_of": as_of, "cutoff_date": cutoff,
         "activities_total": len(rows),
+        "scope": erasure_scope(),
         "would_hard_delete": sorted(deletable),
         "would_redact": sorted(redactable),
         "already_redacted": sorted(already),
@@ -402,6 +528,7 @@ def retention_apply(db: Session, organisation_id: int, retention_days: int,
     client replayed later could act on a row a run has frozen in the meantime.
     """
     plan = retention_candidates(db, organisation_id, retention_days, as_of)
+    exclusions = exclusion_index(db, organisation_id)
     deleted, redacted = [], []
     for aid in plan["would_hard_delete"]:
         a = _own_activity(db, organisation_id, aid)
@@ -409,7 +536,7 @@ def retention_apply(db: Session, organisation_id: int, retention_days: int,
             continue
         # Re-check under the shared rule: a run may have frozen this row since the plan
         # was computed, which turns a delete into a redaction.
-        if runs_freezing_activity(db, aid):
+        if runs_freezing_activity(db, aid, exclusions=exclusions):
             redact_activity(db, a, "retention", now, commit=False)
             redacted.append(aid)
         else:
@@ -432,6 +559,7 @@ def retention_apply(db: Session, organisation_id: int, retention_days: int,
         "undated_skipped": plan["undated_skipped"],
         "counts": {"hard_deleted": len(deleted), "redacted": len(redacted),
                    "undated_skipped": len(plan["undated_skipped"])},
+        "scope": erasure_scope(),
     }
 
 
@@ -542,20 +670,62 @@ def _count_where(db: Session, metadata, table_name: str, organisation_id: int) -
     return int(db.execute(stmt).scalar() or 0)
 
 
-def orphan_scan(db: Session, organisation_id: int) -> dict:
+def parent_id_snapshot(db: Session, organisation_id: int) -> Dict[str, List[int]]:
+    """{parent table: this org's row ids}, captured BEFORE a deletion.
+
+    The key to verifying a TENANT_VIA table. Those tables have no organisation_id of
+    their own and are reached through a parent, so once the parent rows are gone the
+    subquery that identifies "this org's children" matches nothing and the child count
+    reads zero whether or not any child survived. Holding the parent ids lets the
+    after-scan ask the only question that distinguishes the two: are there still rows
+    pointing at ids that used to belong to this organisation?
+    """
+    md = Base.metadata
+    parents = {spec[1] for spec in TENANT_VIA.values()}
+    snapshot: Dict[str, List[int]] = {}
+    for parent in sorted(parents):
+        p = md.tables[parent]
+        pk = next(spec[2] for spec in TENANT_VIA.values() if spec[1] == parent)
+        snapshot[parent] = [
+            int(r[0]) for r in db.execute(
+                select(p.c[pk]).where(p.c.organisation_id == organisation_id))]
+    return snapshot
+
+
+def orphan_scan(db: Session, organisation_id: int,
+                parent_ids: Optional[Dict[str, List[int]]] = None) -> dict:
     """Rows still attributable to this org, per table. Used to VERIFY a deletion.
 
     A tenant deletion is only done when this is empty. The point is not to trust that
     the delete statements covered everything — it is to re-count and find out.
 
-    Note the TENANT_VIA counts become structurally zero once their parent is gone, so
-    this is run BEFORE and AFTER: the before-counts are what the deletion must account
-    for, and a non-zero after-count on a TENANT_DIRECT table is a real orphan.
+    `parent_ids` (from parent_id_snapshot, taken before the deletion) is what makes the
+    TENANT_VIA half of that verdict real. WITHOUT it those counts are computed through
+    the live parent, which is itself deleted, so they are structurally zero and the
+    verdict silently covered only 24 of 34 tenant tables while reporting on all of them.
+    A verification that cannot observe the thing it verifies is worse than none, because
+    its green result gets quoted — so the return now DECLARES its own coverage instead of
+    leaving the reader to assume it.
     """
     md = Base.metadata
     remaining = {}
+    unverifiable = []
     for name in _org_scoped_tables(md):
-        n = _count_where(db, md, name, organisation_id)
+        if name in TENANT_VIA and parent_ids is not None:
+            fk_col, parent, _pk = TENANT_VIA[name]
+            ids = parent_ids.get(parent) or []
+            t = md.tables[name]
+            n = 0
+            # Chunked: a tenant can have more parent ids than SQLite's variable limit.
+            for i in range(0, len(ids), 500):
+                n += int(db.execute(
+                    select(func.count()).select_from(t).where(
+                        t.c[fk_col].in_(ids[i:i + 500]))).scalar() or 0)
+        elif name in TENANT_VIA:
+            n = _count_where(db, md, name, organisation_id)
+            unverifiable.append(name)
+        else:
+            n = _count_where(db, md, name, organisation_id)
         if n:
             remaining[name] = n
     ef = md.tables["emission_factors"]
@@ -566,9 +736,26 @@ def orphan_scan(db: Session, organisation_id: int) -> dict:
         remaining["emission_factors"] = int(own_factors)
     org_rows = db.query(func.count(Organisation.id)).filter(
         Organisation.id == organisation_id).scalar() or 0
-    return {"organisation_id": organisation_id, "remaining": remaining,
-            "organisation_row_present": bool(org_rows),
-            "clean": not remaining and not org_rows}
+    scanned = _org_scoped_tables(md)
+    return {
+        "organisation_id": organisation_id, "remaining": remaining,
+        "organisation_row_present": bool(org_rows),
+        "clean": not remaining and not org_rows,
+        "coverage": {
+            "tables_scanned": len(scanned) + 1,          # + emission_factors
+            "tables_verified_directly": len(scanned) + 1 - len(unverifiable),
+            # Named, not just counted: a reader must be able to see WHICH tables the
+            # verdict could not speak for, rather than trusting a bare number.
+            "tables_not_verifiable": sorted(unverifiable),
+            "note": ("Tables listed in tables_not_verifiable are reached through a "
+                     "parent that no longer exists, so their counts cannot distinguish "
+                     "'no rows' from 'orphaned rows'. Pass parent_ids from "
+                     "parent_id_snapshot(), taken before the deletion, to verify them."
+                     if unverifiable else
+                     "Every org-scoped table was counted against ids known to belong "
+                     "to this organisation."),
+        },
+    }
 
 
 def delete_tenant(db: Session, organisation_id: int, org_name: str, now: str) -> dict:
@@ -582,11 +769,15 @@ def delete_tenant(db: Session, organisation_id: int, org_name: str, now: str) ->
 
     assert_tables_classified(md)
 
+    # Both captured BEFORE anything is deleted, and both are load-bearing: the counts
+    # are what the deletion must account for, and the parent ids are the only way the
+    # after-scan can tell an emptied TENANT_VIA table from an orphaned one.
     before = {}
     for name in _org_scoped_tables(md):
         n = _count_where(db, md, name, organisation_id)
         if n:
             before[name] = n
+    parent_ids = parent_id_snapshot(db, organisation_id)
 
     log.warning("tenant deletion starting", extra={"fields": {
         "organisation_id": organisation_id, "organisation_name": org_name,
@@ -635,7 +826,7 @@ def delete_tenant(db: Session, organisation_id: int, org_name: str, now: str) ->
         db.delete(org)
     db.commit()
 
-    verdict = orphan_scan(db, organisation_id)
+    verdict = orphan_scan(db, organisation_id, parent_ids=parent_ids)
     log.warning("tenant deletion complete", extra={"fields": {
         "organisation_id": organisation_id, "organisation_name": org_name,
         "rows_deleted": deleted, "clean": verdict["clean"],
@@ -646,6 +837,9 @@ def delete_tenant(db: Session, organisation_id: int, org_name: str, now: str) ->
         "rows_before": before, "rows_deleted": deleted,
         "verified_no_orphans": verdict["clean"],
         "remaining": verdict["remaining"],
+        # The verdict declares what it was able to check, so "verified" is never taken
+        # on trust. With the pre-deletion parent ids this covers every tenant table.
+        "verification_coverage": verdict["coverage"],
         "irreversible": True,
     }
 
