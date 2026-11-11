@@ -115,11 +115,18 @@ def sbti_v2_report(db: Session, run: CalculationRun, *,
         blockers = cross_run_gates(db, base_run, run, label_a="base", label_b="current",
                                    quantity="the C8.3 recalculation test",
                                    measures="a change in significance")
-        # `cross_run_gates` answers "can these two runs be subtracted?" and knows nothing
-        # about scope_source — a single run's split being guessed is a different question
-        # from the two runs being comparable, so the scope gate is asked here per run
-        # rather than folded into it (that would make every two-run renderer refuse for a
-        # one-run reason).
+        # `cross_run_gates` DOES now carry a scope gate (#106's `scope_basis_comparable`),
+        # and it is not this one. That one asks whether the two runs share a scope BASIS,
+        # so it fires on declared-vs-assumed and is SILENT when both runs are assumed —
+        # the bases match. Verified: cross_run_gates(assumed, assumed) returns zero
+        # blockers. Two runs guessed the same way are perfectly comparable to each other
+        # and both still wrong, which is the blind spot a per-run question closes and an
+        # equality test structurally cannot.
+        #
+        # So it stays here rather than being folded in: "is this one run's split a guess?"
+        # is a different question from "can these two be subtracted?", and a single run can
+        # have a guessed split with nothing to compare. Where the bases also differ both
+        # fire, which is two true facts about the same pair, not a duplicate.
         #
         # Asked at all because WITHOUT it this block fails open on the refusal above:
         # `recalculation_triggers` runs its crossing test only when BOTH significance
