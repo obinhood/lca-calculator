@@ -56,6 +56,22 @@ from ..services.comparability import (cross_run_gates, period_info, period_paylo
 CANNOT_DETERMINE = "cannot_determine"
 
 
+# The four buckets `compute_co2e` drops an activity into when it could not be computed.
+# Every one of them means the run's total covers less than the run's own period.
+_EXCLUSION_BUCKETS = ("unmapped", "unit_errors", "data_errors", "gwp_mismatch")
+
+
+def _excluded_lines(run: CalculationRun) -> int:
+    """How many of a run's activities landed in an exclusion bucket."""
+    return sum(int(getattr(run, b, 0) or 0) for b in _EXCLUSION_BUCKETS)
+
+
+def _exclusion_summary(run: CalculationRun) -> str:
+    """Which buckets, with counts — so a refusal says what to go and fix."""
+    return ", ".join(f"{b}={int(getattr(run, b, 0) or 0)}" for b in _EXCLUSION_BUCKETS
+                     if int(getattr(run, b, 0) or 0))
+
+
 def _run_descriptor(db: Session, run: CalculationRun) -> dict:
     """The identity of a run in a comparative — enough for a reader to check the pair.
 
@@ -103,8 +119,10 @@ def prior_period_candidates(db: Session, organisation_id: int,
         CalculationRun.reporting_period_id.isnot(None),
         CalculationRun.reporting_period_id != run.reporting_period_id,
     ).order_by(CalculationRun.id.desc()).all()
+    # The same standard the builder applies below, for the same reason: a candidate it
+    # would go on to refuse is not a remedy, it is a round trip.
     return [_run_descriptor(db, r) for r in rows
-            if _pairing_problem(db, r, run) is None]
+            if _pairing_problem(db, r, run) is None and not _excluded_lines(r)]
 
 
 def _pairing_problem(db: Session, prior: CalculationRun,
@@ -266,14 +284,31 @@ def prior_period_comparative(db: Session, organisation_id: int, run: Calculation
             blockers=[f"{prefix}{clause}: comparative_run_id {comparative_run_id} not "
                       f"found for this organisation"])
 
-    if prior.status != "complete":
+    _excluded = _excluded_lines(prior)
+    if prior.status != "complete" or _excluded:
+        # TWO conditions, because either alone fails open.
+        #
+        # The status alone is not enough: a run that excluded EVERY line — the real
+        # case is an AR5 factor file computed on the AR6 default, where each line is
+        # dropped on vintage — reports total_co2e 0.0, and has historically called
+        # itself "complete". Subtracting that publishes the whole of the current year
+        # as an increase from nothing, with every comparability gate passing, because
+        # 0.0 is a number like any other.
+        #
+        # The counters alone are not enough either: a 'pending' run has no exclusions
+        # yet because it has not finished computing.
+        _why = (f"has status {prior.status!r}" if prior.status != "complete"
+                else "reports status 'complete'")
+        _detail = (f", and {_excluded} of its {prior.total_activities} activities were "
+                   f"EXCLUDED ({_exclusion_summary(prior)}), so its total is a partial "
+                   f"figure" if _excluded else "")
         return _cannot(
             "prior_run_incomplete",
-            f"comparative run #{prior.id} has status {prior.status!r} — an unfinished "
-            f"run's totals are not a disclosable figure, so nothing may be subtracted "
-            f"from them",
-            blockers=[f"{prefix}{clause}: comparative run #{prior.id} is "
-                      f"{prior.status!r}, not complete"],
+            f"comparative run #{prior.id} {_why}{_detail} — a total that does not cover "
+            f"the whole of its own period is not a figure this year's can be subtracted "
+            f"from: the difference would report the missing lines as a change",
+            blockers=[f"{prefix}{clause}: comparative run #{prior.id} is not a complete "
+                      f"inventory ({_why}{_detail})"],
             prior=_run_descriptor(db, prior))
 
     _pairing = _pairing_problem(db, prior, run)

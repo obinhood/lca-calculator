@@ -66,9 +66,44 @@ def two_years(db):
     def _ready(period):
         discover = compute_co2e(db, org.id, reporting_period_id=period.id)
         screen_complete(db, org.id, period.id, discover)
-        return compute_co2e(db, org.id, reporting_period_id=period.id)
+        run = compute_co2e(db, org.id, reporting_period_id=period.id)
+        # Asserted in the FIXTURE, not left to be discovered in an unrelated assertion
+        # three tests away. A run with ANY excluded line (unmapped / unit_errors /
+        # data_errors / gwp_mismatch) is a partial figure, and the comparative refuses
+        # a partial comparative at `prior_run_incomplete` — BEFORE it reaches whichever
+        # gate the test was written to exercise. A fixture that quietly starts building
+        # partial runs therefore makes tests pass or fail for reasons unconnected to
+        # what they assert, which is how this file first broke.
+        assert (run.unmapped, run.unit_errors, run.data_errors, run.gwp_mismatch) \
+            == (0, 0, 0, 0), f"fixture built a PARTIAL run: {period.label}"
+        return run
 
     return org, p24, p25, _ready(p24), _ready(p25)
+
+
+def _ar5_prior_run(db, org, p24):
+    """FY24 recomputed on the AR5 vintage — a REAL AR5 run, not an empty one.
+
+    The organisation re-based its GWP vintage between the two years, which is the
+    scenario `gwp_comparable` exists for. Getting there needs the 2024 activities
+    re-pinned to an AR5 factor: an AR5 run over AR6-pinned factors excludes every line
+    as `gwp_mismatch` and totals 0.0, which is not an AR5 inventory — it is a run that
+    computed nothing. (It also tripped `prior_run_incomplete` first, so the GWP gate
+    these tests are about was never reached.)
+
+    Re-pinning does not disturb the FY25 run: `activities_fingerprint` is computed over
+    the activities IN SCOPE for each run, and no 2024 activity is in FY25's.
+    """
+    ar5 = _factor(db, "electricity", "kWh", 0.6, gwp_set="AR5")
+    for a in db.query(ActivityRecord).filter(
+            ActivityRecord.organisation_id == org.id,
+            ActivityRecord.date < "2025-01-01").all():
+        a.factor_id = ar5.id
+    db.commit()
+    run = compute_co2e(db, org.id, gwp_set="AR5", reporting_period_id=p24.id)
+    assert run.gwp_mismatch == 0 and run.status == "complete"
+    assert run.total_co2e == pytest.approx(7_200.0)      # 12 x 1000 kWh x 0.6
+    return run
 
 
 # --- Defect 1: the cumulative run -------------------------------------------------
@@ -209,8 +244,7 @@ def test_non_comparable_pair_refuses_with_its_reasons_rather_than_subtracting(db
     difference is published. A delta beside a blocker still gets quoted.
     """
     org, p24, _p25, _r24, r25 = two_years
-    _factor(db, "electricity", "kWh", 0.6, gwp_set="AR5")
-    r24_ar5 = compute_co2e(db, org.id, gwp_set="AR5", reporting_period_id=p24.id)
+    r24_ar5 = _ar5_prior_run(db, org, p24)
     assert r24_ar5.gwp_set == "AR5" and r25.gwp_set == "AR6"
 
     r = esrs_e1_report(db, org.id, run_id=r25.id, net_revenue_millions=10.0,
@@ -346,6 +380,36 @@ def test_prior_period_on_file_but_not_supplied_is_a_blocker(db, two_years):
     assert f"#{r24.id}" in c["reason"]
     assert r["disclosure_ready"] is False
     assert any("prior reporting period is on file" in b for b in r["blockers"])
+
+
+def test_a_comparative_that_computed_nothing_is_refused(db, two_years):
+    """A run that excluded EVERY line totals 0.0 — and 0.0 subtracts fine.
+
+    The real case: an AR5 factor file computed on the AR6 default drops every line on
+    vintage. Every comparability gate passes (the periods match, the boundary matches,
+    the vintages are declared), and the delta publishes the whole of the current year as
+    an increase from nothing.
+
+    Gated on the run's own exclusion counters rather than on its status string, because
+    the status has historically called such a run "complete": the counters are the fact,
+    the status is a summary of it that has been wrong.
+    """
+    org, p24, _p25, _r24, r25 = two_years
+    # AR5 run over AR6-pinned factors: all 12 lines excluded on vintage.
+    empty = compute_co2e(db, org.id, gwp_set="AR5", reporting_period_id=p24.id)
+    assert empty.gwp_mismatch == 12 and empty.total_co2e == pytest.approx(0.0)
+
+    r = secr_report(db, org.id, run_id=r25.id, intensity_denominator=2.0,
+                    intensity_denominator_unit="£M revenue",
+                    intensity_denominator_period_days=365,
+                    comparative_run_id=empty.id)
+    c = r["prior_year_comparative"]
+    assert c["reason_code"] == "prior_run_incomplete"
+    assert c["figures"] is None                 # NOT a 100% rise from zero
+    assert "gwp_mismatch=12" in c["reason"], c["reason"]
+    assert r["disclosure_ready"] is False
+    # And it is not offered as a remedy either.
+    assert empty.id not in [x["run_id"] for x in c["prior_periods_on_file"]]
 
 
 def test_unknown_comparative_run_is_refused_not_ignored(db, two_years):
@@ -490,8 +554,7 @@ def test_both_renderers_report_the_same_verdict_on_one_pair(db, two_years):
     """Renderer disagreement is its own defect class: the same two runs must not be
     comparable in one framework and refused in another."""
     org, p24, _p25, _r24, r25 = two_years
-    _factor(db, "electricity", "kWh", 0.6, gwp_set="AR5")
-    bad = compute_co2e(db, org.id, gwp_set="AR5", reporting_period_id=p24.id)
+    bad = _ar5_prior_run(db, org, p24)
     e = esrs_e1_report(db, org.id, run_id=r25.id, net_revenue_millions=10.0,
                        revenue_period_days=365,
                        comparative_run_id=bad.id)["e1_6_comparative"]
@@ -512,14 +575,19 @@ def test_secr_shows_the_reason_where_the_working_would_be(db, two_years):
     a reader is deciding whether to rely on.
     """
     org, p24, _p25, _r24, r25 = two_years
-    _factor(db, "electricity", "kWh", 0.6, gwp_set="AR5")
-    bad = compute_co2e(db, org.id, gwp_set="AR5", reporting_period_id=p24.id)
+    bad = _ar5_prior_run(db, org, p24)
     r = secr_report(db, org.id, run_id=r25.id, intensity_denominator=2.0,
                     intensity_denominator_unit="£M revenue",
                     intensity_denominator_period_days=365, comparative_run_id=bad.id)
+    assert r["prior_year_comparative"]["reason_code"] == "not_comparable"
     rows = r["derivations"]["figures"]
     blocked = [d for d in rows if "Comparative" in d["figure"]]
     assert blocked, [d["figure"] for d in rows]
+    # The REASON is carried into the working, whatever the reason happens to be. The
+    # assertion is that the note is the block's own reason — not that it contains one
+    # particular sentence, which pins the wording of a message that should be free to
+    # get more specific.
+    assert blocked[0]["note"] == r["prior_year_comparative"]["reason"]
     assert "cannot be subtracted" in blocked[0]["note"]
     # A refused calculation is counted as refused, so the report's own headline cannot
     # claim every figure reconciles while one has no working at all.
