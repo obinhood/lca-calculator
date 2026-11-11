@@ -260,7 +260,7 @@ def test_gaps_are_inside_the_hash(db):
     _, run = _run(db)
     before = build_evidence_pack(db, run, uncertainty_iterations=1000)["pack"]["content_hash"]
     original = ep._evidence_gaps
-    ep._evidence_gaps = lambda coverage=None: [{"item": "X", "expected_by": "y",
+    ep._evidence_gaps = lambda coverage=None, attribution=None: [{"item": "X", "expected_by": "y",
                                                 "why_absent": "z",
                                                 "what_would_close_it": "w"}]
     try:

@@ -223,7 +223,7 @@ def materialise(db: Session, row: ProductFootprint, *,
 
 
 def bind_activities(db: Session, organisation_id: int, factor_id: int,
-                    activity_ids: list) -> dict:
+                    activity_ids: list, *, actor=None, actor_user_id=None) -> dict:
     """Bind activities to a materialised supplier factor.
 
     An explicit, per-activity decision — never an automatic match on product name.
@@ -266,8 +266,11 @@ def bind_activities(db: Session, organisation_id: int, factor_id: int,
         a.mapping_status = "overridden"
         a.mapping_basis = "exact"
         a.mapping_confidence = 1.0
+        # `pact_bound` is one of the three actions the evidence pack counts as a
+        # REVIEWER decision, because the buyer is asserting that this purchase is that
+        # supplier's product. So it carries the principal, like approve and override.
         _audit(db, a, "pact_bound", from_factor_id=prev_factor,
-               from_status=prev_status,
+               from_status=prev_status, actor=actor, actor_user_id=actor_user_id,
                note=f"bound to PACT footprint {factor.version}", commit=False)
         bound.append(a.id)
     db.commit()

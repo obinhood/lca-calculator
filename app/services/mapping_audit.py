@@ -34,8 +34,17 @@ def record(db: Session, activity: ActivityRecord, action: str, *,
            from_status: Optional[str] = None,
            note: Optional[str] = None,
            now: Optional[str] = None,
+           actor: Optional[str] = None,
+           actor_user_id: Optional[int] = None,
            commit: bool = True) -> Optional[MappingAuditEvent]:
-    """Journal one binding decision. Unknown actions are ignored, never guessed."""
+    """Journal one binding decision. Unknown actions are ignored, never guessed.
+
+    `actor` is `Principal.actor` — "user:<email>", "token:<id>", "org_key" — or
+    "engine" for a machine binding. It is OPTIONAL and defaults to None rather than to
+    any stand-in: a caller that cannot name an actor must leave the column NULL, which
+    this journal reads as "recorded before identity existed" and reports as
+    unattributed. A default here would quietly attribute every unthreaded call site.
+    """
     from .calc import _utcnow_iso
     if action not in ACTIONS:
         return None
@@ -45,6 +54,7 @@ def record(db: Session, activity: ActivityRecord, action: str, *,
         to_factor_id=activity.factor_id, from_status=from_status,
         to_status=activity.mapping_status, basis=activity.mapping_basis,
         confidence=activity.mapping_confidence, note=note,
+        actor=actor, actor_user_id=actor_user_id,
         at=now or _utcnow_iso())
     db.add(ev)
     if commit:
@@ -65,6 +75,10 @@ def history(db: Session, organisation_id: int,
         "from_factor_id": e.from_factor_id, "to_factor_id": e.to_factor_id,
         "from_status": e.from_status, "to_status": e.to_status,
         "basis": e.basis, "confidence": e.confidence, "note": e.note, "at": e.at,
+        # NULL means recorded before identity existed — see the model docstring. The key
+        # is always present so a reader can tell an unattributed event from one whose
+        # actor this serialiser forgot.
+        "actor": e.actor, "actor_user_id": e.actor_user_id,
     } for e in q.order_by(MappingAuditEvent.id).all()]
 
 
@@ -87,6 +101,7 @@ def history_page(db: Session, organisation_id: int,
         "from_factor_id": e.from_factor_id, "to_factor_id": e.to_factor_id,
         "from_status": e.from_status, "to_status": e.to_status,
         "basis": e.basis, "confidence": e.confidence, "note": e.note, "at": e.at,
+        "actor": e.actor, "actor_user_id": e.actor_user_id,
     } for e in page["rows"]]
     return page
 
@@ -108,6 +123,9 @@ def binding_as_at(db: Session, activity_id: int, at: str) -> dict:
     return {"determinable": True, "activity_id": activity_id, "as_at": at,
             "factor_id": last.to_factor_id, "status": last.to_status,
             "basis": last.basis, "action": last.action, "decided_at": last.at,
+            # The assuror's actual question is "who bound this, and when" — answering
+            # the second half alone was the gap.
+            "decided_by": last.actor,
             "events_considered": len(events)}
 
 
@@ -118,25 +136,65 @@ def summary(db: Session, organisation_id: int) -> dict:
     by_action = {}
     for e in rows:
         by_action[e.action] = by_action.get(e.action, 0) + 1
-    human = sum(v for k, v in by_action.items()
-                if k in ("approved", "overridden", "pact_bound"))
+    human_actions = ("approved", "overridden", "pact_bound")
+    human_rows = [e for e in rows if e.action in human_actions]
+    human = len(human_rows)
+    # ATTRIBUTION IS COUNTED, NOT ASSERTED. Every row written before `users` existed
+    # carries actor IS NULL, and no migration back-filled them, so this journal is
+    # partly attributed for as long as those rows are in it. Reporting "reviewer
+    # identity: closed" over a journal whose older half names nobody would be the
+    # misleading answer the gap was left open to avoid — so the pack is handed the two
+    # counts and says "closed from <date>" rather than "closed".
+    attributed = [e for e in human_rows if e.actor]
+    unattributed = human - len(attributed)
+    named_person = sum(1 for e in attributed if str(e.actor).startswith("user:"))
+    earliest_attributed = min((e.at for e in attributed), default=None)
+
+    gaps_closed = ["Override log with before/after values", "Reviewer timestamp"]
+    still_open = []
+    if human == 0:
+        # No human decision has been journalled at all, so this organisation has no
+        # evidence either way. Claiming the gap closed on an empty set is the
+        # empty-collection pass this codebase treats as a defect.
+        still_open.append({
+            "gap": "Reviewer identity",
+            "why": "No human binding decision has been journalled yet, so there is "
+                   "nothing to attribute. The mechanism is in place: an approve or "
+                   "override made now records the principal that made it.",
+        })
+    elif unattributed:
+        still_open.append({
+            "gap": "Reviewer identity (historical events only)",
+            "why": f"{unattributed} of {human} human decisions were journalled before "
+                   f"authentication had any concept of a person, so they name no actor "
+                   f"and were deliberately NOT back-filled — inventing a reviewer for a "
+                   f"filed run is the misleading answer this gap was kept open to "
+                   f"avoid. The {len(attributed)} decision(s) recorded since do name "
+                   f"one.",
+            "closed_from": earliest_attributed,
+        })
+    else:
+        gaps_closed.append("Reviewer identity")
+
     return {
         "version": AUDIT_VERSION,
         "events": len(rows),
         "by_action": by_action,
         "activities_journalled": len({e.activity_id for e in rows}),
         "human_decisions": human,
-        "closes_evidence_gaps": [
-            "Override log with before/after values",
-            "Reviewer timestamp",
-        ],
-        "does_not_close": [{
-            "gap": "Reviewer identity",
-            "why": "Authentication is an organisation-scoped API key with no concept "
-                   "of a person, so there is no actor to record. Journalling the "
-                   "organisation as though it were a reviewer would turn an honest "
-                   "gap into a misleading answer.",
-        }],
+        "attribution": {
+            "human_decisions": human,
+            "attributed": len(attributed),
+            "unattributed": unattributed,
+            "by_a_named_person": named_person,
+            "earliest_attributed_at": earliest_attributed,
+            "note": "An unattributed event was recorded before authentication had any "
+                    "concept of a person. NULL there means 'recorded before identity "
+                    "existed', which is not the same as the tenant's shared key acting "
+                    "('org_key') and not the same as a machine binding ('engine').",
+        },
+        "closes_evidence_gaps": gaps_closed,
+        "does_not_close": still_open,
         "note": "Append-only by construction: no update path and no status column to "
                 "flip. Factor ids are provenance and are never joined back — a "
                 "superseded factor may since have been retired, and the journal must "

@@ -444,7 +444,62 @@ def _journal_gap(coverage: Optional[dict], item: str, expected_by: str,
                                    "decisions, so every bound activity is journalled."}
 
 
-def _evidence_gaps(coverage: Optional[dict] = None) -> list:
+def _identity_gap(attribution: Optional[dict]) -> dict:
+    """Reviewer identity, MEASURED on this organisation's journal.
+
+    This entry used to be hard-coded OPEN, with `what_would_close_it` reading "per-user
+    authentication with an actor id written onto every mutation" — which now exists. But
+    it is not therefore closed outright, and the distinction is the point: every event
+    journalled before `users` existed carries `actor IS NULL` and was deliberately not
+    back-filled, so a journal with history in it is PARTLY attributed.
+
+    So this measures, exactly as `_journal_gap` does for the override log, and for the
+    same stated reason: "a control is CLOSED only if this run's own journal shows it
+    operating". Reading the counts from `mapping_audit.summary()` rather than
+    recomputing them keeps one definition of who-decided — the alternative is this file
+    and that one disagreeing about the same journal.
+    """
+    item = "Reviewer identity"
+    expected_by = "ISSA 5000 / ISAE 3410 — who made each judgement"
+    if not attribution:
+        return {"item": item, "expected_by": expected_by,
+                "why_absent": "NOT MEASURED for this run: the mapping journal's "
+                              "attribution counts were not supplied.",
+                "what_would_close_it": "Render the pack with the journal summary."}
+    human = attribution.get("human_decisions") or 0
+    attributed = attribution.get("attributed") or 0
+    unattributed = attribution.get("unattributed") or 0
+    if human == 0:
+        return {"item": item, "expected_by": expected_by,
+                "why_absent": "NOT APPLICABLE to this run: no human binding decision "
+                              "has been journalled, so there is no judgement to "
+                              "attribute. mapping_status would prove a human decided; "
+                              "here none has.",
+                "what_would_close_it": "Not applicable."}
+    if unattributed:
+        return {"item": item, "expected_by": expected_by,
+                "why_absent": f"PARTLY CLOSED, and measured on this journal: "
+                              f"{attributed} of {human} human decisions name the "
+                              f"principal that made them; {unattributed} were recorded "
+                              f"before authentication had any concept of a person and "
+                              f"name nobody. Those were NOT back-filled — asserting a "
+                              f"reviewer for a filed run nobody can identify is the "
+                              f"misleading answer this gap was kept open to avoid.",
+                "closed_from": attribution.get("earliest_attributed_at"),
+                "what_would_close_it": "Nothing, for the historical events: the "
+                                       "information was never captured. Decisions made "
+                                       "from now on carry their actor."}
+    return {"item": item, "expected_by": expected_by,
+            "why_absent": f"CLOSED, and measured on this journal: all {human} human "
+                          f"decisions name the principal that made them "
+                          f"({attribution.get('by_a_named_person') or 0} a named "
+                          f"person). An actor is recorded on every binding decision.",
+            "closed_from": attribution.get("earliest_attributed_at"),
+            "what_would_close_it": "Already closed."}
+
+
+def _evidence_gaps(coverage: Optional[dict] = None,
+                   attribution: Optional[dict] = None) -> list:
     """What an ISAE 3410 / ISSA 5000 file expects that this platform cannot produce.
 
     Named explicitly, with the reason and the change that would close each. A pack
@@ -458,18 +513,7 @@ def _evidence_gaps(coverage: Optional[dict] = None) -> list:
     list was built to prevent, and the list was committing it.
     """
     return [
-        {
-            "item": "Reviewer identity",
-            "expected_by": "ISSA 5000 / ISAE 3410 — who made each judgement",
-            "why_absent": "Authentication is an organisation-scoped API key with no "
-                          "concept of a person, so no per-user identity exists to "
-                          "record. mapping_status proves A human decided, never which. "
-                          "NOTE: the screening register (section 11) now records what "
-                          "was investigated and concluded, and when — but still not "
-                          "by whom.",
-            "what_would_close_it": "Per-user authentication with an actor id written "
-                                   "onto every mutation.",
-        },
+        _identity_gap(attribution),
         _journal_gap(
             coverage, "Override log with before/after values",
             "Audit trail of changes to the mapping",
@@ -601,7 +645,10 @@ def build_evidence_pack(db: Session, run: CalculationRun, *,
                 "closed if it can be shown to have operated, not because the code that "
                 "implements it exists.",
     }
-    gaps = _evidence_gaps(journal_coverage)
+    # The journal's own attribution counts, from the one function that computes them.
+    from .mapping_audit import summary as _audit_summary
+    gaps = _evidence_gaps(journal_coverage,
+                          _audit_summary(db, run.organisation_id).get("attribution"))
 
     return {
         "pack": {

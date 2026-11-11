@@ -1846,11 +1846,20 @@ class CrosswalkMapping(Base):
 class MappingAuditEvent(Base):
     """An append-only record of every change to an activity's factor binding.
 
-    Closes two of the six gaps the evidence pack has to declare: the override log
-    with before/after values, and the decision timestamp. It does NOT close
-    reviewer identity — authentication is an organisation-scoped API key with no
-    concept of a person, so there is no actor to record, and inventing one would
-    be worse than the gap. The pack continues to name that gap.
+    Closes three of the six gaps the evidence pack has to declare: the override log
+    with before/after values, the decision timestamp, and — since `users` and
+    `api_tokens` exist — reviewer identity.
+
+    REVIEWER IDENTITY IS CLOSED GOING FORWARD ONLY, and the distinction is the whole
+    point of `actor` being nullable. This table predates authentication having any
+    concept of a person: until then "there is no actor to record, and inventing one
+    would be worse than the gap" (this docstring, previously). Rows written then carry
+    `actor IS NULL`, and NULL means RECORDED BEFORE IDENTITY EXISTED. It is not the same
+    as `'org_key'`, which means a credential belonging to the tenant itself rather than
+    to a named person, and neither is the same as a named user. Back-filling any of them
+    would be the misleading answer the gap was kept honest to avoid, so `summary()`
+    reports attribution as a COUNT of events that carry an actor against those that do
+    not, rather than flipping one flag for the whole journal.
 
     Append-only by construction: no update path exists and there is no status
     column to flip. Resolution in the older AssuranceFinding table is an in-place
@@ -1877,3 +1886,14 @@ class MappingAuditEvent(Base):
     confidence = Column(Float, nullable=True)
     note = Column(Text, nullable=True)
     at = Column(String, nullable=False)                  # ISO-8601 UTC
+    # WHO decided. `Principal.actor` writes this: "user:<email>" for a named person,
+    # "token:<id>" for a credential with no user behind it (an assuror, a CI job),
+    # "org_key" for the tenant's own shared key, "engine" for a machine binding.
+    # NULL is reserved for rows written before identity existed — see the class
+    # docstring. A free-text column rather than an FK alone because the string must stay
+    # readable after the user row is gone, which is the point of an append-only journal.
+    actor = Column(String, nullable=True)
+    # The joinable half, when the actor was a named user of this tenant. Nullable for
+    # every other actor kind, and deliberately NOT enforced to agree with `actor`: the
+    # string is the evidence and survives, the id is a convenience for reporting.
+    actor_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
