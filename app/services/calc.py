@@ -28,6 +28,7 @@ from .dq import line_dq, PEDIGREE_METHOD
 from .screening import freeze_onto_run as screening_freeze_onto_run
 from .crosswalk import activity_verdict as crosswalk_verdict
 from .spend import normalize_spend, SpendNormalizationError
+from .frozen import parse_detail
 
 # GHG Protocol scope by activity category. Purchased energy carriers (electricity,
 # heat, steam, cooling) are Scope 2; on-site fuel combustion and fugitive/process
@@ -86,7 +87,11 @@ def _parse_iso_date(value: Optional[str]) -> Optional[date_cls]:
 
 # Bumped whenever the fingerprint's INPUTS change, so a run stamped under an older
 # scheme is reported as "staleness not assessable" rather than falsely STALE.
-FINGERPRINT_VERSION = "v5"   # v5: coverage_start/end — a declared consumption window
+FINGERPRINT_VERSION = "v6"   # v6: scope — the PREPARER'S DECLARED scope, now that
+                             # POST /activities/scope can write it. It decides which
+                             # of SECR's mandatory figures an activity lands in, so
+                             # editing it changes the RESULT exactly as category does.
+                             # v5: coverage_start/end — a declared consumption window
                              # changes how much of the record falls in the period.
                              # v4: entity_id — re-attributing an activity to a
                              # different entity changes its SHARE and thus the RESULT.
@@ -100,10 +105,17 @@ def activities_fingerprint(acts: List[ActivityRecord]) -> str:
     as stale by content, not just by count. date and category are included because
     both change the RESULT (period attribution and scope classification); ghgp_category
     because it changes the DISCLOSURE (v3).
+
+    `scope` (v6) is here for the same reason as `category`: it OVERRIDES the derived
+    classification, so re-declaring or clearing it moves an activity between Scope 1,
+    2 and 3 — and therefore in or out of SECR's mandatory figure and any intensity
+    ratio built on it. Without it in the hash, a preparer could declare a scope
+    through POST /activities/scope and the staleness gate would report the filed run
+    as current while the live declaration contradicted it.
     """
     parts = sorted(
         f"{a.id}:{a.factor_id}:{a.quantity}:{a.unit}:{a.date}:{a.category}:{a.ghgp_category}:"
-        f"{a.entity_id}:{a.coverage_start}:{a.coverage_end}" for a in acts)
+        f"{a.entity_id}:{a.coverage_start}:{a.coverage_end}:{a.scope}" for a in acts)
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
     return f"{FINGERPRINT_VERSION}:{digest}"
 
@@ -1379,3 +1391,87 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
 
     db.refresh(run)
     return run
+
+
+# --- The scope-declaration gate -----------------------------------------------
+#
+# SCOPE_RULES (top of this file) classifies an UNRECOGNISED activity category as
+# Scope 3 and records scope_source="assumed_scope3" on the line. That flag was
+# surfaced as a caveat and nothing more, so a run in which EVERY category fell
+# outside the ~28-key dictionary rendered Scope 1 = 0.0, Scope 2 = 0.0 and an
+# intensity ratio of 0.0 — and the UK SECR renderer published all three as
+# disclosure_ready with no blockers, beside a caveat naming the very activities
+# that had been assumed out of them.
+#
+# A figure that is zero because the preparer declared no Scope 1 activity is a
+# DIFFERENT FACT from one that is zero because the engine guessed Scope 3 for
+# everything, and a renderer that cannot tell them apart must not certify either.
+# This gate is what tells them apart, from FROZEN state only.
+#
+# Deliberately not conditioned on "and the Scope 1/2 figures are zero". Every
+# assumed line is an activity assumed OUT of a mandatory Scope 1 + 2 figure on a
+# machine guess, so one recognised gas line beside ninety-nine assumed ones would
+# make that condition pass while ninety-nine activities stayed missing from the
+# mandatory total. The gate is about the ASSUMPTION, not about the figure's
+# arithmetic happening to land on zero.
+SCOPE_GATE_VERSION = "scope-gate-v1"
+
+
+def scope_declaration_completeness(db: Session, run) -> dict:
+    """Blockers for a disclosure whose scope split rests on an ASSUMED scope.
+
+    Read ONLY from what the run froze (``EmissionLineItem.details["scope_source"]``
+    and ``["activity_category"]``) — never from the live ActivityRecord, whose
+    category a preparer can edit after filing.
+
+    The discharge is cheap and, unlike before, actually available: declare the
+    scope with ``POST /activities/scope``, or add the category to SCOPE_RULES,
+    then recompute. Either way the assumption disappears and the gate clears.
+    """
+    assumed: dict = {}
+    unassessable = 0
+    for (details,) in db.query(EmissionLineItem.details).filter(
+            EmissionLineItem.run_id == run.id,
+            EmissionLineItem.method == "location").all():
+        d = parse_detail(details)
+        # `in`, not a truth test. A line frozen before scope_source existed carries
+        # NO key, and reading that absence as "not assumed" is exactly the
+        # fail-open this gate exists to close — it is reported as unassessable
+        # instead, which is a refusal, not a pass.
+        if "scope_source" not in d:
+            unassessable += 1
+            continue
+        if d.get("scope_source") != "assumed_scope3":
+            continue
+        # The frozen category, for the same reason. A NULL frozen category is
+        # reported under "?" rather than being dropped: it was still assumed.
+        _cat = d["activity_category"] if "activity_category" in d else None
+        _key = _cat if _cat is not None else "?"
+        assumed[_key] = assumed.get(_key, 0) + 1
+
+    blockers = []
+    if unassessable:
+        blockers.append(
+            f"{unassessable} line(s) predate the scope_source freeze — whether their "
+            f"scope was DECLARED by the preparer or ASSUMED by the engine is not "
+            f"assessable from this run, and a mandatory Scope 1 / Scope 2 figure "
+            f"cannot be certified over it; recompute to record it")
+    if assumed:
+        blockers.append(
+            f"scope was ASSUMED (not declared) for {sum(assumed.values())} activity "
+            f"line(s) in categories {dict(sorted(assumed.items()))} — each is an "
+            f"UNRECOGNISED category defaulted to Scope 3, so it is assumed OUT of the "
+            f"mandatory Scope 1 + 2 figure and out of any intensity ratio built on it. "
+            f"Purchased steam (Scope 2) and a refrigerant leak (Scope 1) are assumed "
+            f"out the same way, and a zero Scope 1 / Scope 2 derived this way is a "
+            f"GUESS, not a declaration that no such activity occurred. Resolve by "
+            f"declaring the scope (POST /activities/scope) or by mapping the category "
+            f"to a scope rule, then recompute")
+    return {
+        "assessable": not unassessable,
+        "blockers": blockers,
+        "warnings": [],
+        "assumed_scope3_by_category": assumed,
+        "lines_unassessable": unassessable,
+        "version": SCOPE_GATE_VERSION,
+    }

@@ -26,6 +26,7 @@ from ..services.boundary import boundary_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
 from ..services.instruments import over_declaration_gate
 from ..services.comparability import denominator_period_comparable
+from ..services.calc import scope_declaration_completeness
 from .summary import summary, run_factor_sources
 from ..services.frozen import parse_detail
 
@@ -188,6 +189,12 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
     # answers how uncovered load was priced, the other whether the covered load
     # was ever consumed. A market-based figure needs both to be publishable.
     blockers.extend(over_declaration_gate(db, run).get("blockers", []))
+    # SECR's three MANDATORY figures (Scope 1, Scope 2, intensity ratio) are all built
+    # on the scope split, so an ASSUMED scope is not a caveat here — it is the figures.
+    # This report used to publish all three as 0.0 with blockers == [] over a run whose
+    # every category missed SCOPE_RULES, printing the caveat that named those very
+    # activities in the same payload. A zero it inferred now refuses.
+    blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
 
     energy = _energy_kwh(db, run)
 
