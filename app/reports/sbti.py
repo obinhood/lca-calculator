@@ -9,6 +9,7 @@ from ..services.sbti import (
     run_scoped_emissions_kg, linear_pathway, assess_ambition,
 )
 from ..services.boundary import base_year_recalculation
+from ..services.calc import scope_declaration_completeness
 from ..services.comparability import (
     period_comparable, period_payload, period_info, year_within_period,
 )
@@ -40,6 +41,25 @@ def sbti_report(db: Session, organisation_id: int, target_id: int,
                 "blockers": ["base run not found for this organisation"]}
 
     blockers = []
+    # THE SCOPE SPLIT IS THE BASELINE HERE, NOT A CAVEAT ON IT. `run_scoped_emissions_kg`
+    # restricts the sum to `scopes_from_coverage(target.scope_coverage)`, and that column
+    # defaults to "1+2" — so on a run whose activity categories all miss SCOPE_RULES, every
+    # line is assumed into Scope 3, the covered scopes match NOTHING, and `base_t` lands on
+    # 0.0. Measured on the matched fixture: base_emissions_tco2e 0.0 against 43.096 for the
+    # same sources, quantities and factor values with recognised categories.
+    #
+    # What that published was worse than a wrong number. `target_t = base_t * (1 - pct)` is
+    # then 0.0, `linear_pathway` allows 0.0, `actual_t` is 0.0, and so `on_track` came back
+    # TRUE — a 42% reduction target certified on track against a baseline of zero, with
+    # ok: True and an empty blocker list. The one honest signal, reduction_vs_base_pct,
+    # went null beside it.
+    #
+    # Asked of BOTH runs: the base run sets every allowance on the pathway and the current
+    # run supplies the actual, so a guess in either one moves the verdict. Skipped on the
+    # current run when it IS the base run, which is a legitimate configuration and would
+    # otherwise report the same blocker twice under two labels.
+    blockers.extend(f"base run: {b}" for b in
+                    scope_declaration_completeness(db, base_run).get("blockers", []))
     # The base year anchors the whole pathway: `base_t` is the base RUN's total, and every
     # allowance is interpolated from (base_year, base_t) to (target_year, target_t). A
     # base_year that does not match the base run silently shifts the entire line — a 2020
@@ -114,6 +134,9 @@ def sbti_report(db: Session, organisation_id: int, target_id: int,
             }
 
     if current is not None:
+        if current.id != base_run.id:
+            blockers.extend(f"current run: {b}" for b in
+                            scope_declaration_completeness(db, current).get("blockers", []))
         period_comparability = period_payload(
             db, base_run, current, key_a="base_year", key_b="current",
             note="Base-year and current runs must cover comparable period lengths, and "

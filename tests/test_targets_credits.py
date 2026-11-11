@@ -286,3 +286,89 @@ def test_a_claim_resting_on_the_tolerance_says_so(db):
     n = neutrality_assessment(db, org.id, run)
     assert n["neutral"] is True and n["neutral_within_tolerance_only"] is True
     assert any("WITHIN TOLERANCE" in w for w in n["claim_warnings"])
+
+
+# --- A pathway anchored on a baseline the engine GUESSED ------------------------------
+# `run_scoped_emissions_kg` restricts the sum to scopes_from_coverage(scope_coverage),
+# and that column DEFAULTS to "1+2". On a run whose categories all miss SCOPE_RULES
+# every line is assumed into Scope 3, so the covered scopes match nothing and the base
+# year lands on 0.0 — which made target_t 0.0, the allowance 0.0, the actual 0.0, and
+# so on_track TRUE with ok: True and an empty blocker list.
+
+def test_sbti_v1_refuses_a_pathway_anchored_on_a_guessed_baseline(db):
+    """Reverting the base-run gate in sbti_report must fail this."""
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    from app.models import EmissionsTarget
+    from app.reports.sbti import sbti_report
+    org, run = assumed_scope_run(db)
+    t = EmissionsTarget(organisation_id=org.id, name="NT", target_type="near_term",
+                        scope_coverage="1+2", base_run_id=run.id, base_year=2025,
+                        target_year=2030, target_reduction_pct=0.42, ambition="1.5C")
+    db.add(t); db.commit(); db.refresh(t)
+
+    r = sbti_report(db, org.id, t.id, current_run_id=run.id, current_year=2025)
+    # The distortion being refused: a 42% target against a baseline of zero, which the
+    # arithmetic then reports as on track. Pinned so the test fails loudly if the
+    # fixture stops producing it.
+    assert r["base"]["base_emissions_tco2e"] == 0.0
+    assert r["target_emissions_tco2e"] == 0.0
+    assert r["trajectory"]["on_track"] is True
+
+    assert r["ok"] is False, \
+        f"certified a pathway anchored on a guessed zero: {r['blockers']}"
+    _b = [b for b in r["blockers"] if "ASSUMED" in b]
+    assert _b, f"refused without naming the scope assumption: {r['blockers']}"
+    assert _b[0].startswith("base run: "), _b[0]
+    for cat in ASSUMED_CATEGORIES:
+        assert cat in _b[0], f"{cat} was assumed but is not named in the refusal"
+    # One run serving as both base and current must not report the same fact twice.
+    assert len(_b) == 1, f"duplicate scope blockers: {_b}"
+
+
+def test_sbti_v1_still_ok_when_every_scope_is_known(db):
+    """Negative control: recognised categories, so the baseline is rule-derived."""
+    from tests.scope3_util import declared_scope_run_with_scope3
+    from app.models import EmissionsTarget
+    from app.reports.sbti import sbti_report
+    org, run = declared_scope_run_with_scope3(db)
+    t = EmissionsTarget(organisation_id=org.id, name="NT", target_type="near_term",
+                        scope_coverage="1+2", base_run_id=run.id, base_year=2025,
+                        target_year=2030, target_reduction_pct=0.42, ambition="1.5C")
+    db.add(t); db.commit(); db.refresh(t)
+    r = sbti_report(db, org.id, t.id, current_run_id=run.id, current_year=2025)
+    assert r["ok"] is True, r["blockers"]
+    assert r["blockers"] == []
+    # The pathway is produced, not merely left unrefused.
+    assert r["base"]["base_emissions_tco2e"] > 0.0
+    assert r["target_emissions_tco2e"] > 0.0
+    assert r["trajectory"] is not None
+
+
+def test_sbti_v1_names_the_current_run_separately_from_the_base(db):
+    """A clean base year with a guessed CURRENT run must refuse, and say which run."""
+    from tests.scope3_util import assumed_scope_run, declared_scope_run_with_scope3
+    from app.models import EmissionsTarget
+    from app.reports.sbti import sbti_report
+    org, base = declared_scope_run_with_scope3(db, name="CleanBase")
+    # Same org, so the target resolves against both runs.
+    from app.models import EmissionFactor, ActivityRecord
+    from tests.scope3_util import ready_run
+    f = EmissionFactor(source="DEFRA_DEMO", version="2024.1", geography="GB", year=2024,
+                       category="purchased_steam_site_a", subcategory="", unit="kWh",
+                       gwp_set="AR6", value=0.20)
+    db.add(f); db.commit(); db.refresh(f)
+    a = ActivityRecord(organisation_id=org.id, date="2025-01-01",
+                       category="purchased_steam_site_a", subcategory="", description="",
+                       quantity=50_000, unit="kWh", geo="GB", factor_id=f.id)
+    a.ghgp_category = 1
+    db.add(a); db.commit()
+    current, _p = ready_run(db, org.id)
+
+    t = EmissionsTarget(organisation_id=org.id, name="NT", target_type="near_term",
+                        scope_coverage="1+2", base_run_id=base.id, base_year=2025,
+                        target_year=2030, target_reduction_pct=0.42, ambition="1.5C")
+    db.add(t); db.commit(); db.refresh(t)
+    r = sbti_report(db, org.id, t.id, current_run_id=current.id, current_year=2025)
+    assert r["ok"] is False, r["blockers"]
+    _b = [b for b in r["blockers"] if "ASSUMED" in b]
+    assert _b and _b[0].startswith("current run: "), r["blockers"]

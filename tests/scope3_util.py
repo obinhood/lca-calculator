@@ -83,7 +83,12 @@ def _scope_run(db, spec, name, ghgp_category):
     from app.models import EmissionFactor, ActivityRecord, Organisation
     org = Organisation(name=name)
     db.add(org); db.commit(); db.refresh(org)
-    for cat, unit, val, qty in spec:
+    for row in spec:
+        # A 5th element overrides `ghgp_category` for that line alone, which is what a
+        # MIXED run needs: a Scope 3 line carries its GHGP category while the Scope 1
+        # and Scope 2 lines beside it must not.
+        cat, unit, val, qty = row[:4]
+        line_category = row[4] if len(row) > 4 else ghgp_category
         f = EmissionFactor(source="DEFRA_DEMO", version="2024.1", geography="GB",
                            year=2024, category=cat, subcategory="", unit=unit,
                            gwp_set="AR6", value=val)
@@ -101,8 +106,8 @@ def _scope_run(db, spec, name, ghgp_category):
         # Scope 1 or Scope 2, and a GHGP Scope 3 category on a non-Scope-3 line is
         # itself a conflict the inventory gate reports. The category travels with the
         # scope, so the two runs cannot share one value.
-        if ghgp_category is not None:
-            a.ghgp_category = ghgp_category
+        if line_category is not None:
+            a.ghgp_category = line_category
         db.add(a)
     db.commit()
     run, _period = ready_run(db, org.id)
@@ -125,3 +130,31 @@ def declared_scope_run(db, name="RecognisedCats"):
     derived from a rule rather than guessed and the gate must stay silent.
     """
     return _scope_run(db, _DECLARED_SPEC, name, ghgp_category=None)
+
+
+# --- The negative control the pair above CANNOT provide -----------------------------
+# `declared_scope_run` is a true control for a gate keyed on an assumed scope, but it is
+# NOT one for anything computed over Scope 3: every line on it is correctly Scope 1 or
+# Scope 2, so scope 3 categories 1-14 total zero and `significance()` already answers
+# determinable: False for its OWN legitimate reason ("categories 1-14 total zero"). A
+# significance gate tested only against that pair reads as working while refusing
+# everything, because both members come back non-determinable.
+#
+# So the control has to carry REAL Scope 3 emissions beside a declared Scope 1/2 split:
+# recognised categories throughout, one of them a Scope 3 carrier with its GHGP category.
+# Significance is then genuinely determinable and a correct gate must stay silent on it.
+_DECLARED_WITH_SCOPE3_SPEC = [
+    ("electricity", "kWh", 0.20, 50_000, None),      # Scope 2 by rule
+    ("diesel", "L", 2.68, 3_000, None),              # Scope 1 by rule
+    ("freight", "tonne.km", 0.10, 100_000, 4),       # Scope 3 by rule, GHGP cat 4
+]
+
+
+def declared_scope_run_with_scope3(db, name="RecognisedCatsWithScope3"):
+    """(org, run) with a RULE-DERIVED scope split and genuine Scope 3 emissions.
+
+    Every category is in SCOPE_RULES, so no line freezes ``assumed_scope3``, and the
+    Scope 3 freight line gives categories 1-14 a non-zero denominator. This is the run on
+    which a significance answer must still be produced.
+    """
+    return _scope_run(db, _DECLARED_WITH_SCOPE3_SPEC, name, ghgp_category=None)
