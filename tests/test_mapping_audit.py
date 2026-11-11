@@ -123,7 +123,10 @@ def test_the_summary_names_what_it_closes_and_what_it_does_not(db):
     # was true while no actor could exist. It can now, so the honest claim is narrower,
     # not gone.
     gap = s["does_not_close"][0]
-    assert gap["gap"] == "Reviewer identity (historical events only)"
+    # Label is plain "Reviewer identity": the gap is no longer only about historical
+    # events, since a decision made TODAY with the shared organisation key also names
+    # nobody. The `why` carries the breakdown.
+    assert gap["gap"] == "Reviewer identity"
     assert "misleading answer" in gap["why"]
     assert s["attribution"]["unattributed"] == 1
     assert s["attribution"]["attributed"] == 0
@@ -152,7 +155,7 @@ def test_one_unattributed_decision_reopens_it(db):
     record(db, a, "approved")                      # historical: no actor
     s = summary(db, org.id)
     assert "Reviewer identity" not in s["closes_evidence_gaps"]
-    assert s["does_not_close"][0]["gap"] == "Reviewer identity (historical events only)"
+    assert s["does_not_close"][0]["gap"] == "Reviewer identity"
     assert s["attribution"] == {
         **s["attribution"], "attributed": 1, "unattributed": 1}
 
@@ -313,7 +316,21 @@ def test_the_pack_now_reports_three_gaps_as_closed(env):
     gap (see `test_the_summary_names_what_it_closes_and_what_it_does_not`).
     """
     client, hdr, (aid, _, f2) = env
-    client.post(f"/mappings/{aid}/override", headers=hdr, params={"factor_id": f2})
+
+    # THE OVERRIDE IS MADE BY A NAMED PERSON, and the first version of this test did not
+    # do that — it used the organisation key, which names nobody. It passed, because
+    # `attributed` then counted any truthy actor, so the shared tenant secret closed the
+    # ISSA 5000 "who made each judgement" control. The test was pinning the misleading
+    # verdict it was written to prevent. An adversarial review of this very commit found
+    # it, and the negative control below is the half that was missing.
+    uid = client.post("/users", json={"email": "preparer@a.test", "role": "member"},
+                      headers=hdr).json()["id"]
+    tok = client.post("/tokens", headers=hdr,
+                      params={"label": "preparer", "scopes": "write",
+                              "user_id": uid}).json()["api_key"]
+    person = {"X-API-Key": tok}
+
+    client.post(f"/mappings/{aid}/override", headers=person, params={"factor_id": f2})
     client.post("/calculate/run", headers=hdr)
     gaps = client.get("/assurance/evidence_pack", headers=hdr,
                       params={"uncertainty_iterations": 1000}).json()["evidence_gaps"]
@@ -322,9 +339,80 @@ def test_the_pack_now_reports_three_gaps_as_closed(env):
     assert "CLOSED" in by_item["Reviewer timestamp"]["why_absent"]
     identity = by_item["Reviewer identity"]["why_absent"]
     assert "CLOSED" in identity, identity
-    assert "PARTLY" not in identity, identity
+    assert "OPEN" not in identity, identity
     # And the journal names the credential, not merely that someone acted.
     j = client.get("/mappings/audit", headers=hdr, params={"activity_id": aid}).json()
     actors = {e["actor"] for e in j["events"]}
-    assert any(a and a != "engine" for a in actors), actors
-    assert j["summary"]["attribution"]["by_a_named_person"] >= 0  # key is present
+    assert "user:preparer@a.test" in actors, actors
+    assert j["summary"]["attribution"]["by_a_named_person"] == 1
+
+
+def test_the_same_override_by_the_shared_key_leaves_the_gap_open(env):
+    """The negative control for the test above, and the one that was missing.
+
+    Identical in every way except WHO made the override: the tenant's shared
+    organisation key instead of a named person's token. If the pack reports CLOSED here
+    too, it is not measuring attribution at all — it is reporting that a journal exists.
+    """
+    client, hdr, (aid, _, f2) = env
+    client.post(f"/mappings/{aid}/override", headers=hdr, params={"factor_id": f2})
+    client.post("/calculate/run", headers=hdr)
+    gaps = client.get("/assurance/evidence_pack", headers=hdr,
+                      params={"uncertainty_iterations": 1000}).json()["evidence_gaps"]
+    identity = {g["item"]: g for g in gaps}["Reviewer identity"]["why_absent"]
+    assert "OPEN" in identity, identity
+    assert "shared organisation key" in identity, identity
+
+
+# --- what the adversarial review of PR #114 found ----------------------------------------
+
+def test_the_shared_organisation_key_is_not_a_reviewer(db):
+    """BLOCKER, live on main before this fix.
+
+    `attributed` counted any truthy actor, so 'org_key' — the tenant's SHARED secret,
+    which #113 deliberately keeps alive as the bootstrap and legacy-integration path —
+    closed the ISSA 5000 "who made each judgement" control. The pack served
+    "CLOSED ... all N human decisions name the principal that made them" while reporting
+    "(0 a named person)" in the same sentence.
+
+    That is verbatim the claim the docstring it replaced existed to refuse: "recording
+    the organisation as though it were a reviewer would turn an honest gap into a
+    misleading answer."
+    """
+    org = _org(db)
+    a = _act(db, org, _factor(db))
+    record(db, a, "overridden", actor="org_key")
+    s = summary(db, org.id)
+    assert "Reviewer identity" not in s["closes_evidence_gaps"]
+    assert s["attribution"]["by_a_named_person"] == 0
+    assert s["attribution"]["by_an_impersonal_credential"] == 1
+    assert s["attribution"]["unattributed"] == 1
+
+
+def test_a_token_naming_no_person_is_not_a_reviewer_either(db):
+    """`token:<id>` is a credential issued to a FIRM rather than an individual — the
+    assuror case #113 added it for. It names nobody, so it cannot answer "who"."""
+    org = _org(db)
+    a = _act(db, org, _factor(db))
+    record(db, a, "overridden", actor="token:7")
+    s = summary(db, org.id)
+    assert "Reviewer identity" not in s["closes_evidence_gaps"]
+    assert s["attribution"]["by_an_impersonal_credential"] == 1
+
+
+def test_the_three_kinds_of_unattributed_stay_distinguishable(db):
+    """NULL, an impersonal credential and a named person are three different facts, and
+    collapsing any two of them is how an honest gap becomes a misleading answer."""
+    org = _org(db)
+    a = _act(db, org, _factor(db))
+    record(db, a, "overridden", actor="user:p@acme.test")
+    record(db, a, "approved", actor="org_key")
+    record(db, a, "pact_bound")                       # historical: no actor
+    att = summary(db, org.id)["attribution"]
+    assert att["by_a_named_person"] == 1
+    assert att["by_an_impersonal_credential"] == 1
+    assert att["no_actor_recorded"] == 1
+    assert att["unattributed"] == 2
+    gap = summary(db, org.id)["does_not_close"][0]
+    assert "shared organisation key" in gap["why"]
+    assert "name no actor at all" in gap["why"]

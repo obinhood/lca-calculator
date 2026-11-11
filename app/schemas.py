@@ -43,6 +43,19 @@ class NarrativeBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class UserBody(NarrativeBody):
+    """A person's email and name — person-identifying by DESIGN, not incidentally.
+
+    These are the two columns in the whole schema that identify an individual on
+    purpose, so of everything covered by the rule above they are the clearest case:
+    `POST /users?email=someone@firm.test` would come to rest verbatim in an access log
+    with no deletion path, including on a request that failed authorisation.
+    """
+    email: str
+    name: Optional[str] = None
+    role: str = "member"
+
+
 class MarketInstrumentBody(NarrativeBody):
     description: Optional[str] = None
 

@@ -19,7 +19,7 @@ from .models import (
     MarketInstrument, FxRate, PriceIndex, factor_visible_to,
 )
 from .schemas import (
-    CbamGoodBody, ConcludeBody, ConsolidationBody, DeliverabilityLinkBody,
+    CbamGoodBody, ConcludeBody, ConsolidationBody, DeliverabilityLinkBody, UserBody,
     DisposeFindingBody, EngagementBody, EntityBody, FindingBody, Iso140642Body,
     LcaItemBody, MarketInstrumentBody, NatureImpactBody, PactClientBody,
     ResolveFindingBody, Sb253Body, Scope3DeclarationBody,
@@ -260,6 +260,7 @@ class Principal:
 def _resolve_principal(x_api_key: Optional[str], db: Session) -> Principal:
     """The ONE place a credential becomes a principal. See `current_org`."""
     from .models import ApiToken, User as _User
+    from .services.calc import _utcnow_iso
 
     if not x_api_key:
         raise HTTPException(status_code=401,
@@ -289,6 +290,19 @@ def _resolve_principal(x_api_key: Optional[str], db: Session) -> Principal:
             raise HTTPException(status_code=401,
                                 detail="the user this token belongs to is suspended")
         _bind_tenant(org.id)
+        # STAMPED ONCE A DAY, not once a request. The column was declared and served by
+        # GET /tokens while nothing ever wrote it, so a token used continuously read
+        # `last_used_at: null` — indistinguishable from one never used, on the very
+        # surface an admin uses to decide what to revoke. A field that always answers
+        # "never" is the same defect class as an unattributed audit event.
+        #
+        # Writing on every authentication would turn every authenticated GET into a
+        # database write, which is why day-granularity is enough: the question is "is
+        # this credential still in use", not "when exactly".
+        _today = _utcnow_iso()[:10]
+        if (tok.last_used_at or "")[:10] != _today:
+            tok.last_used_at = _utcnow_iso()
+            db.commit()
         return Principal(org, user, tok.scopes, "token", tok.id)
 
     org = db.query(Organisation).filter(
@@ -714,9 +728,19 @@ def register_organisation(name: str = Query(...), sector: Optional[str] = None,
 
 
 @app.post("/organisations/rotate_key")
-def rotate_api_key(org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+def rotate_api_key(principal: "Principal" = Depends(require_tenant_admin),
+                   db: Session = Depends(get_db)):
     """Rotate the calling org's API key. The old key stops working immediately;
-    the new key is returned ONCE."""
+    the new key is returned ONCE.
+
+    TENANT ADMIN, NOT MERELY WRITE. This endpoint RETURNS the organisation key, and
+    `_resolve_principal` resolves that key to `Principal(org, None, "admin", "org_key")`
+    — scopes 'admin', `may_administer` True. Gated on `current_org` it was a complete
+    privilege escalation: a member-role write token was refused POST /users with 403,
+    called this, was handed the org key, and created users with it. Reproduced before
+    this fix, and pinned by `test_identity_escalation.py`.
+    """
+    org = principal.org
     from .services.calc import _utcnow_iso
     new_key = secrets.token_urlsafe(32)
     org.api_key_hash = _hash_key(new_key)
@@ -729,10 +753,12 @@ def rotate_api_key(org: Organisation = Depends(current_org), db: Session = Depen
 
 @app.post("/organisations/revoke_key")
 def revoke_api_key(confirm_org_name: str = Query(...),
-                   org: Organisation = Depends(current_org), db: Session = Depends(get_db)):
+                   principal: "Principal" = Depends(require_tenant_admin),
+                   db: Session = Depends(get_db)):
     """Revoke the calling org's API key (self-service kill switch). Requires the
     org name as confirmation; the org's data is retained but its key is disabled
     until an admin re-issues one via rotate on a restored key."""
+    org = principal.org
     if confirm_org_name != org.name:
         raise HTTPException(status_code=400, detail="confirm_org_name does not match")
     org.api_key_revoked = True
@@ -761,9 +787,7 @@ _MAX_TOKEN_DAYS = 365
 
 
 @app.post("/users")
-def create_user(email: str = Query(..., max_length=320),
-                role: str = Query("member"),
-                name: Optional[str] = Query(None, max_length=200),
+def create_user(body: UserBody,
                 principal: "Principal" = Depends(require_tenant_admin),
                 db: Session = Depends(get_db)):
     """Add a named person to the calling organisation.
@@ -776,6 +800,9 @@ def create_user(email: str = Query(..., max_length=320),
     """
     from .models import User as _User
     from .services.calc import _utcnow_iso
+    email, name, role = body.email, body.name, body.role
+    if len(email) > 320 or (name is not None and len(name) > 200):
+        raise HTTPException(status_code=400, detail="email or name is too long")
     if role not in _ROLES:
         raise HTTPException(status_code=400,
                             detail=f"role must be one of {', '.join(_ROLES)}")
@@ -4736,9 +4763,36 @@ def _register_list_endpoints():
             return _list_page(db, org, model, limit, offset)
         return handler
 
+    def _make_admin(model):
+        """Same page, but only for a principal who may administer the tenant.
+
+        `current_org` proves only that a credential belongs to the tenant; it applies no
+        role or scope check on a GET, by design — reading inventory is what every
+        credential is for. The ACCESS-CONTROL STATE is not inventory. Listed through the
+        ordinary factory, the weakest credential in the system — the read-only token on
+        an `auditor` user, issued precisely so an outside assurance firm need not hold
+        the tenant's write key — could enumerate every user's email and role and every
+        token's label, scope, expiry and holder.
+
+        The same commit that added these tables already judged that payload too
+        sensitive to put in the tenant's OWN export (`lifecycle.EXPORT_EXCLUDED`:
+        "an export naming every live credential with its scope and expiry is a map of
+        the tenant's attack surface"). Serving it to any credential at all contradicted
+        that, so these two read paths take the same gate their writes already take.
+        """
+        def handler(limit: int = Query(LIST_PAGE_DEFAULT), offset: int = Query(0),
+                    principal: "Principal" = Depends(require_tenant_admin),
+                    db: Session = Depends(get_db)):
+            return _list_page(db, principal.org, model, limit, offset)
+        return handler
+
+    # Paths whose rows describe WHO MAY ACT rather than what was measured.
+    _ADMIN_ONLY = {"/users", "/tokens"}
+
     for path, model, name in specs:
         app.add_api_route(
-            path, _make(model), methods=["GET"], name=name,
+            path, (_make_admin if path in _ADMIN_ONLY else _make)(model),
+            methods=["GET"], name=name,
             summary=f"List the calling organisation's {model.__tablename__}",
             description=(
                 "Paginated with limit/offset; `has_more` and `next_offset` say whether "
@@ -4794,7 +4848,7 @@ def delete_activity(activity_id: int,
 @app.post("/organisations/retention")
 def set_retention(retention_days: Optional[int] = Query(None),
                   clear: bool = Query(False),
-                  org: Organisation = Depends(current_org),
+                  principal: "Principal" = Depends(require_tenant_admin),
                   db: Session = Depends(get_db)):
     """Set (or clear) this organisation's activity retention period, in days.
 
@@ -4803,6 +4857,7 @@ def set_retention(retention_days: Optional[int] = Query(None),
     there is no scheduler, and retention is applied only when a caller explicitly runs
     POST /retention/apply after inspecting POST /retention/preview.
     """
+    org = principal.org
     if clear:
         org.retention_days = None
     else:
@@ -4919,7 +4974,7 @@ def export_own_data(org: Organisation = Depends(current_org),
 @app.delete("/organisations/self")
 def delete_own_organisation(confirm_org_name: str = Query(...),
                             confirm_irreversible: bool = Query(False),
-                            org: Organisation = Depends(current_org),
+                            principal: "Principal" = Depends(require_tenant_admin),
                             db: Session = Depends(get_db)):
     """Delete this organisation and EVERYTHING belonging to it. IRREVERSIBLE.
 
@@ -4936,7 +4991,14 @@ def delete_own_organisation(confirm_org_name: str = Query(...),
     first), not hand-maintained. Verified rather than trusted — every org-scoped table is
     re-counted afterwards and `verified_no_orphans` reports the result, so a caller is
     never told "deleted" over rows that survived.
+
+    TENANT ADMIN, NOT MERELY WRITE. Gated on `current_org` this was reachable by any
+    write-scope token, including a `member` one — while the role contract in
+    `models.User` reserves tenant deletion to an owner and promises a member only "read
+    and write inventory data". A member could not add a user and could delete the
+    organisation.
     """
+    org = principal.org
     if confirm_org_name != org.name:
         raise HTTPException(status_code=400, detail="confirm_org_name does not match")
     if not confirm_irreversible:
