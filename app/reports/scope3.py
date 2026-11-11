@@ -15,6 +15,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import EmissionLineItem, RunScope3Declaration, RunFinancedLine
+from ..services.calc import scope_declaration_completeness
 from ..services.ghgp import (
     CATEGORIES, GHGP_TAXONOMIES, UNASSIGNED_SOURCES, scope3_completeness,
     boundary_policy_for_run, boundary_policy_drift,
@@ -399,6 +400,34 @@ def scope3_inventory_report(db: Session, organisation_id: int,
     body = scope3_by_ghgp_category(db, run)
     blockers = (body.get("completeness", {}) or {}).get("blockers", []) \
         if body.get("assessable") else [body.get("note")]
+    # THIS REPORT PUBLISHES THE SCOPE SPLIT, which is easy to miss because nobody reads
+    # a Scope 3 report as doing so: `completeness.materiality.terms` carries
+    # scope1_tco2e and scope2_location_tco2e (services/ghgp.materiality_denominator).
+    # An activity category outside SCOPE_RULES defaults the whole inventory to Scope 3
+    # and freezes `assumed_scope3`, so both terms read 0.0 BY GUESS while a refrigerant
+    # leak (really Scope 1) and purchased steam (really Scope 2) are reported inside the
+    # Scope 3 rows being measured — and each affected category's materiality is then
+    # tested over emissions that are not its own.
+    #
+    # Note what is NOT claimed: the denominator TOTAL is not thereby understated. The
+    # misclassified emissions stay inside it, moving between its terms — measured on the
+    # matched fixtures, scope1+scope2 0.0 -> 33.096+10.0 while the Scope 3 categories go
+    # 43.096 -> 0.001, the same emissions either way. The defect is the published split
+    # and the per-category attribution, not the sum.
+    #
+    # This is the same defect the SBTi 5% significance test carried, one framework over,
+    # and it is why this gate belongs on every renderer that publishes a scope figure
+    # rather than on the ones a person thought of: nobody reads a SCOPE 3 report as
+    # publishing a Scope 1/2 split. tests/test_ready_implies_derivable.py found it by
+    # reading the payload instead.
+    #
+    # `list(...)` is load-bearing: `blockers` is the SAME object as
+    # `body["completeness"]["blockers"]`, which is published inside this payload.
+    # Extending it in place would file the scope blocker as a Scope 3 COMPLETENESS
+    # finding, which it is not — the inventory's completeness is a separate fact from
+    # whether the denominator it is measured against was guessed.
+    blockers = list(blockers)
+    blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
     return {
         "framework": "GHG Protocol Scope 3 (15-category inventory)",
         "disclosure_ready": bool(body.get("assessable")) and not blockers,

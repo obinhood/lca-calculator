@@ -79,14 +79,7 @@ _DECLARED_SPEC = [("electricity", "kWh", 0.20, 50_000),             # Scope 2 by
 ASSUMED_CATEGORIES = tuple(c for c, *_ in _ASSUMED_SPEC)
 
 
-def _scope_run(db, spec, name, ghgp_category, declare_scopes=None):
-    """``declare_scopes``: {category: "1"|"2"|"3"} written to ActivityRecord.scope, which
-    makes the run freeze ``scope_source == "explicit"`` for that line instead of guessing
-    it. Lets a control hold the CATEGORY STRINGS fixed while varying only the scope
-    mechanism — needed wherever the category name is itself read by the code under test
-    (`_energy_kwh` buckets energy carriers by category name, so a control that renames
-    categories moves the carrier mechanism and the scope mechanism at once).
-    """
+def _scope_run(db, spec, name, ghgp_category, scopes=None):
     from app.models import EmissionFactor, ActivityRecord, Organisation
     org = Organisation(name=name)
     db.add(org); db.commit(); db.refresh(org)
@@ -115,8 +108,12 @@ def _scope_run(db, spec, name, ghgp_category, declare_scopes=None):
         # scope, so the two runs cannot share one value.
         if line_category is not None:
             a.ghgp_category = line_category
-        if declare_scopes and cat in declare_scopes:
-            a.scope = declare_scopes[cat]
+        # `scopes` declares the scope ON THE ACTIVITY, which calc.py:848 reads FIRST:
+        # `if a.scope: scope, scope_source = a.scope, "explicit"`. That is the discharge
+        # `scope_declaration_completeness` itself prescribes, and it is what lets a
+        # control hold the category STRING fixed while changing the split.
+        if scopes:
+            a.scope = scopes[cat]
         db.add(a)
     db.commit()
     run, _period = ready_run(db, org.id)
@@ -132,32 +129,50 @@ def assumed_scope_run(db, name="UnrecognisedCats"):
     return _scope_run(db, _ASSUMED_SPEC, name, ghgp_category=1)
 
 
-# What each unrecognised category above really is. Used only by `explicit_scope_run`.
-_ASSUMED_TRUE_SCOPES = {"purchased_steam_site_a": "2",   # purchased steam
-                        "r410a_topup": "1",              # refrigerant leak
-                        "site_generator_fuel": "1"}      # on-site combustion
-
-
-def explicit_scope_run(db, name="UnrecognisedCatsDeclared"):
-    """(org, run) with the SAME categories as :func:`assumed_scope_run`, scope DECLARED.
-
-    Freezes ``scope_source == "explicit"`` on every line, so the scope split is measured
-    while every category string — and therefore every carrier-bucketing decision made on
-    it — is byte-identical to the defect fixture. The control :func:`declared_scope_run`
-    cannot do this job for code that reads the category name, because it renames the
-    categories: a gate that then behaves differently has two candidate causes.
-    """
-    return _scope_run(db, _ASSUMED_SPEC, name, ghgp_category=None,
-                      declare_scopes=_ASSUMED_TRUE_SCOPES)
-
-
 def declared_scope_run(db, name="RecognisedCats"):
     """(org, run) identical to :func:`assumed_scope_run` but with recognised categories.
 
     Freezes ``scope_source == "category_rule"`` on every line, so the scope split is
     derived from a rule rather than guessed and the gate must stay silent.
+
+    NOTE WHAT THIS PAIR DOES *NOT* ISOLATE. It changes the category STRING, and the
+    string is read by at least two independent mechanisms: ``SCOPE_RULES`` in
+    services/calc.py, and the ``_ENERGY_CARRIERS`` allowlist in
+    ``reports/secr._energy_kwh``, which never looks at scope at all. So a figure that
+    moves across this pair is not necessarily produced by the scope split — it may be
+    produced by the renaming. Measured: ``esos`` moves 9 numbers across this pair
+    (``total_energy_kwh``, ``by_carrier_kwh.*``, ``share_of_reported_carriers_pct.*``)
+    and publishes no scope figure anywhere in its payload. Use
+    :func:`explicit_scope_run` to attribute a movement to the split.
     """
     return _scope_run(db, _DECLARED_SPEC, name, ghgp_category=None)
+
+
+_EXPLICIT_SCOPES = {"purchased_steam_site_a": "2",   # really Scope 2
+                    "r410a_topup": "1",              # really Scope 1
+                    "site_generator_fuel": "1"}      # really Scope 1
+
+
+def explicit_scope_run(db, name="ExplicitScopes"):
+    """(org, run) with the SAME category strings as :func:`assumed_scope_run`, but the
+    correct scope DECLARED on each activity.
+
+    This is the control that isolates the scope split. Every category name is
+    byte-identical to the assumed run, so no category-keyed mechanism anywhere in the
+    product can move — only the split does, because `a.scope` is set and each line
+    freezes ``scope_source == "explicit"`` instead of ``"assumed_scope3"``.
+
+    Measured against :func:`assumed_scope_run`: ``esos``'s nine moving numbers drop to
+    three (``run.id``, ``run.organisation_id``, ``run.reporting_period_id`` — identity,
+    which a twin run cancels), while ``scope3_inventory`` and ``ets_mrv`` move exactly
+    as many numbers as before. That is the difference between a control and a confound.
+
+    `ghgp_category` is None here for the same reason as on the declared run: these lines
+    are Scope 1 and Scope 2, and a GHGP Scope 3 category on a non-Scope-3 line is itself
+    a conflict the inventory gate reports. The category travels with the scope.
+    """
+    return _scope_run(db, _ASSUMED_SPEC, name, ghgp_category=None,
+                      scopes=_EXPLICIT_SCOPES)
 
 
 # --- The negative control the pair above CANNOT provide -----------------------------
