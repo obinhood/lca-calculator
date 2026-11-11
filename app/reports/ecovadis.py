@@ -96,6 +96,10 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
     # figure beside the same run's consolidated emissions than the GRI 305/302 report an
     # assessor cross-checks this pack against, and implied a wrong intensity against them.
     energy = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
+    # The energy KPI's own refusal, from the one place that knows whether the figure
+    # could be measured at all. Separate from the scope gate above: that one is about the
+    # Scope 1/2 EMISSIONS split, this one about the kWh figure beside it.
+    blockers.extend(energy["blockers"])
 
     # --- RESULTS: the reported KPIs ------------------------------------------
     results_evidence, results_gaps = [], []
@@ -103,7 +107,15 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
                             f"Scope 2 {scope2_loc / 1000:.3f} tCO2e (location) / "
                             f"{scope2_mkt / 1000:.3f} tCO2e (market), "
                             f"Scope 3 {scope3 / 1000:.3f} tCO2e")
-    if energy["total_kwh"] > 0:
+    if not energy["determinable"]:
+        # "No energy reported" and "energy not measurable" are different facts with
+        # different remedies, and the first one asserts a consumption of zero that
+        # nothing here observed.
+        results_gaps.append(
+            "energy KPI is NOT MEASURABLE: the own-operations (Scope 1/2) kWh total is "
+            "whatever the scope filter matched on a run whose scope was assumed, so it "
+            "is neither a reported energy figure nor a measured absence of one")
+    elif energy["total_kwh"] > 0:
         results_evidence.append(
             f"Energy consumption reported: {energy['total_kwh']:.0f} kWh "
             f"(own operations, Scope 1/2; {energy['basis']})")
@@ -291,7 +303,14 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
             "energy_basis": energy["basis"],
             "energy_carriers_reported": energy["carriers_reported"],
             "energy_carriers_omitted": energy.get("carriers_omitted"),
-            "energy_complete": not energy.get("carriers_omitted"),
+            # The shared verdict, not a local re-derivation of it. `not carriers_omitted`
+            # read an EMPTY measurement as a complete inventory: on a run whose scope was
+            # assumed, the Scope 1/2 filter matched no rows, so no carrier could be
+            # recorded as omitted and this KPI certified 0.0 kWh as the whole footprint.
+            # None (cannot_determine) is the only honest third answer; `determinable`
+            # beside it keeps a measured zero distinguishable from an unmeasured one.
+            "energy_complete": energy["complete"],
+            "energy_determinable": energy["determinable"],
             "energy_notes": energy["notes"],
             "intensity_tco2e_per_denominator": intensity,
             "denominator_unit": denominator_unit,

@@ -141,17 +141,26 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
                 db, base, run, label_a="base", label_b="reporting",
                 quantity="the 305-5 reduction", measures="abatement", prefix="305-5: "))
     energy = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
+    # 302-1/302-3 are a separate disclosure from 305-1/2/3, so the kWh figure's own
+    # refusal is wired here rather than inferred from the emissions-split gate above.
+    blockers.extend(energy["blockers"])
     energy_mwh = {c: round(energy[c] / 1000.0, 6) for c in ("electricity", "gas", "diesel")}
     total_mwh = round(energy["total_kwh"] / 1000.0, 6)
     # 302-1/302-3 published the numerator and dropped everything that qualifies it: the
     # incompleteness caveat (energy-bearing carriers outside the three reported ones, whose
     # emissions ARE in the figures above) and the diesel calorific-value assumption both
     # live in these notes. A partial MWh figure with no caveat reads as a complete one.
+    # `complete`/`determinable` come from `_energy_kwh`, which is the only place that
+    # knows whether any row was examined. Re-derived here as `not carriers_omitted`, both
+    # 302-1 and 302-3 certified COMPLETE over a 0.0 MWh total on a run whose Scope 1/2
+    # filter matched nothing — an omission list is empty either way, so the local
+    # derivation could not tell "omitted none" from "examined none".
     energy_basis = {
         "basis": energy["basis"],
         "carriers_reported": energy["carriers_reported"],
         "carriers_omitted": energy.get("carriers_omitted"),
-        "complete": not energy.get("carriers_omitted"),
+        "complete": energy["complete"],
+        "determinable": energy["determinable"],
         "notes": energy["notes"],
     }
 
