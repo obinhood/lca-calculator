@@ -239,3 +239,40 @@ def test_ecovadis_listed_in_frameworks(client):
     assert entry["platform_support"] == "partial"
     assert entry["endpoint"] == "/reports/ecovadis"
     assert any("RATINGS scheme" in p for p in entry["key_points"])
+
+
+# --- The scope-declaration gate ------------------------------------------------
+# The carbon score rests on the scope split three times over: the scope-1+2 intensity,
+# the procurement saving (scope 2 location minus market), and the free-text evidence
+# that states each scope's tonnage to an assessor. An activity category outside
+# SCOPE_RULES defaults to Scope 3, so all three were built on zeros the engine guessed
+# while assessment_ready stayed true with blockers empty.
+
+def test_ecovadis_refuses_a_scope_split_it_guessed(db):
+    """Reverting the one wired line must fail this test."""
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    org, run = assumed_scope_run(db)
+    r = ecovadis_readiness(db, org.id, run_id=run.id, intensity_denominator=2.0,
+                           intensity_denominator_period_days=365)
+    k = r["kpis"]
+    assert k["scope1_tco2e"] == 0.0
+    assert k["scope2_location_tco2e"] == 0.0
+    assert k["scope3_tco2e"] > 0.0
+    assert r["assessment_ready"] is False
+    _b = [b for b in r["blockers"] if "ASSUMED" in b]
+    assert _b, f"EcoVadis certified a guessed scope split; blockers were {r['blockers']}"
+    for cat in ASSUMED_CATEGORIES:
+        assert cat in _b[0], f"{cat} was assumed but is not named in the refusal"
+
+
+def test_ecovadis_still_ready_when_every_scope_is_known(db):
+    """Negative control: the same three sources under RECOGNISED category names."""
+    from tests.scope3_util import declared_scope_run
+    org, run = declared_scope_run(db)
+    r = ecovadis_readiness(db, org.id, run_id=run.id, intensity_denominator=2.0,
+                           intensity_denominator_period_days=365)
+    assert r["assessment_ready"] is True, r["blockers"]
+    assert r["blockers"] == []
+    k = r["kpis"]
+    assert k["scope1_tco2e"] > 0.0
+    assert k["scope2_location_tco2e"] > 0.0

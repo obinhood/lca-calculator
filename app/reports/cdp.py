@@ -18,6 +18,7 @@ from .summary import summary, run_factor_sources
 from .scope3 import category_tco2e
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
+from ..services.calc import scope_declaration_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
 from ..services.instruments import over_declaration_gate
 
@@ -65,6 +66,10 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
     # was ever consumed. A market-based figure needs both to be publishable.
     blockers.extend(over_declaration_gate(db, run).get("blockers", []))
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    # C6.1, C6.3 and C6.5 are scope-keyed questionnaire rows: the response is the
+    # split, field by field. C6.1 gross Scope 1 and C6.3 Scope 2 both read 0.0 over
+    # an assumed category, and C6.10 intensity divides that same Scope 1 + 2 sum.
+    blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
     _financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
 
     by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}

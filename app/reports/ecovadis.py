@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from ..models import CalculationRun, EmissionsTarget, MarketInstrument, AssuranceEngagement
 from ..services.boundary import boundary_completeness, boundary_comparable
+from ..services.calc import scope_declaration_completeness
 from ..services.residual_mix import residual_mix_comparable
 from ..services.comparability import (period_comparable, period_payload,
                                       cross_run_gates,
@@ -78,6 +79,11 @@ def ecovadis_readiness(db: Session, organisation_id: int, run_id: Optional[int] 
     # EcoVadis evidence rests on consolidated emissions — an unresolved boundary
     # means the figures in the evidence pack are not disclosable.
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    # The carbon score rests on the scope split three times over: the scope-1+2
+    # intensity, the procurement saving (scope 2 location minus market), and the
+    # free-text evidence that states each scope's tonnage to an assessor. An
+    # assumed scope zeroes the first two and makes the third a guess in prose.
+    blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
 
     by_scope = {r["scope"]: r["co2e"] for r in s["by_scope"]}
     scope1 = by_scope.get("1", 0.0)

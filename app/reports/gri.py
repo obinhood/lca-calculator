@@ -23,6 +23,7 @@ from .summary import summary, run_factor_sources
 from .scope3 import category_tco2e
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness, boundary_comparable
+from ..services.calc import scope_declaration_completeness
 from ..services.residual_mix import (
     scope2_residual_mix_completeness, residual_mix_comparable,
 )
@@ -84,6 +85,11 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
     # was ever consumed. A market-based figure needs both to be publishable.
     blockers.extend(over_declaration_gate(db, run).get("blockers", []))
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    # 305-1, 305-2 and 305-3 are three SEPARATE disclosures, one per scope, and
+    # 305-4 intensity is built on 305-1 + 305-2. An unrecognised category assumed
+    # into Scope 3 empties 305-1 and 305-2 and silently shrinks the ratio's
+    # numerator, so the guess decides all four disclosures.
+    blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
 
     by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}
     scope1_kg = by_scope.get("1", 0.0)
