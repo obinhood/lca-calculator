@@ -25,8 +25,9 @@ from ..services.units import convert, UnitConversionError
 from ..services.boundary import boundary_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
 from ..services.instruments import over_declaration_gate
-from ..services.comparability import denominator_period_comparable
+from ..services.comparability import denominator_period_comparable, period_scope_gate
 from ..services.calc import scope_declaration_completeness
+from .comparative import comparative_derivations, prior_period_comparative
 from .summary import summary, run_factor_sources
 from ..services.frozen import parse_detail
 
@@ -151,11 +152,42 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
     return out
 
 
+def _secr_comparative_figures(db: Session, run: CalculationRun) -> dict:
+    """The SECR figures that carry a prior-year comparative, for ONE run.
+
+    Applied by `prior_period_comparative` to the reporting run and the comparative run
+    alike, so each figure is only ever compared with itself. Reads the same `summary()`
+    the disclosure's own figures come from — a comparative assembled from a second code
+    path would be a difference between two code paths as much as between two years.
+    """
+    s = summary(db, organisation_id=run.organisation_id, run_id=run.id)
+    by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}
+    scope1 = by_scope.get("1", 0.0) / 1000.0
+    scope2_loc = s["scope2"]["location_based"] / 1000.0
+    energy = _energy_kwh(db, run)
+    return {
+        "scope1_tco2e": round(scope1, 6),
+        "scope2_location_based_tco2e": round(scope2_loc, 6),
+        "scope2_market_based_tco2e": round(s["scope2"]["market_based"] / 1000.0, 6),
+        # SECR's mandatory headline, and so the figure a comparative is most needed for.
+        "scope1_and_2_location_tco2e": round(scope1 + scope2_loc, 6),
+        "total_location_based_tco2e": round((run.total_co2e or 0.0) / 1000.0, 6),
+        "energy_use_kwh": round(energy["total_kwh"], 6),
+    }
+
+
 def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
                 intensity_denominator: Optional[float] = None,
                 intensity_denominator_unit: Optional[str] = None,
-                intensity_denominator_period_days: Optional[int] = None) -> dict:
-    """SECR disclosure payload for one run (latest for the org by default)."""
+                intensity_denominator_period_days: Optional[int] = None,
+                comparative_run_id: Optional[int] = None) -> dict:
+    """SECR disclosure payload for one run (latest for the org by default).
+
+    ``comparative_run_id`` names the run holding the PRIOR period's figures. SECR
+    requires the previous year's figures beside the current ones (the first reporting
+    year excepted), so the comparative block is always present and says what it knows —
+    including, when it cannot be computed, which of the three different reasons applies.
+    """
     s = summary(db, organisation_id=organisation_id, run_id=run_id)
     run_info = s.get("run")
     if run_info is None:
@@ -195,6 +227,24 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
     # every category missed SCOPE_RULES, printing the caveat that named those very
     # activities in the same payload. A zero it inferred now refuses.
     blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
+    # SECR reports a FINANCIAL YEAR. An unscoped run spans the whole uploaded history,
+    # which on a two-year upload made the headline exactly 2.0x the true year's figure
+    # with nothing in the payload saying so.
+    blockers.extend(period_scope_gate(
+        db, run, framework="UK SECR",
+        requirement="the Scope 1 + 2 figures and the intensity ratio"))
+
+    # The prior financial year, through the ONE shared comparative builder — which asks
+    # services.comparability.cross_run_gates the single question "can these two runs be
+    # subtracted?" and surfaces every answer.
+    _comp = prior_period_comparative(
+        db, organisation_id, run, comparative_run_id,
+        extract=_secr_comparative_figures,
+        clause="SECR prior-year comparative",
+        quantity="the year-on-year change",
+        measures="a real change in emissions")
+    comparative = _comp["comparative"]
+    blockers.extend(_comp["blockers"])
 
     energy = _energy_kwh(db, run)
 
@@ -292,6 +342,12 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
             derivations.append(D.total_of(
                 "Energy use", rows, label_key="k", value_key="v", unit="kWh",
                 stated_value=energy["total_kwh"], basis=energy.get("basis"), note=_note))
+    # Worked year-on-year differences, or ONE blocked derivation carrying the reason the
+    # arithmetic is not shown — never an absent section, which reads as nothing to report.
+    derivations.extend(comparative_derivations(
+        comparative, unit="tCO2e",
+        figures=(("scope1_and_2_location_tco2e", "Scope 1 + 2 (location-based)"),
+                 ("total_location_based_tco2e", "Total (location-based)"))))
 
     return {
         "framework": "UK SECR",
@@ -304,6 +360,11 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
         "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "reporting_period_id": run.reporting_period_id,
+        # SECR requires the previous year's figures beside the current ones. ALWAYS
+        # present: `status` is "computed" or "cannot_determine", and in the latter case
+        # `reason_code` distinguishes a legitimate first-year filing from a prior period
+        # that is on file but was not compared, from a pair the gates refused.
+        "prior_year_comparative": comparative,
         "emissions_tco2e": {
             "scope1": round(scope1_kg / 1000.0, 6),
             "scope2_location_based": round(scope2_loc_kg / 1000.0, 6),

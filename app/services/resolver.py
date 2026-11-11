@@ -10,11 +10,12 @@ Selection is deterministic and vintage-aware: factors that have been superseded
 (their id appears in another factor's ``supersedes_id``) are never proposed, and
 ties are broken by newest year then newest id — never by insertion order.
 """
-from sqlalchemy import case
+from sqlalchemy import case, or_, select
 from sqlalchemy.orm import Session
 from rapidfuzz import process, fuzz
 from typing import Optional, Tuple
-from ..models import EmissionFactor, ActivityRecord, factor_visible_to
+from ..models import EmissionFactor, ActivityRecord, FactorGasMass, factor_visible_to
+from .units import are_compatible
 
 # GHG Protocol Scope 3 calculation-method hierarchy (lower = preferred).
 METHOD_RANK = {"supplier_specific": 0, "hybrid": 1, "average_data": 2, "spend_based": 3}
@@ -45,6 +46,23 @@ CONFIDENCE = {
 }
 
 
+def _has_gas_breakdown_clause():
+    """SQL for ``EmissionFactor.has_gas_breakdown`` — "this factor is vintage-free".
+
+    The ORM property cannot be used in a WHERE clause, so the same rule is expressed
+    here in SQL. It must stay in step with ``models.EmissionFactor.has_gas_breakdown``:
+    any of the three mass columns set, OR at least one ``factor_gas_masses`` row (which
+    is the only representation an SF6 or refrigerant factor has — it has no column-backed
+    mass at all, so a columns-only test would call it aggregate-only and vintage-check a
+    factor that has no vintage). tests/test_factors_gwp.py pins the two against each
+    other over a matrix of factors so they cannot drift apart silently.
+    """
+    return or_(EmissionFactor.kg_co2.isnot(None),
+               EmissionFactor.kg_ch4.isnot(None),
+               EmissionFactor.kg_n2o.isnot(None),
+               EmissionFactor.id.in_(select(FactorGasMass.factor_id)))
+
+
 def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int],
                 org_id: Optional[int] = None):
     """Candidate factors: never superseded, visible to this tenant, deterministically ordered.
@@ -67,7 +85,16 @@ def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int],
         .filter(factor_visible_to(org_id))\
         .order_by(method_rank.asc(), EmissionFactor.year.desc(), EmissionFactor.id.desc())
     if gwp_set:
-        q = q.filter(EmissionFactor.gwp_set == gwp_set)
+        # A factor's `gwp_set` describes the vintage baked into its AGGREGATE `value`.
+        # A factor carrying per-gas masses is VINTAGE-FREE — the GWP set is applied to
+        # those masses at calculation time — so for it the stamp describes a column the
+        # calculation will not read, and filtering on it would reject a factor that
+        # serves the requested set perfectly. That is not academic: the real DESNZ file
+        # is published on AR5, so under the platform's AR6 default this filter rejected
+        # every DEFRA factor, the vintage fallback below demoted each one under the
+        # auto-bind threshold, and an entire inventory went to the review queue.
+        q = q.filter(or_(EmissionFactor.gwp_set == gwp_set,
+                         _has_gas_breakdown_clause()))
     if year:
         q = q.filter(EmissionFactor.year == year)
     return q
@@ -75,10 +102,11 @@ def _base_query(db: Session, gwp_set: Optional[str], year: Optional[int],
 
 def resolve_factor(db: Session, category: str, subcategory: str, geo: str,
                    gwp_set: str = "AR6", year: Optional[int] = None,
-                   org_id: Optional[int] = None) -> Optional[EmissionFactor]:
+                   org_id: Optional[int] = None,
+                   unit: Optional[str] = None) -> Optional[EmissionFactor]:
     """Legacy helper: best factor by precedence, no basis information."""
     hit = propose_mapping(db, category, subcategory, None, geo, gwp_set=gwp_set, year=year,
-                          org_id=org_id)
+                          org_id=org_id, unit=unit)
     return hit[0] if hit else None
 
 
@@ -107,24 +135,62 @@ def suggest_subcategory(db: Session, category: str, text: str,
     return None
 
 
+# How many candidates to examine when looking for a dimensionally usable one.
+# A real catalogue publishes a handful of unit-of-measure siblings per fuel
+# (DESNZ gives natural gas in kWh and in cubic metres), so this is small by
+# nature; the cap only stops a pathological catalogue turning one proposal into
+# a table scan.
+_UNIT_SCAN_LIMIT = 50
+
+
+def _first_usable(q, unit: Optional[str]):
+    """The first candidate, in the query's deterministic order, whose unit the
+    activity's quantity can actually be converted into.
+
+    THE UNIT IS PART OF WHETHER A FACTOR MATCHES, and leaving it out was not a
+    missing refinement — it silently produced wrong bindings. One (category,
+    subcategory, geography, vintage) identity routinely holds several rows that
+    differ ONLY in unit: `loaders/base.py` keeps unit in the supersession key, so
+    UOM siblings all stay live, and `loaders/defra.py` emits one row per UOM. The
+    pick among them was `EmissionFactor.id.desc()` — publication order in the
+    source file. Reproduced before this change: a kWh gas bill against a DESNZ
+    catalogue bound the cubic-metre factor at basis 'exact', confidence 1.0,
+    status 'auto'; the run then reported total_co2e 0.0, status 'complete'.
+
+    `unit=None` means the caller stated no constraint and the order alone decides
+    — the behaviour `propose_mapping` had for every caller before. An activity
+    with no unit passes "" instead, which is compatible with nothing, so it
+    cannot auto-bind: an unknown unit is not a licence to guess.
+    """
+    if unit is None:
+        return q.first()
+    for ef in q.limit(_UNIT_SCAN_LIMIT).all():
+        if are_compatible(unit, ef.unit or ""):
+            return ef
+    return None
+
+
 def _propose(db: Session, category: str, subcategory: Optional[str],
              description: Optional[str], geo: str, gwp_set: Optional[str],
              year: Optional[int],
-             org_id: Optional[int] = None) -> Optional[Tuple[EmissionFactor, str, float]]:
+             org_id: Optional[int] = None,
+             unit: Optional[str] = None) -> Optional[Tuple[EmissionFactor, str, float]]:
     q = _base_query(db, gwp_set, year, org_id)
 
     # 1. Exact: category + subcategory-as-given (possibly empty) + geo.
-    ef = q.filter(EmissionFactor.category == category,
-                  EmissionFactor.subcategory == (subcategory or ""),
-                  EmissionFactor.geography == (geo or "Global")).first()
+    ef = _first_usable(q.filter(
+        EmissionFactor.category == category,
+        EmissionFactor.subcategory == (subcategory or ""),
+        EmissionFactor.geography == (geo or "Global")), unit)
     if ef:
         return ef, "exact", CONFIDENCE["exact"]
 
     # 1b. Exact category+subcategory against a Global-geography factor.
     if (geo or "Global") != "Global":
-        ef = q.filter(EmissionFactor.category == category,
-                      EmissionFactor.subcategory == (subcategory or ""),
-                      EmissionFactor.geography == "Global").first()
+        ef = _first_usable(q.filter(
+            EmissionFactor.category == category,
+            EmissionFactor.subcategory == (subcategory or ""),
+            EmissionFactor.geography == "Global"), unit)
         if ef:
             # A Global factor is only geography-agnostic for location-insensitive
             # categories (combustion fuels). For grid electricity/heat it must NOT
@@ -143,20 +209,22 @@ def _propose(db: Session, category: str, subcategory: Optional[str],
         sub = suggest_subcategory(db, category, fuzz_text, org_id)
         if sub:
             for geog in ((geo or "Global"), "Global"):
-                ef = q.filter(EmissionFactor.category == category,
-                              EmissionFactor.subcategory == sub,
-                              EmissionFactor.geography == geog).first()
+                ef = _first_usable(q.filter(
+                    EmissionFactor.category == category,
+                    EmissionFactor.subcategory == sub,
+                    EmissionFactor.geography == geog), unit)
                 if ef:
                     return ef, "fuzzy_subcategory", CONFIDENCE["fuzzy_subcategory"]
 
     # 3. Category + geo, any subcategory (coarse: review required).
-    ef = q.filter(EmissionFactor.category == category,
-                  EmissionFactor.geography == (geo or "Global")).first()
+    ef = _first_usable(q.filter(
+        EmissionFactor.category == category,
+        EmissionFactor.geography == (geo or "Global")), unit)
     if ef:
         return ef, "category_geo", CONFIDENCE["category_geo"]
 
     # 4. Category only (coarsest: review required).
-    ef = q.filter(EmissionFactor.category == category).first()
+    ef = _first_usable(q.filter(EmissionFactor.category == category), unit)
     if ef:
         return ef, "category_only", CONFIDENCE["category_only"]
     return None
@@ -165,19 +233,20 @@ def _propose(db: Session, category: str, subcategory: Optional[str],
 def propose_mapping(db: Session, category: str, subcategory: Optional[str],
                     description: Optional[str], geo: str, gwp_set: str = "AR6",
                     year: Optional[int] = None,
-                    org_id: Optional[int] = None) -> Optional[Tuple[EmissionFactor, str, float]]:
+                    org_id: Optional[int] = None,
+                    unit: Optional[str] = None) -> Optional[Tuple[EmissionFactor, str, float]]:
     """Best factor proposal as (factor, basis, confidence); None if nothing fits.
 
     `org_id` scopes the candidate set to what this tenant may see (models.
     factor_visible_to). Omitting it proposes from platform reference data only.
     """
-    hit = _propose(db, category, subcategory, description, geo, gwp_set, year, org_id)
+    hit = _propose(db, category, subcategory, description, geo, gwp_set, year, org_id, unit)
     if hit:
         return hit
     # Vintage fallback: nothing under the requested GWP set — propose from any
     # vintage but ALWAYS route to review (the calc engine's vintage check still
     # guards aggregate factors at run time, so this cannot silently mix sets).
-    hit = _propose(db, category, subcategory, description, geo, None, year, org_id)
+    hit = _propose(db, category, subcategory, description, geo, None, year, org_id, unit)
     if hit:
         factor, basis, _ = hit
         return factor, f"{basis}+vintage_fallback", CONFIDENCE["vintage_fallback"]
@@ -219,9 +288,14 @@ def auto_map_activity(db: Session, activity: ActivityRecord, gwp_set: str = "AR6
     # The activity carries its own tenant, so auto-binding is scoped without the
     # caller having to remember: an activity can only ever bind a factor its own
     # organisation may see.
+    # The activity carries its own unit, so an automatic binding is unit-checked
+    # without the caller having to remember. "" rather than None when the activity
+    # has no unit: nothing is compatible with an unknown unit, so it routes to a
+    # human instead of binding on publication order.
     hit = propose_mapping(db, activity.category, activity.subcategory,
                           activity.description, activity.geo, gwp_set=gwp_set,
-                          org_id=activity.organisation_id)
+                          org_id=activity.organisation_id,
+                          unit=(activity.unit or ""))
     if hit is None:
         activity.mapping_status = "unmapped"
         _journal("unmapped")

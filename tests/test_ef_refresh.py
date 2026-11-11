@@ -35,16 +35,16 @@ def test_refresh_loads_factors_with_attribution(db):
     assert summary["loaded"] is True
     assert summary["source"] == "DEFRA_DESNZ"
     assert summary["version"] == "2024"
-    assert summary["parsed_rows"] == 4          # same as parse_defra_flat_csv on the sample
-    assert summary["added"] == 4
+    assert summary["parsed_rows"] == 5          # same as parse_defra_flat_csv on the sample (4 fuels/travel + 1 refrigerant)
+    assert summary["added"] == 5
     assert "Open Government Licence" in summary["attribution"]
-    assert db.query(EmissionFactor).filter(EmissionFactor.source == "DEFRA_DESNZ").count() == 4
+    assert db.query(EmissionFactor).filter(EmissionFactor.source == "DEFRA_DESNZ").count() == 5
 
 
 def test_dry_run_inserts_nothing(db):
     summary = refresh_source(db, "defra", "2024", fetcher=_defra_bytes, dry_run=True)
     assert summary["dry_run"] is True and summary["loaded"] is False
-    assert summary["parsed_rows"] == 4          # parsed, so counts are real
+    assert summary["parsed_rows"] == 5          # parsed, so counts are real
     assert db.query(EmissionFactor).count() == 0   # but nothing written
 
 
@@ -52,8 +52,8 @@ def test_refresh_supersedes_prior_version(db):
     refresh_source(db, "defra", "2024", fetcher=_defra_bytes)
     summary = refresh_source(db, "defra", "2025", fetcher=_defra_bytes)
     # every 2025 row supersedes its 2024 predecessor (same key, newer version)
-    assert summary["superseded"] == 4
-    assert db.query(EmissionFactor).count() == 8
+    assert summary["superseded"] == 5
+    assert db.query(EmissionFactor).count() == 10
 
 
 def test_unknown_source_fails_closed(db):

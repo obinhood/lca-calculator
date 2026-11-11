@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Derivations from "./Derivations";
-import { api, Settings } from "../api";
+import { api, ReportingPeriod, Settings } from "../api";
 import { CATEGORIES, FRAMEWORKS, Framework, NEEDS_LABEL } from "../frameworks";
 import type { Page } from "../App";
 
@@ -92,6 +92,26 @@ function Runner({ fw, settings, runId, back }:
   const [checkError, setCheckError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Loaded only when a param actually needs them, so every other report keeps its two
+  // requests.
+  const needsRuns = fw.params.some((p) => p.kind === "run");
+  const [runs, setRuns] = useState<any[]>([]);
+  const [periods, setPeriods] = useState<ReportingPeriod[]>([]);
+
+  useEffect(() => {
+    if (!needsRuns) return;
+    api.runs(settings).then((r) => setRuns(r.runs)).catch(() => { /* picker stays empty */ });
+    api.reportingPeriods(settings).then((r) => setPeriods(r.items)).catch(() => { });
+  }, [needsRuns, settings.apiKey, settings.baseUrl]);
+
+  // A run is only useful as a comparative if a reader can see WHICH period it covers —
+  // the whole point of the gates is that two runs of different spans must not be
+  // subtracted, and an id alone hides the span.
+  const runOptionLabel = (r: any) => {
+    const p = periods.find((x) => x.id === r.reporting_period_id);
+    const where = p ? `${p.label} (${p.start_date} → ${p.end_date})` : "whole history";
+    return `#${r.id} · ${where} · ${r.gwp_set} · ${r.created_at?.slice(0, 10)}`;
+  };
 
   const generate = async () => {
     setError(null); setReport(null); setCheck(null); setCheckError(null);
@@ -129,6 +149,9 @@ function Runner({ fw, settings, runId, back }:
   const emissions = report && (report.emissions_tco2e || report.e1_6_gross_ghg_emissions_tco2e ||
     report.ghg_emissions_tco2e || null);
   const methodology = report?.methodology_statement || report?.methodology || null;
+  // Each framework names its own comparative clause, but the block shape is one shape —
+  // it comes from a single builder, so one renderer reads all of them.
+  const comparative = report?.e1_6_comparative || report?.prior_year_comparative || null;
 
   const saveBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -194,7 +217,15 @@ function Runner({ fw, settings, runId, back }:
           )}
           {fw.params.map((p) => (
             <label className="field" key={p.name}>{p.label}
-              {p.options ? (
+              {p.kind === "run" ? (
+                <select value={vals[p.name] ?? ""}
+                        onChange={(e) => setVals({ ...vals, [p.name]: e.target.value })}>
+                  <option value="">— none —</option>
+                  {runs.filter((r) => r.id !== runId).map((r) => (
+                    <option key={r.id} value={String(r.id)}>{runOptionLabel(r)}</option>
+                  ))}
+                </select>
+              ) : p.options ? (
                 <select value={vals[p.name] ?? p.def}
                         onChange={(e) => setVals({ ...vals, [p.name]: e.target.value })}>
                   {p.options.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -258,6 +289,8 @@ function Runner({ fw, settings, runId, back }:
                 ) : null)}
             </div>
           )}
+
+          {comparative && <Comparative block={comparative} />}
 
           {methodology && (
             <details style={{ marginTop: 12 }}>
@@ -333,5 +366,114 @@ function Runner({ fw, settings, runId, back }:
         </div>
       )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------------------
+// The prior-period comparative. One component for every framework, because the block
+// comes from one builder (app/reports/comparative.py).
+//
+// The job here is to keep the three refusals DISTINGUISHABLE on screen, which is the
+// same requirement the payload meets with `reason_code`. A first reporting year, an
+// omitted comparative and a pair the gates refused are three different facts, and
+// flattening them into one grey "no comparative available" would undo the reason the
+// block exists. So: a neutral note, a warning, and a refusal with every reason listed.
+function Comparative({ block }: { block: any }) {
+  const computed = block.status === "computed";
+  const firstYear = block.reason_code === "no_prior_period_on_file";
+  const periods = block.period_comparability;
+
+  const fmtNum = (v: number | null | undefined) =>
+    v === null || v === undefined
+      ? "—"
+      : v.toLocaleString(undefined, { maximumFractionDigits: 4 });
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <h4 style={{ marginBottom: 6 }}>
+        {block.clause}
+        {computed
+          ? <span className="badge ok" style={{ marginLeft: 8 }}>✓ comparable</span>
+          : firstYear
+            ? <span className="badge" style={{ marginLeft: 8 }}>first reporting period</span>
+            : <span className="badge warn" style={{ marginLeft: 8 }}>cannot determine</span>}
+      </h4>
+
+      {!computed && (
+        <div className={"callout " + (firstYear ? "" : "bad")}>
+          <p style={{ margin: 0 }}>{block.reason}</p>
+          {(block.blockers || []).length > 0 && (
+            <>
+              <b style={{ display: "block", marginTop: 8 }}>
+                {/* Only `not_comparable` is a verdict ON A PAIR. For the others there
+                    is no second run, and heading the list "why these two runs cannot be
+                    subtracted" would assert a gate result that was never reached. */}
+                {block.reason_code === "not_comparable"
+                  ? "Why these two runs cannot be subtracted"
+                  : "What this blocks"}
+              </b>
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                {block.blockers.map((b: string, i: number) =>
+                  <li key={i} style={{ marginBottom: 4 }}>{b}</li>)}
+              </ul>
+            </>
+          )}
+          {/* No figures are shown for a refused comparative. A delta beside a blocker
+              still gets quoted, which is exactly how a divestment came to be published
+              as a substantiated reduction. */}
+        </div>
+      )}
+
+      {computed && (
+        <table>
+          <thead>
+            <tr>
+              <th>Figure</th>
+              <th>Reporting period</th>
+              <th>Comparative period</th>
+              <th>Change</th>
+              <th>%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(block.figures || {}).map(([k, f]: any) => (
+              <tr key={k}>
+                <td>{k.replace(/_tco2e$/, "").replace(/_/g, " ")}</td>
+                <td>{fmtNum(f.current)}</td>
+                <td>{fmtNum(f.prior)}</td>
+                {/* A fall is good news, a rise is not, and NO change is neither —
+                    colouring zero as a warning reads as a finding where there is none. */}
+                <td className={!f.change ? "" : f.change < 0 ? "ok" : "warn"}>
+                  {f.status === "computed" ? fmtNum(f.change) : "cannot determine"}
+                </td>
+                <td>
+                  {f.change_pct === null || f.change_pct === undefined
+                    ? <span className="muted" title={f.pct_reason || f.reason || ""}>—</span>
+                    : `${f.change_pct > 0 ? "+" : ""}${fmtNum(f.change_pct)}%`}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {/* Both windows, published whether or not the delta was. A reader of a refused
+          comparative needs them as much as a reader of a computed one. */}
+      {periods && (
+        <p className="muted" style={{ marginTop: 8 }}>
+          Reporting period {periods.reporting_period?.label ?? "—"}:{" "}
+          {periods.reporting_days ?? "?"} days · comparative{" "}
+          {periods.comparative_period?.label ?? "—"}:{" "}
+          {periods.comparative_days ?? "?"} days · tolerance {periods.tolerance_pct}%
+        </p>
+      )}
+      {(block.prior_periods_on_file || []).length > 0 && !computed && (
+        <p className="muted">
+          Runs available as a comparative:{" "}
+          {block.prior_periods_on_file.map((c: any) =>
+            `#${c.run_id} (${c.reporting_period?.label ?? "unscoped"})`).join(", ")}
+        </p>
+      )}
+    </div>
   );
 }

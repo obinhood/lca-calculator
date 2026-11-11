@@ -2,17 +2,74 @@
 
 Targets the published flat-file layout with columns: Scope, Level 1..4,
 Column Text, UOM, GHG/Unit, GHG Conversion Factor <year>. Point at the official
-annual CSV (OGL, freely redistributable). DEFRA expresses per-gas rows already
-as AR5-weighted CO2e (not raw gas mass), so only the TOTAL is stored, as an
-aggregate factor at gwp_set=AR5 — faithful to the source (no back-solved
-per-gas). Category/subcategory come from the Level columns; UOM is normalised
-to the platform's units.
+annual CSV (OGL, freely redistributable). Category/subcategory come from the Level
+columns; UOM is normalised to the platform's units.
+
+PER-GAS INGESTION — WHAT IS AND IS NOT ALLOWED
+---------------------------------------------
+DESNZ publishes, for most rows, a TOTAL line ("kg CO2e") and beside it one line per
+gas ("kg CO2e of CO2 per unit", "... of CH4 ...", "... of N2O ..."). The per-gas
+lines are already CO2e-WEIGHTED — they are not raw gas masses — and the weighting is
+DESNZ's declared GWP set, AR5.
+
+This adapter used to keep only the total, stamp it ``gwp_set="AR5"``, and leave the
+per-gas columns NULL. Its refusal to invent a split was right, but the consequence
+was that a customer who loaded the real published file and ran with the platform's
+default (AR6) got ``total_co2e: 0.0`` reported as ``status: "complete"``: an
+aggregate factor's vintage is baked into its value, so calc excludes it when the
+requested set differs — and with every line excluded, the whole inventory was zero.
+
+The distinction that matters, and that this adapter now draws:
+
+  * REFUSED, still: splitting a TOTAL into per-gas shares. Given only
+    0.18293 kg CO2e/kWh there is no way to know how much is CH4. Most vendors
+    relabel DEFRA figures as AR6; this one does not, and does not guess.
+  * ALLOWED: converting a PUBLISHED per-gas CO2e line back to the gas mass that
+    produced it, by dividing by the GWP DESNZ states it used. That is the exact
+    inverse of DESNZ's own arithmetic, not an inference —
+
+        kg CH4 = (kg CO2e of CH4) / GWP_AR5(CH4)
+
+    and the mass is recovered with the SAME gas key the calculation will later use
+    to recompose it, so a run under AR5 reproduces the published figure exactly, by
+    construction, whatever that key's value happens to be.
+
+RECONCILIATION GATE
+-------------------
+Recovered masses are only stored if recomposing them under AR5 reproduces the
+PUBLISHED total to within the precision the file itself is published at
+(``_rounding_tolerance``). A larger residual means a gas line is missing, and
+storing the breakdown anyway would silently understate the factor by the missing
+gas's share — small, invisible and in the wrong direction. Such a row stays
+aggregate-only, so its vintage mismatch is reported as a reason rather than
+quietly swallowed.
+
+Rows where DESNZ publishes no per-gas lines at all (material use, waste, hotel
+stays) likewise stay aggregate-only. That is faithful: the vintage is genuinely
+baked in, and the engine says so.
 """
 import csv
 import io
-from typing import List, Optional
+import re
+from typing import Dict, List, Optional, Tuple
 
+from ...services.gwp import GAS_BLENDS, GWP_100, gwp, is_known_gas
 from .base import FactorRow
+
+# The GWP set DESNZ weights its published per-gas CO2e lines with. Stated in the
+# DESNZ conversion-factors methodology; it is also why the aggregate `value` is
+# stamped AR5 below. If DESNZ ever restates on AR6 this constant is the one place
+# that changes — and the reconciliation gate below would catch a silent restatement,
+# because masses recovered with the wrong divisor stop summing to the total.
+DEFRA_GWP_SET = "AR5"
+
+# Gas keys (as services/gwp.py names them) for the per-gas lines DESNZ publishes.
+# `ch4_origin` is deliberately left NULL on DEFRA rows, so CH4 recomposes through
+# the same bare "CH4" key it was recovered with.
+_GAS_LINE_KEYS = {"co2": "CO2", "ch4": "CH4", "n2o": "N2O"}
+
+# "kg CO2e of CH4 per unit" -> ch4
+_PER_GAS_RE = re.compile(r"\bof\s+([a-z0-9]+)\b")
 
 _UOM = {
     "litres": "L", "litre": "L", "tonnes": "tonne", "tonne": "tonne",
@@ -29,6 +86,33 @@ def _slug(*parts) -> str:
 def _norm_uom(uom: str) -> str:
     u = (uom or "").strip()
     return _UOM.get(u.lower(), u)
+
+
+def _decimals(raw: str) -> int:
+    """Decimal places in a published figure, used to size the rounding tolerance."""
+    if "." not in raw:
+        return 0
+    return len(raw.split(".", 1)[1].rstrip())
+
+
+def _rounding_tolerance(decimals: List[int], n_terms: int) -> float:
+    """Largest residual explicable by PUBLICATION ROUNDING alone.
+
+    Each published figure (the total and each per-gas line) is rounded to its own
+    last decimal place, so each contributes at most half a unit in that place. The
+    worst case is the sum of those half-units.
+
+    This is deliberately derived from the file's own precision rather than set as a
+    flat percentage. A flat tolerance large enough to absorb rounding on a small
+    factor is also large enough to absorb a MISSING GAS LINE on a large one — which
+    is precisely the silent understatement the gate exists to catch. On the real
+    DESNZ natural-gas row the rounding bound is ~2e-5 kg CO2e/kWh while a missing
+    N2O line is ~7e-5, so the bound separates them; a 1% rule would pass both.
+    """
+    dp = min(decimals) if decimals else 5
+    half = 0.5 * (10.0 ** -dp)
+    # A small absolute floor for binary-float noise in the division/recomposition.
+    return max(half * (n_terms + 1), 1e-12)
 
 
 def _derive_boundary(scope: str, level1: str, level2: str = "") -> Optional[str]:
@@ -111,6 +195,90 @@ def _derive_boundary(scope: str, level1: str, level2: str = "") -> Optional[str]
     return None
 
 
+def _refrigerant_gas(*labels) -> Optional[str]:
+    """The gas identity for a DESNZ refrigerant designation, or None.
+
+    DESNZ writes refrigerants as "R410A", "HFC-134a", "R-404A" across years and
+    tables; services/gwp.py keys them canonically ("R-410A"). Only designations that
+    resolve to a KNOWN species or shipped blend are accepted — an unrecognised
+    refrigerant returns None and its row stays aggregate-only, rather than being
+    mapped to a near-neighbour whose GWP is thousands of units different.
+    """
+    for label in labels:
+        tok = (label or "").strip().upper().replace(" ", "")
+        if not tok:
+            continue
+        for cand in (tok, re.sub(r"^R-?", "R-", tok), re.sub(r"^HFC-?", "HFC-", tok)):
+            # GWP_100 keys halocarbons in mixed case ("HFC-134a"); match case-folded.
+            for known in list(GAS_BLENDS) + list(GWP_100["AR6"]):
+                if known.upper() == cand and is_known_gas(known):
+                    return known
+    return None
+
+
+def _refrigerant_mass(published_co2e: float, total_dp: int,
+                      gas: str) -> Optional[Dict[str, float]]:
+    """Unit gas mass for a refrigerant row, if its published figure reconciles.
+
+    A DESNZ refrigerant line is "kg CO2e per kg of refrigerant" — which IS that
+    refrigerant's GWP under the set DESNZ uses. So the faithful ingestion of 1 kg of
+    refrigerant is 1 kg of THAT GAS, with the GWP applied at calculation time:
+    stored as an aggregate instead, a refrigerant line would be frozen at AR5 and
+    excluded from every AR6 run, which is how fugitive F-gases went missing.
+
+    The published figure is reconciled against the GWP this platform composes for
+    the designation. A mismatch means either the composition here or the vintage
+    assumed differs from DESNZ's, so the row stays aggregate-only rather than
+    silently re-scaling a customer's refrigerant emissions.
+    """
+    composed = gwp(gas, DEFRA_GWP_SET)
+    if abs(published_co2e - composed) > _rounding_tolerance([total_dp], 1):
+        return None
+    return {gas: 1.0}
+
+
+def _classify_ghg_line(ghg: str) -> Optional[str]:
+    """What kind of line this ``GHG/Unit`` cell describes.
+
+    Returns "total" for the aggregate CO2e line, a gas key ("CO2"/"CH4"/"N2O") for a
+    published per-gas CO2e line, or None for anything unrecognised. Unrecognised is
+    SKIPPED rather than guessed: a line this adapter cannot classify must not be
+    added into either the total or a gas mass.
+    """
+    g = (ghg or "").strip().lower()
+    if "co2e" not in g:
+        return None
+    if " of " not in g:
+        return "total"
+    m = _PER_GAS_RE.search(g)
+    if not m:
+        return None
+    return _GAS_LINE_KEYS.get(m.group(1))
+
+
+def _recover_masses(per_gas: Dict[str, Tuple[float, int]], total: float,
+                    total_dp: int) -> Tuple[Optional[Dict[str, float]], float]:
+    """Gas masses recovered from published per-gas CO2e lines, or None.
+
+    Each published per-gas CO2e figure is divided by the GWP of that gas under the
+    set DESNZ declares, recovering the gas mass exactly. The recovered masses are
+    then recomposed under the same set and compared with the published TOTAL: if the
+    residual exceeds what publication rounding can explain, a gas line is missing and
+    None is returned, leaving the row aggregate-only rather than understated.
+
+    Returns (masses or None, residual).
+    """
+    if not per_gas:
+        return None, 0.0
+    masses = {gas: co2e / gwp(gas, DEFRA_GWP_SET) for gas, (co2e, _) in per_gas.items()}
+    recomposed = sum(m * gwp(gas, DEFRA_GWP_SET) for gas, m in masses.items())
+    residual = abs(total - recomposed)
+    decimals = [total_dp] + [dp for _, dp in per_gas.values()]
+    if residual > _rounding_tolerance(decimals, len(per_gas)):
+        return None, residual
+    return masses, residual
+
+
 def parse_defra_flat_csv(data: bytes, year: Optional[int] = None,
                          geography: str = "GB") -> List[FactorRow]:
     reader = csv.DictReader(io.StringIO(data.decode("utf-8-sig")))
@@ -123,11 +291,13 @@ def parse_defra_flat_csv(data: bytes, year: Optional[int] = None,
         digits = "".join(ch for ch in cf_col if ch.isdigit())
         year = int(digits) if digits else 0
 
-    rows = []
+    # A factor is identified by its published table position + unit; the total line
+    # and its per-gas lines share that identity and differ only in `GHG/Unit`. Keyed
+    # in FILE ORDER so output order is deterministic and independent of dict hashing.
+    groups: Dict[tuple, dict] = {}
     for r in reader:
-        ghg = (r.get(ghg_col) or "").strip().lower()
-        # Keep only the TOTAL row (e.g. "kg CO2e"); skip per-gas "... of CO2 ..." rows.
-        if "co2e" not in ghg or " of " in ghg:
+        kind = _classify_ghg_line(r.get(ghg_col))
+        if kind is None:
             continue
         raw = (r.get(cf_col) or "").strip().replace(",", "")
         if not raw:
@@ -136,13 +306,55 @@ def parse_defra_flat_csv(data: bytes, year: Optional[int] = None,
             value = float(raw)
         except ValueError:
             continue
+
+        key = (r.get("Scope") or "", r.get("Level 1") or "", r.get("Level 2") or "",
+               r.get("Level 3") or "", r.get("Level 4") or "",
+               r.get("Column Text") or "", r.get("UOM") or "")
+        g = groups.setdefault(key, {"row": r, "total": None, "total_dp": 0, "gases": {}})
+        if kind == "total":
+            # A duplicate total for one published row would be ambiguous; keep the
+            # first and ignore the rest rather than summing two readings of one figure.
+            if g["total"] is None:
+                g["total"], g["total_dp"] = value, _decimals(raw)
+        else:
+            g["gases"].setdefault(kind, (value, _decimals(raw)))
+
+    rows: List[FactorRow] = []
+    for key, g in groups.items():
+        if g["total"] is None:
+            # Per-gas lines with no published total: nothing to reconcile against, so
+            # the masses cannot be confirmed complete. Skipped rather than trusted.
+            continue
+        r = g["row"]
+        masses, _residual = _recover_masses(g["gases"], g["total"], g["total_dp"])
         category = _slug(r.get("Level 1"))
         subcategory = _slug(r.get("Level 2"), r.get("Level 3"), r.get("Level 4"),
                             r.get("Column Text"))
+        unit = _norm_uom(r.get("UOM"))
+
+        # A refrigerant row carries no per-gas lines — its published figure is a GWP,
+        # not a mass — so it is decomposed from its DESIGNATION instead. Only "per kg
+        # of refrigerant" rows qualify: the figure must be CO2e per unit mass of the
+        # named gas for "1 kg of that gas" to be the faithful reading.
+        gas_masses: Dict[str, float] = {}
+        if masses is None and unit == "kg":
+            rgas = _refrigerant_gas(r.get("Level 3"), r.get("Column Text"),
+                                    r.get("Level 4"), r.get("Level 2"))
+            if rgas is not None:
+                gas_masses = _refrigerant_mass(g["total"], g["total_dp"], rgas) or {}
+
         rows.append(FactorRow(
             category=category or "uncategorised", subcategory=subcategory,
-            unit=_norm_uom(r.get("UOM")), value=value, geography=geography, year=year,
-            gwp_set="AR5", method_type="average_data",
+            unit=unit, value=g["total"], geography=geography,
+            year=year, gas_masses=gas_masses,
+            # The aggregate `value` remains the AR5-weighted published total, so a
+            # row that could NOT be decomposed is still vintage-checked honestly.
+            # Where masses were recovered, calc applies the requested set to them and
+            # the stamp describes only the (now redundant) aggregate.
+            gwp_set=DEFRA_GWP_SET, method_type="average_data",
+            kg_co2=(masses or {}).get("CO2"),
+            kg_ch4=(masses or {}).get("CH4"),
+            kg_n2o=(masses or {}).get("N2O"),
             lca_boundary=_derive_boundary(r.get("Scope"), r.get("Level 1"),
                                           r.get("Level 2"))))
     return rows

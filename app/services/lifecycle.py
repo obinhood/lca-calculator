@@ -584,6 +584,13 @@ TENANT_DIRECT = (
 TENANT_VIA = {
     "assurance_findings": ("engagement_id", "assurance_engagements", "id"),
     "emission_line_items": ("run_id", "calculation_runs", "id"),
+    # Per-gas masses follow their FACTOR's tenancy. The parent is the one MIXED table
+    # here (see GLOBAL_REFERENCE below): the join to emission_factors.organisation_id
+    # therefore removes the gas rows of factors THIS tenant contributed and leaves the
+    # platform catalogue's gas rows — which is the same split delete_tenant applies to
+    # the parent itself, so the two cannot disagree. Delete order is derived from the
+    # FK graph, so these children go before their factors without a hand-kept list.
+    "factor_gas_masses": ("factor_id", "emission_factors", "id"),
     "lca_items": ("assessment_id", "lca_assessments", "id"),
     "nature_impacts_dependencies": ("site_id", "nature_sites", "id"),
     "run_entity_boundary": ("run_id", "calculation_runs", "id"),
@@ -860,6 +867,13 @@ EXPORT_TABLES = (
     "financed_positions", "product_footprints", "nature_sites",
     "nature_impacts_dependencies", "nature_targets", "lca_assessments", "lca_items",
     "taxonomy_activities", "cbam_goods", "pact_clients",
+    # Per-gas masses of the factors this tenant CONTRIBUTED. Exported rather than
+    # excluded: the rows under own_emission_factors are incomplete without them — an
+    # F-gas or refrigerant factor has NO column-backed mass at all, so exporting the
+    # factor alone would hand a churning customer a row whose emissions cannot be
+    # reproduced. The TENANT_VIA join scopes this to their own factors; the platform
+    # catalogue's gas rows are reference data and stay out, exactly as its factors do.
+    "factor_gas_masses",
 )
 
 # pact_tokens is deliberately NOT exported: the rows are bearer credentials, and an

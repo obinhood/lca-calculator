@@ -34,9 +34,23 @@ def _activity(db, org_id, factor, qty, unit=None, date="2025-06-15", **kw):
 # 1. The published GWP constants themselves.
 
 def test_gwp_constants_match_the_published_ipcc_tables():
-    """A typo here would silently mis-state every per-gas calculation. Values are IPCC
-    AR5 Table 8.7 and AR6 Table 7.15 (100-year, no climate-carbon feedback on the fossil/
-    non-fossil split as used for corporate reporting)."""
+    """A typo here would silently mis-state every per-gas calculation.
+
+    Values are checked against the GHG Protocol's "IPCC Global Warming Potential
+    Values" v2.0 (7 Aug 2024), the AR4/AR5/AR6 100-year table that services/gwp.py
+    cites — AR5 from WG1 Ch.8 Table 8.A.1/8.7 and AR6 from WG1 Ch.7 §7.6.1.1, both
+    without climate-carbon feedbacks, as used for corporate reporting.
+
+    SF6 under AR6 is 24,300, CHANGED from the 25,200 previously asserted here. AR6
+    Ch.7 is internally inconsistent on that gas: main-chapter Table 7.15 prints
+    25,200 while supplementary Table 7.SM.7 prints 24,300. 24,300 is the figure in
+    the GHG Protocol's own table — the document an assuror checks a filing against —
+    and on EU F-gas Regulation 2024/573 equipment labelling. The change could be made
+    without affecting any existing or filed run because SF6 was UNREACHABLE until the
+    per-gas mass store existed: there was no column to hold an SF6 mass, so no
+    calculation ever multiplied by this number. Making an unverifiable value reachable
+    without checking it would have been the worse option.
+    """
     assert GWP_100["AR5"]["CO2"] == 1.0
     assert GWP_100["AR5"]["CH4_fossil"] == 30.0
     assert GWP_100["AR5"]["CH4_biogenic"] == 28.0
@@ -48,7 +62,7 @@ def test_gwp_constants_match_the_published_ipcc_tables():
     assert GWP_100["AR6"]["CH4_fossil"] == 29.8
     assert GWP_100["AR6"]["CH4_biogenic"] == 27.0
     assert GWP_100["AR6"]["N2O"] == 273.0
-    assert GWP_100["AR6"]["SF6"] == 25200.0
+    assert GWP_100["AR6"]["SF6"] == 24300.0
     assert GWP_100["AR6"]["NF3"] == 17400.0
 
     # Directional sanity the tables must always satisfy.

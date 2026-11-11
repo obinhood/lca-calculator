@@ -58,7 +58,11 @@ def test_null_factor_value_does_not_crash_run(db):
     _activity(db, org.id, good.id, quantity=100)     # 20 kg
     _activity(db, org.id, bad.id, quantity=100)      # bad -> data_errors
     run = compute_co2e(db, org.id)
-    assert run.status == "complete"
+    # The run is still PRODUCED — that is what this test guards. Its status says
+    # exclusions happened, because one line was dropped: a run whose total omits a
+    # line must not call itself "complete", or the reader never looks at the bucket
+    # counts that say what is missing.
+    assert run.status == "complete_with_exclusions"
     assert run.mapped == 1 and run.data_errors == 1
     assert run.total_co2e == pytest.approx(20.0)     # only the good line
 

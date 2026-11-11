@@ -23,7 +23,7 @@ from .residual_mix import (
     resolve_reference_rate,
 )
 from .units import convert, UnitConversionError, QuantityError
-from .gwp import co2e_from_gases, gwp
+from .gwp import co2e_from_gases, gas_masses_for_factor, gwp
 from .dq import line_dq, PEDIGREE_METHOD
 from .screening import freeze_onto_run as screening_freeze_onto_run
 from .crosswalk import activity_verdict as crosswalk_verdict
@@ -202,19 +202,13 @@ def coverage_overlap(a, p_start, p_end):
 def factor_gases(factor: EmissionFactor) -> dict:
     """Per-gas masses (kg gas per activity unit) for a factor with a gas breakdown.
 
-    CH4 is routed to the correct GWP variant by the factor's ``ch4_origin``:
-    fossil combustion vs biogenic (landfill/organic); NULL uses the blended value.
+    Delegates to ``gwp.gas_masses_for_factor``, which is THE assembler: CO2/CH4/N2O
+    come from their columns and every other gas — the HFCs, PFCs, SF6 and NF3 that
+    complete the Kyoto basket — from the ``factor_gas_masses`` association table.
+    Keeping that knowledge in one place is what stops the two stores drifting apart;
+    this function stays as the calc-engine-facing name its callers already use.
     """
-    gases = {}
-    if factor.kg_co2 is not None:
-        gases["CO2"] = factor.kg_co2
-    if factor.kg_ch4 is not None:
-        origin = getattr(factor, "ch4_origin", None)
-        key = {"fossil": "CH4_fossil", "biogenic": "CH4_biogenic"}.get(origin, "CH4")
-        gases[key] = factor.kg_ch4
-    if factor.kg_n2o is not None:
-        gases["N2O"] = factor.kg_n2o
-    return gases
+    return gas_masses_for_factor(factor)
 
 
 def compute_activity_co2e(quantity: Optional[float], unit: str, factor: EmissionFactor,
@@ -1383,7 +1377,18 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         # to doubt it together.
         screening_freeze_onto_run(db, run, organisation_id, _utcnow_iso())
 
-        run.status = "complete"
+        # A run that EXCLUDED activities must not call itself "complete". Every
+        # exclusion already lands in a visible bucket with a reason (the contract
+        # above), but the status is what a caller, an export and a reader check
+        # first, and "complete" over a partial figure invites exactly the wrong
+        # conclusion. The case that forced this: a customer loads the real DESNZ
+        # file (AR5 aggregates) and runs with the platform default (AR6); every line
+        # is excluded on vintage, and the run reported total_co2e 0.0 as "complete".
+        # A zero called complete is worse than a refusal, because nothing prompts
+        # the reader to look at the coverage snapshot.
+        run.status = ("complete" if not (run.unmapped or run.unit_errors
+                                         or run.data_errors or run.gwp_mismatch)
+                      else "complete_with_exclusions")
         db.commit()
     except Exception:
         db.rollback()

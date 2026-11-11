@@ -29,7 +29,7 @@ from .services.ingestion import parse_csv
 from .services.qa import check_records
 from .services.resolver import auto_map_activity
 from .services.calc import compute_co2e, ReportingPeriodError, _parse_iso_date
-from .services.gwp import SUPPORTED_GWP_SETS
+from .services.gwp import SUPPORTED_GWP_SETS, gas_masses_for_factor
 from .services.uncertainty import (
     propagate, DEFAULT_CORRELATION, DEFAULT_ITERATIONS,
 )
@@ -1020,9 +1020,13 @@ def list_runs(request: Request, limit: Optional[int] = None, offset: Optional[in
     q = db.query(CalculationRun).filter(CalculationRun.organisation_id == org.id)\
         .order_by(CalculationRun.id.desc())
     page = page_of_query(q, limit, offset)
+    # reporting_period_id is ADDITIVE and load-bearing for the client: without it two
+    # runs are distinguishable only by timestamp and total, so a preparer could not tell
+    # a year's run from a whole-history one, nor pick a prior period as a comparative.
     body = {"runs": [{"id": r.id, "created_at": r.created_at, "gwp_set": r.gwp_set,
                       "status": r.status, "total_co2e": r.total_co2e,
                       "total_co2e_market": r.total_co2e_market,
+                      "reporting_period_id": r.reporting_period_id,
                       "mapped": r.mapped, "total_activities": r.total_activities}
                      for r in page["rows"]],
             "page": page_block(page, limit, offset)}
@@ -3988,11 +3992,16 @@ def get_esrs_e1_report(run_id: Optional[int] = None,
                        revenue_period_days: Optional[int] = None,
                        revenue_currency: str = "EUR",
                        credits_as_of: Optional[str] = None,
+                       comparative_run_id: Optional[int] = None,
                        org: Organisation = Depends(current_org),
                        db: Session = Depends(get_db)):
     """CSRD ESRS E1 quantitative disclosure payload with pre-submission gates.
 
     credits_as_of (ISO timestamp) freezes the E1-7 credits section for a filing.
+
+    comparative_run_id names the run holding the PRIOR period's figures (ESRS 1 ¶78).
+    The payload's `e1_6_comparative` block is present either way and says which of the
+    three reasons applies when a comparative cannot be computed.
     """
     if net_revenue_millions is not None and (
             not math.isfinite(net_revenue_millions) or net_revenue_millions <= 0):
@@ -4002,7 +4011,8 @@ def get_esrs_e1_report(run_id: Optional[int] = None,
                                        net_revenue_millions=net_revenue_millions,
                                        revenue_period_days=revenue_period_days,
                                        revenue_currency=revenue_currency,
-                                       credits_as_of=credits_as_of)))
+                                       credits_as_of=credits_as_of,
+                                       comparative_run_id=comparative_run_id)))
 
 
 @app.get("/reports/sb253")
@@ -4110,9 +4120,15 @@ def get_secr_report(run_id: Optional[int] = None,
                     intensity_denominator: Optional[float] = None,
                     intensity_denominator_unit: Optional[str] = None,
                     intensity_denominator_period_days: Optional[int] = None,
+                    comparative_run_id: Optional[int] = None,
                     org: Organisation = Depends(current_org),
                     db: Session = Depends(get_db)):
-    """UK SECR disclosure payload with pre-submission validation gates."""
+    """UK SECR disclosure payload with pre-submission validation gates.
+
+    comparative_run_id names the run holding the PRIOR financial year's figures. The
+    payload's `prior_year_comparative` block is present either way and names the reason
+    when a comparative cannot be computed.
+    """
     if intensity_denominator is not None and (
             not math.isfinite(intensity_denominator) or intensity_denominator <= 0):
         raise HTTPException(status_code=400, detail="intensity_denominator must be a finite number > 0")
@@ -4120,7 +4136,8 @@ def get_secr_report(run_id: Optional[int] = None,
         db, org.id, run_id=run_id,
         intensity_denominator=intensity_denominator,
         intensity_denominator_unit=intensity_denominator_unit,
-        intensity_denominator_period_days=intensity_denominator_period_days)))
+        intensity_denominator_period_days=intensity_denominator_period_days,
+        comparative_run_id=comparative_run_id)))
 
 
 @app.post("/taxonomy/activities")
@@ -4221,10 +4238,19 @@ def list_factors(request: Request, org: Organisation = Depends(current_org),
             _func.lower(EmissionFactor.source).like(needle),
             _func.lower(EmissionFactor.geography).like(needle)))
     page = page_of_query(query.order_by(EmissionFactor.id), limit, offset)
+    # `per_gas` and `gases` are what tell a caller whether `gwp` BINDS. On an
+    # aggregate-only factor the vintage is baked into `value`, so a run under a
+    # different GWP set will exclude the line; on a per-gas factor the set is applied
+    # to the masses at calculation time and `gwp` describes only the (redundant)
+    # aggregate. Without this the mapping-override dropdown shows a DEFRA factor as
+    # "AR5" whether or not it would actually compute in the reviewer's AR6 run, and a
+    # pure F-gas factor looks vintage-locked when it is not.
     body = {"factors": [{"id": f.id, "src": f.source, "ver": f.version,
                          "geo": f.geography, "year": f.year, "cat": f.category,
                          "subcat": f.subcategory, "unit": f.unit, "gwp": f.gwp_set,
-                         "value": f.value} for f in page["rows"]],
+                         "value": f.value, "per_gas": f.has_gas_breakdown,
+                         "gases": sorted(gas_masses_for_factor(f))}
+                        for f in page["rows"]],
             "page": page_block(page, limit, offset)}
     return JSONResponse(body, headers=next_link_headers(request, page))
 
