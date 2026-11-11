@@ -162,5 +162,6 @@ def test_the_shared_gate_actually_covers_all_four_dimensions():
     src = pathlib.Path("app/services/comparability.py").read_text()
     body = src[src.index("def cross_run_gates"):]
     for gate in ("period_comparable", "boundary_comparable", "gwp_comparable",
-                 "residual_mix_comparable"):
+                 "residual_mix_comparable", "pedigree_comparable",
+                 "scope_basis_comparable"):
         assert gate in body, f"cross_run_gates no longer applies {gate}"

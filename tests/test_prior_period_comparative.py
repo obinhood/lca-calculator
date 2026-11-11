@@ -22,7 +22,7 @@ from app.models import (ActivityRecord, CalculationRun, EmissionFactor, Organisa
 from app.reports.comparative import prior_period_candidates
 from app.reports.esrs_e1 import esrs_e1_report
 from app.reports.secr import secr_report
-from app.services.calc import compute_co2e
+from app.services.calc import SCOPE_RULES, compute_co2e
 from tests.scope3_util import make_period, screen_complete
 
 
@@ -513,6 +513,82 @@ def test_the_incomplete_gate_lets_a_clean_run_through(db, two_years):
                     intensity_denominator_period_days=365,
                     comparative_run_id=clean.id)["prior_year_comparative"]
     assert c["reason_code"] == "not_comparable"          # NOT prior_run_incomplete
+
+
+def _scope_renamed_org(db, prior_category, current_category):
+    """One org, same physical source both years, under two category names.
+
+    `purchased_steam_site_a` matches no SCOPE_RULES key, so its line records
+    `assumed_scope3` and Scope 1 and 2 are both 0.0 by guess; `electricity` is Scope 2
+    by rule. Emissions are IDENTICAL in both years, so every figure the delta moves is
+    an artefact of the rename.
+    """
+    org = _org(db, name=f"Renamer-{prior_category}-{current_category}")
+
+    def _add(cat, date):
+        f = EmissionFactor(source="T", version="1", geography="GB", year=2024,
+                           category=cat, subcategory="", unit="kWh", gwp_set="AR6",
+                           value=0.2)
+        db.add(f); db.commit(); db.refresh(f)
+        a = ActivityRecord(organisation_id=org.id, date=date, category=cat,
+                           subcategory="", description="", quantity=50_000, unit="kWh",
+                           geo="GB", factor_id=f.id)
+        if cat not in SCOPE_RULES:
+            a.ghgp_category = 1      # discharge the GHGP category gate, not this one
+        db.add(a); db.commit()
+
+    _add(prior_category, "2024-06-01")
+    _add(current_category, "2025-06-01")
+    p24 = make_period(db, org.id, label="FY24", start="2024-01-01", end="2024-12-31")
+    p25 = make_period(db, org.id, label="FY25", start="2025-01-01", end="2025-12-31")
+    for p in (p24, p25):
+        screen_complete(db, org.id, p.id,
+                        compute_co2e(db, org.id, reporting_period_id=p.id))
+    return (org,
+            compute_co2e(db, org.id, reporting_period_id=p24.id),
+            compute_co2e(db, org.id, reporting_period_id=p25.id))
+
+
+def test_a_renamed_category_is_not_a_change_in_emissions(db):
+    """A whole scope appearing because a category became recognisable.
+
+    An unrecognised category defaults the entire inventory to Scope 3, so Scope 1 and
+    Scope 2 are 0.0 by guess. Rename it — or wait for the platform to add it to
+    SCOPE_RULES — and the same physical source reappears as Scope 2. Measured before
+    the gate existed: identical 10,000 kg in both years, and the comparative published
+    Scope 1+2 moving 0.0 -> 10.0 tCO2e.
+
+    The single-run scope gate cannot catch this and could not: it judges the run in
+    front of it, and the REPORTING run's scope here is perfectly sound. Only the pair
+    is wrong, which is why the gate belongs in cross_run_gates.
+    """
+    org, r24, r25 = _scope_renamed_org(db, "purchased_steam_site_a", "electricity")
+    assert r24.total_co2e == pytest.approx(r25.total_co2e)    # nothing was emitted
+
+    r = secr_report(db, org.id, run_id=r25.id, intensity_denominator=2.0,
+                    intensity_denominator_unit="£M revenue",
+                    intensity_denominator_period_days=365,
+                    comparative_run_id=r24.id)
+    c = r["prior_year_comparative"]
+    assert c["status"] == "cannot_determine"
+    assert c["reason_code"] == "not_comparable"
+    assert c["figures"] is None                   # NOT a 0.0 -> 10.0 "increase"
+    assert any("ASSUMED scope" in b for b in c["blockers"]), c["blockers"]
+
+
+def test_the_scope_basis_gate_is_silent_when_both_years_agree(db):
+    """Negative control. A gate that refused every pair would pass the test above.
+
+    The same fixture with the SAME recognised category in both years must reach a
+    computed comparative — the rename is the only thing that differs.
+    """
+    org, r24, r25 = _scope_renamed_org(db, "electricity", "electricity")
+    c = secr_report(db, org.id, run_id=r25.id, intensity_denominator=2.0,
+                    intensity_denominator_unit="£M revenue",
+                    intensity_denominator_period_days=365,
+                    comparative_run_id=r24.id)["prior_year_comparative"]
+    assert c["status"] == "computed", c.get("blockers")
+    assert c["figures"]["scope2_location_based_tco2e"]["change"] == pytest.approx(0.0)
 
 
 def test_unknown_comparative_run_is_refused_not_ignored(db, two_years):

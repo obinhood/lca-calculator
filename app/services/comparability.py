@@ -279,6 +279,68 @@ def pedigree_comparable(run_a, run_b, *, label_a: str, label_b: str,
             f"report a change of method as a change in data quality")
 
 
+#: How a line's Scope 1/2/3 placement was arrived at, worst first. An absent key is a
+#: run frozen before the marker existed: its basis is genuinely unknown, and — the
+#: `pedigree_comparable` precedent — an absent marker is a VALUE here, not a pass.
+_SCOPE_BASIS_NAMES = {
+    "assumed_scope3": "an ASSUMED scope (the category matched no rule, so the whole "
+                      "inventory defaulted to Scope 3 and Scope 1 and 2 are zero by "
+                      "guess)",
+    "category_rule": "a scope derived from the category rules",
+    "explicit": "a scope declared by the preparer",
+    None: "no recorded scope basis (the run predates the marker)",
+}
+
+
+def scope_bases(db: Session, run) -> set:
+    """The distinct ways this run's location lines got their scope, as frozen.
+
+    Read from the FROZEN per-line detail, never from the live activity: a category
+    renamed after the run would otherwise change how a filed run's split is described.
+    """
+    from ..models import EmissionLineItem
+    from .frozen import parse_detail
+    rows = db.query(EmissionLineItem.details).filter(
+        EmissionLineItem.run_id == run.id, EmissionLineItem.method == "location").all()
+    return {parse_detail(d).get("scope_source") for (d,) in rows}
+
+
+def scope_basis_comparable(db: Session, run_a, run_b, *, label_a: str, label_b: str,
+                           quantity: str) -> Optional[str]:
+    """A reason two runs' SCOPE SPLITS cannot be subtracted, or None.
+
+    The same shape as the GWP-vintage and pedigree gates: a change in how a number was
+    arrived at, moving the number with nothing in the inventory moving.
+
+    An activity whose category matches no SCOPE_RULES key defaults to Scope 3 and
+    records `assumed_scope3`, so Scope 1 and Scope 2 are both 0.0 BY GUESS. Rename that
+    category to a recognised one next year — or wait for the platform to add it to the
+    rules — and the same physical source reappears as Scope 2. Measured: one renamed
+    category, identical emissions in both years (10,000 kg), and the comparative
+    published Scope 1+2 moving 0.0 -> 10.0 tCO2e, an entire scope appearing from
+    nothing.
+
+    The single-run gate (`calc.scope_declaration_completeness`, eight renderers) does
+    not catch this, and could not: it judges the run in front of it, and here the
+    REPORTING run's scope is perfectly sound. Only the pair is wrong.
+
+    Gated on the two bases DIFFERING, not on either being weak. Two runs that both
+    guessed are self-consistent, and a run that guessed is the single-run gate's
+    business to refuse — this one answers only "may these two be subtracted?".
+    """
+    a, b = scope_bases(db, run_a), scope_bases(db, run_b)
+    if a == b:
+        return None
+    _describe = lambda s: ", ".join(sorted(_SCOPE_BASIS_NAMES.get(v, repr(v))
+                                           for v in s)) or "no computed lines"
+    return (f"the {label_a} run's lines carry {_describe(a)} and the {label_b} run's "
+            f"carry {_describe(b)} — the two inventories placed their emissions into "
+            f"scopes on different bases, so {quantity} would report a change in how the "
+            f"split was DETERMINED as a change in what was emitted. An assumed scope "
+            f"puts the whole inventory in Scope 3, so a category recognised in one year "
+            f"and not the other moves Scope 1 and 2 wholesale.")
+
+
 def cross_run_gates(db: Session, run_a, run_b, *, label_a: str, label_b: str,
                     quantity: str, measures: str, prefix: str = "") -> list:
     """EVERY reason two runs cannot be subtracted, in one call.
@@ -314,6 +376,12 @@ def cross_run_gates(db: Session, run_a, run_b, *, label_a: str, label_b: str,
         # numbers without anything in the inventory moving.
         pedigree_comparable(run_a, run_b, label_a=label_a, label_b=label_b,
                             quantity=quantity),
+        # And again: a category recognised in one year and not the other moves Scope 1
+        # and 2 wholesale, because an unrecognised one defaults the whole inventory to
+        # Scope 3. The single-run scope gate cannot see this — it judges one run, and
+        # here the reporting run is sound; only the PAIR is wrong.
+        scope_basis_comparable(db, run_a, run_b, label_a=label_a, label_b=label_b,
+                               quantity=quantity),
         # The market-based total moves when uncovered load starts being priced at the
         # residual mix instead of the grid average. A "reduction" spanning that change is
         # a methodology artefact.
