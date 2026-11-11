@@ -24,14 +24,17 @@ dispatches on — rather than over a list maintained here. A framework added to 
 registry is covered by this file the moment it is added, and if it cannot be covered the
 coverage test below fails and says so by name.
 
-THE LIMIT OF THAT: coverage follows the registry, so a renderer served OUTSIDE it is
-outside this gate and `test_every_builder_is_covered_or_named` cannot name it either —
-it iterates BUILDERS, so a renderer absent from BUILDERS is absent from its view.
-`sbti_v2` is the live instance: served at `/reports/sbti_v2` (app/main.py), not in
-BUILDERS. It does gate itself — it calls `scope_declaration_completeness` twice — but by
-hand, which is the arrangement above and not something this file verifies. Putting it in
-BUILDERS would fix that and is a product change (the registry is also what `/export`
-enumerates), so it is named here rather than quietly assumed covered.
+THE LIMIT OF THAT, AND WHERE IT IS NOW CLOSED: coverage here follows the registry, so a
+renderer served OUTSIDE it is outside this file and `test_every_builder_is_covered_or_named`
+cannot name it either — it iterates BUILDERS, so a renderer absent from BUILDERS is absent
+from its view. That half is closed by `tests/test_route_renderers_are_gated.py`, which
+enumerates the GET routes under `/reports/` and the `app/reports/` modules that call
+`scope_declaration_completeness`, and requires every one to be reachable from a builder,
+gated there under THIS file's measurement, or named with a reason. `sbti_v2` was the live
+instance — served at `/reports/sbti_v2`, never in BUILDERS — and is gated there rather
+than added here: BUILDERS is also what `/export` enumerates, and `sbti_v2` publishes no
+whole-document readiness key, so `to_pdf` would stamp a filed PDF with the neutral
+INFORMATION REPORT banner and no blockers over a refused significance test.
 
 APPLICABILITY IS MEASURED, NOT NAMED. A renderer is in scope for this gate if some number
 it publishes MOVES when the scope split changes AND NOTHING ELSE DOES. Keeping a list of
