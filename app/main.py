@@ -44,6 +44,20 @@ app = FastAPI(title="Carbon Footprint MVP", version="0.3.0")
 # Browser SPA (frontend/) runs on a different origin in dev; restrict to
 # localhost by default, override with ALLOWED_ORIGINS for deployments.
 import os as _os
+
+# Structured application logging + request correlation. app/observability.py owns the
+# whole concern — configuration, the correlation id, the tenant id — and records the
+# matched ROUTE TEMPLATE, never the query string: a number of endpoints still take
+# narrative, person-identifying free text as query parameters, and that text must not
+# reach a log line. Configured here, before anything in this module can log.
+from .observability import (
+    REQUEST_ID_HEADER as _REQUEST_ID_HEADER,
+    bind_tenant as _bind_tenant,
+    configure_logging as _configure_logging,
+    install_observability as _install_observability,
+)
+_configure_logging()
+
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +66,10 @@ app.add_middleware(
         "http://localhost:5173,http://127.0.0.1:5173").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
+    # A browser cannot read a response header unless it is exposed. Without this the
+    # product's own SPA could not show a user the correlation id to quote in a support
+    # report — which is the whole point of returning it.
+    expose_headers=[_REQUEST_ID_HEADER],
 )
 
 # Per-key API rate limiting — OPT-IN via RATE_LIMIT_PER_MINUTE (absent => pass-through, so
@@ -73,6 +91,11 @@ async def _rate_limit_mw(request, call_next):
                 {"detail": f"rate limit exceeded — retry in {retry_after}s"},
                 status_code=429, headers={"Retry-After": str(retry_after)})
     return await call_next(request)
+
+# Request logging + correlation, registered LAST of the HTTP middlewares, which makes it
+# the OUTERMOST one: it stamps a correlation id onto — and emits one log line for — even
+# the 429s and 401s produced by the layers below.
+_install_observability(app)
 
 # Schema is managed by alembic (scripts/init_db.py runs `upgrade head` + seeds).
 # A create_all here would create unstamped tables and diverge from the migration
@@ -102,6 +125,8 @@ def current_org(x_api_key: str = Header(...), db: Session = Depends(get_db)) -> 
         Organisation.api_key_hash == _hash_key(x_api_key)).first()
     if org is None or org.api_key_revoked:
         raise HTTPException(status_code=401, detail="invalid or revoked API key")
+    # Attribute every log line for this request to the tenant it authenticated as.
+    _bind_tenant(org.id)
     return org
 
 
@@ -2004,11 +2029,15 @@ def _engagement_for_reader(db: Session, engagement_id: int,
     if eng is not None:
         if x_assurance_token and eng.access_token_hash and \
                 hmac.compare_digest(_hash_key(x_assurance_token), eng.access_token_hash):
+            # Not current_org's path, so bind the tenant here too — otherwise the log
+            # line for an external assuror's read says nothing about whose data it read.
+            _bind_tenant(eng.organisation_id)
             return eng, "assuror"
         if x_api_key:
             o = db.query(Organisation).filter(
                 Organisation.api_key_hash == _hash_key(x_api_key)).first()
             if o and eng.organisation_id == o.id:
+                _bind_tenant(o.id)
                 return eng, "owner"
     raise HTTPException(status_code=401, detail="valid X-API-Key (owner) or X-Assurance-Token required")
 
