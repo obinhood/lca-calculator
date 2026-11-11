@@ -606,3 +606,292 @@ def test_drift_is_surfaced_on_the_frozen_scope3_artifact(db):
     inv = scope3_by_ghgp_category(db, run)
     assert inv["boundary_policy_drift"]["direction"] == "none"
     assert inv["boundary_policy_drift"]["policy_current"] == "s3bnd-v2"
+
+
+# --- B6b: the not_material gate must COMPARE its two numbers --------------------
+# B6 was a PRESENCE test only. An estimate and a threshold had to exist and could then
+# contradict each other by any margin, so all fifteen categories could be excluded as
+# immaterial on estimates orders of magnitude ABOVE the stated threshold while the run
+# certified disclosure_ready at 100% inventory coverage with Scope 3 = 0.0.
+
+def _own_ops_only(db, name="MatCo"):
+    """Scope 1/2 activities only — no Scope 3 lines, so B8 stays silent."""
+    org = _org(db, name)
+    _act(db, org.id, _factor(db, "electricity", value=0.17).id, "electricity", 1200.0)
+    _act(db, org.id, _factor(db, "gas", value=0.184).id, "gas", 800.0)
+    p = make_period(db, org.id)
+    return org, p
+
+
+# Cats 2/11/12 carry a separate temporal-basis duty; satisfy it so B6b is the only
+# thing under test here.
+_CONFORMING_BASIS = {2: "acquisition_year_full", 11: "sold_quantity_consumed_in_use",
+                     12: "sold_cohort_expected_eol"}
+
+
+def _declare_all_not_material(db, org_id, period_id, estimate, threshold):
+    crit = {k: {"met": False, "note": "screened against this criterion"}
+            for k in ("size", "influence", "risk", "stakeholders", "outsourcing",
+                      "sector_guidance", "other")}
+    for c in range(1, 16):
+        db.add(Scope3CategoryDeclaration(
+            organisation_id=org_id, reporting_period_id=period_id, category=c,
+            status="not_material", temporal_basis=_CONFORMING_BASIS.get(c),
+            screening_estimate_tco2e=estimate, materiality_threshold_pct=threshold,
+            criteria=json.dumps(crit),
+            justification="Screened against all seven relevance criteria and judged "
+                          "immaterial for the reporting period.",
+            screened_at="2025-06-30", updated_at="2025-06-30"))
+    db.commit()
+
+
+def test_not_material_above_its_own_threshold_is_refused(db):
+    """The gate. Reverting B6b to the presence-only test must fail this."""
+    org, p = _own_ops_only(db)
+    compute_co2e(db, org.id, reporting_period_id=p.id)
+    # 50 kt per category against a stated 1% threshold: five orders of magnitude above
+    # the whole own-operations inventory (0.3512 tCO2e).
+    _declare_all_not_material(db, org.id, p.id, estimate=50_000.0, threshold=1.0)
+    run = compute_co2e(db, org.id, reporting_period_id=p.id)
+
+    inv = scope3_inventory_report(db, org.id, run_id=run.id)
+    assert inv["scope3"]["totals"]["scope3_assigned_kg"] == 0.0
+    assert inv["scope3"]["completeness"]["inventory_coverage_pct"] == 100.0
+    assert inv["disclosure_ready"] is False, "15 categories excluded above their own threshold"
+    _b = [b for b in inv["blockers"] if "EXCEEDS its own stated threshold" in b]
+    assert len(_b) == 15, f"expected all 15 refused; got {len(_b)}: {inv['blockers'][:2]}"
+    # The refusal shows its working: estimate, threshold, allowance, denominator.
+    assert "50000 tCO2e" in _b[0] and "1%" in _b[0]
+    # Denominator = own ops 0.3512 + 15 x 50 000 = 750 000.3512 tCO2e; 1% = 7500.0035
+    mat = inv["scope3"]["completeness"]["materiality"]
+    assert mat["denominator"] == "total_screened_inventory_tco2e"
+    assert mat["denominator_tco2e"] == pytest.approx(0.3512 + 15 * 50_000.0)
+    assert mat["unresolved"] == []
+
+
+def test_a_genuine_immateriality_screen_still_passes(db):
+    """Negative control on the comparison: a real screen must not be blocked."""
+    org, p = _own_ops_only(db, "SmallTail")
+    compute_co2e(db, org.id, reporting_period_id=p.id)
+    # 0.001 tCO2e against a 5% threshold of a ~0.35 tCO2e inventory: genuinely immaterial.
+    _declare_all_not_material(db, org.id, p.id, estimate=0.001, threshold=5.0)
+    run = compute_co2e(db, org.id, reporting_period_id=p.id)
+    inv = scope3_inventory_report(db, org.id, run_id=run.id)
+    assert inv["disclosure_ready"] is True, inv["blockers"]
+    assert not any("EXCEEDS" in b for b in inv["blockers"])
+
+
+def test_one_category_cannot_self_justify_by_inflating_the_denominator(db):
+    """Each estimate is a term in its own denominator — verify that is not a loophole.
+
+    Pass requires E <= (S+E)*T/100, i.e. E <= S*T/(100-T), which for T < 100 is a
+    tight bound: a single huge estimate raises the allowance by only T% of itself.
+    """
+    org, p = _own_ops_only(db, "SelfJustify")
+    compute_co2e(db, org.id, reporting_period_id=p.id)
+    crit = {k: {"met": False, "note": "screened"} for k in
+            ("size", "influence", "risk", "stakeholders", "outsourcing",
+             "sector_guidance", "other")}
+    for c in range(1, 16):
+        kw = (dict(status="not_material", screening_estimate_tco2e=1_000_000.0,
+                   materiality_threshold_pct=1.0, criteria=json.dumps(crit),
+                   justification="Screened across all seven criteria; judged immaterial.")
+              if c == 1 else
+              dict(status="not_applicable",
+                   justification="This value-chain activity does not occur in the "
+                                 "reporting entity's operations for the period."))
+        db.add(Scope3CategoryDeclaration(
+            organisation_id=org.id, reporting_period_id=p.id, category=c,
+            temporal_basis=_CONFORMING_BASIS.get(c), screened_at="2025-06-30",
+            updated_at="2025-06-30", **kw))
+    db.commit()
+    run = compute_co2e(db, org.id, reporting_period_id=p.id)
+    inv = scope3_inventory_report(db, org.id, run_id=run.id)
+    assert inv["disclosure_ready"] is False
+    assert any("EXCEEDS its own stated threshold" in b for b in inv["blockers"]), inv["blockers"]
+
+
+def test_unresolvable_denominator_is_cannot_determine_never_a_pass(db):
+    """A category whose size is unknown makes the total unknown — so refuse.
+
+    `not_measured` already blocks on its own (B4); what must NOT happen is the
+    immateriality screens quietly passing against a partial total beside it.
+    """
+    org, p = _own_ops_only(db, "Unresolvable")
+    compute_co2e(db, org.id, reporting_period_id=p.id)
+    _declare_all_not_material(db, org.id, p.id, estimate=0.001, threshold=5.0)
+    # One category's size becomes unknown: the denominator can no longer be resolved.
+    d = db.query(Scope3CategoryDeclaration).filter(
+        Scope3CategoryDeclaration.organisation_id == org.id,
+        Scope3CategoryDeclaration.category == 7).one()
+    d.status = "not_measured"
+    d.screening_estimate_tco2e = None
+    d.materiality_threshold_pct = None
+    db.commit()
+    run = compute_co2e(db, org.id, reporting_period_id=p.id)
+    inv = scope3_inventory_report(db, org.id, run_id=run.id)
+    assert inv["disclosure_ready"] is False
+    assert any("cannot be determined" in b for b in inv["blockers"]), inv["blockers"]
+    mat = inv["scope3"]["completeness"]["materiality"]
+    assert mat["denominator_tco2e"] is None, "an unknown total was reported as a number"
+    assert any("NOT_MEASURED" in u for u in mat["unresolved"])
+
+
+def test_a_100pct_threshold_tests_nothing_and_is_refused(db):
+    """The one value that silently disables the comparison rather than weakening it."""
+    org, p = _own_ops_only(db, "HundredPct")
+    compute_co2e(db, org.id, reporting_period_id=p.id)
+    _declare_all_not_material(db, org.id, p.id, estimate=50_000.0, threshold=100.0)
+    run = compute_co2e(db, org.id, reporting_period_id=p.id)
+    inv = scope3_inventory_report(db, org.id, run_id=run.id)
+    assert inv["disclosure_ready"] is False
+    assert any("tests nothing" in b for b in inv["blockers"]), inv["blockers"]
+
+
+def test_declaration_endpoint_rejects_an_untestable_threshold(client):
+    """The API boundary, which also never looked at the two numbers."""
+    c, hdr, _ = client
+    pid = c.post("/reporting_periods", params={"label": "FY25", "start_date": "2025-01-01",
+                                               "end_date": "2025-12-31"},
+                 headers=hdr).json()["id"]
+    crit = json.dumps({k: {"met": False, "note": "screened"} for k in
+                       ("size", "influence", "risk", "stakeholders", "outsourcing",
+                        "sector_guidance", "other")})
+    base = {"reporting_period_id": pid, "category": 4, "status": "not_material",
+            "criteria_json": crit}
+    body = {"justification": "Screened against all seven relevance criteria and judged "
+                             "immaterial for the reporting period."}
+    # A 100% threshold admits the whole inventory: refused without needing a denominator.
+    r = c.post("/scope3/declarations", params={**base, "screening_estimate_tco2e": 10.0,
+                                               "materiality_threshold_pct": 100.0},
+               json=body, headers=hdr)
+    assert r.status_code == 400 and "tests nothing" in r.json()["detail"]
+    # A finite, binding threshold is accepted, and the response states what it is a
+    # percentage OF — the definition the field shipped without.
+    r = c.post("/scope3/declarations", params={**base, "screening_estimate_tco2e": 0.5,
+                                               "materiality_threshold_pct": 5.0},
+               json=body, headers=hdr)
+    assert r.status_code == 200, r.text
+    assert "TOTAL SCREENED INVENTORY" in r.json()["materiality_denominator"]
+
+
+# --- POST /activities/scope: the write path the model documented but never had ----
+# `ActivityRecord.scope` is documented as "EXPLICIT PREPARER DECLARATION ONLY" and the
+# engine reads it first, but no route, no ingestion column and no frontend field could
+# write it — so the declaration branch was unreachable for every preparer.
+
+def test_activities_scope_endpoint_declares_validates_and_clears(client):
+    c, hdr, Session = client
+    org = Session().query(Organisation).filter(Organisation.name == "A").one()
+    with Session() as s:
+        f = EmissionFactor(source="T", version="1", geography="GB", year=2024,
+                           category="purchased_steam_site_a", subcategory="", unit="kWh",
+                           gwp_set="AR6", value=0.2)
+        s.add(f); s.commit(); s.refresh(f)
+        for _ in range(3):
+            s.add(ActivityRecord(organisation_id=org.id, date="2025-03-01",
+                                 category="purchased_steam_site_a", subcategory="",
+                                 description="", quantity=100.0, unit="kWh", geo="GB",
+                                 factor_id=f.id))
+        s.commit()
+
+    # A scope outside the GHG Protocol's three is refused, never coerced.
+    for bad in ("4", "0", "scope 1", "one", ""):
+        r = c.post("/activities/scope", params={"scope": bad, "category": "purchased_steam_site_a"},
+                   headers=hdr)
+        assert r.status_code == 400, f"scope={bad!r} was accepted"
+
+    # Declaring across the whole organisation is refused: it would assert a scope for
+    # activities nobody screened.
+    assert c.post("/activities/scope", params={"scope": "2"},
+                  headers=hdr).status_code == 400
+
+    r = c.post("/activities/scope",
+               params={"scope": "2", "category": "purchased_steam_site_a"}, headers=hdr)
+    assert r.status_code == 200, r.text
+    assert r.json()["scope"] == "2" and r.json()["activities_updated"] == 3
+    with Session() as s:
+        assert {a.scope for a in s.query(ActivityRecord).all()} == {"2"}
+
+    # A mis-declaration is correctable: `unset` returns the rows to per-run derivation
+    # rather than freezing a wrong scope onto them forever.
+    r = c.post("/activities/scope",
+               params={"scope": "unset", "category": "purchased_steam_site_a"}, headers=hdr)
+    assert r.status_code == 200 and r.json()["scope"] is None
+    with Session() as s:
+        assert {a.scope for a in s.query(ActivityRecord).all()} == {None}
+
+
+def test_activities_scope_endpoint_is_org_scoped(client):
+    """Another tenant's activities must be untouched and uncounted."""
+    c, hdr, Session = client
+    key_b = c.post("/organisations", params={"name": "B"}).json()["api_key"]
+    with Session() as s:
+        a_org = s.query(Organisation).filter(Organisation.name == "A").one()
+        b_org = s.query(Organisation).filter(Organisation.name == "B").one()
+        f = EmissionFactor(source="T", version="1", geography="GB", year=2024,
+                           category="mystery_carrier", subcategory="", unit="kWh",
+                           gwp_set="AR6", value=0.2)
+        s.add(f); s.commit(); s.refresh(f)
+        ids = {}
+        for o in (a_org, b_org):
+            a = ActivityRecord(organisation_id=o.id, date="2025-03-01",
+                               category="mystery_carrier", subcategory="", description="",
+                               quantity=100.0, unit="kWh", geo="GB", factor_id=f.id)
+            s.add(a); s.commit(); s.refresh(a)
+            ids[o.name] = a.id
+
+    r = c.post("/activities/scope", params={"scope": "1", "category": "mystery_carrier"},
+               headers=hdr)
+    assert r.json()["activities_updated"] == 1
+    assert r.json()["activity_ids"] == [ids["A"]]
+    with Session() as s:
+        assert s.get(ActivityRecord, ids["B"]).scope is None
+
+    # And B's own call cannot reach A's row even by explicit id.
+    r = c.post("/activities/scope",
+               params={"scope": "3", "activity_ids": f"{ids['A']},{ids['B']}"},
+               headers={"X-API-Key": key_b})
+    assert r.json()["activity_ids"] == [ids["B"]]
+    with Session() as s:
+        assert s.get(ActivityRecord, ids["A"]).scope == "1"
+
+
+def test_a_declared_scope_is_read_as_explicit_not_assumed(client):
+    """The engine's first branch, previously unreachable: scope_source == 'explicit'."""
+    c, hdr, Session = client
+    with Session() as s:
+        org = s.query(Organisation).filter(Organisation.name == "A").one()
+        f = EmissionFactor(source="T", version="1", geography="GB", year=2024,
+                           category="r410a_topup", subcategory="", unit="kg",
+                           gwp_set="AR6", value=2088.0)
+        s.add(f); s.commit(); s.refresh(f)
+        s.add(ActivityRecord(organisation_id=org.id, date="2025-03-01",
+                             category="r410a_topup", subcategory="", description="",
+                             quantity=12.0, unit="kg", geo="GB", factor_id=f.id))
+        s.commit()
+        oid = org.id
+
+    with Session() as s:
+        p = make_period(s, oid)
+        run = compute_co2e(s, oid, reporting_period_id=p.id)
+        # Unrecognised category, no declaration -> assumed.
+        assert summary(s, oid, run_id=run.id)["scope_assumptions"][
+            "assumed_scope3_by_category"] == {"r410a_topup": 1}
+
+    assert c.post("/activities/scope",
+                  params={"scope": "1", "category": "r410a_topup"},
+                  headers=hdr).status_code == 200
+
+    with Session() as s:
+        p = s.query(ReportingPeriod).filter(ReportingPeriod.organisation_id == oid).one()
+        run2 = compute_co2e(s, oid, reporting_period_id=p.id)
+        from app.models import EmissionLineItem
+        srcs = {json.loads(li.details)["scope_source"] for li in
+                s.query(EmissionLineItem).filter(
+                    EmissionLineItem.run_id == run2.id,
+                    EmissionLineItem.method == "location").all()}
+        assert srcs == {"explicit"}
+        s2 = summary(s, oid, run_id=run2.id)
+        assert s2["scope_assumptions"] is None
+        assert next(r["co2e"] for r in s2["by_scope"] if r["scope"] == "1") == pytest.approx(25056.0)

@@ -304,6 +304,9 @@ def scope3_by_ghgp_category(db: Session, run) -> dict:
             "by_status": gate.get("by_status"),
             "categories_accounted_for": gate.get("categories_accounted_for"),
             "inventory_coverage_pct": gate.get("inventory_coverage_pct"),
+            # What the immateriality threshold was a percentage OF, and its terms.
+            # Published so an assurer can re-perform the screen the gate performed.
+            "materiality": gate.get("materiality"),
             "blockers": gate.get("blockers", []),
             "warnings": gate.get("warnings", []),
             # Which relevance prior was applied is part of the completeness statement:

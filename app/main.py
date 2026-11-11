@@ -1839,6 +1839,80 @@ def attribute_activities_to_entity(entity_id: int = Query(...),
     return {"updated": len(rows), "entity_id": e.id, "note": "Recompute the run to apply."}
 
 
+@app.post("/activities/scope")
+def declare_activity_scope(scope: str = Query(...),
+                           activity_ids: Optional[str] = None,
+                           category: Optional[str] = None,
+                           source_file: Optional[str] = None,
+                           org: Organisation = Depends(current_org),
+                           db: Session = Depends(get_db)):
+    """Declare the GHG Protocol SCOPE a set of activities belongs to.
+
+    `ActivityRecord.scope` has always been documented as an EXPLICIT PREPARER
+    DECLARATION, and the calculation engine reads it first — but nothing could ever
+    write it. There was no route, no ingestion column and no frontend field, so the
+    declaration branch was unreachable and every category outside the ~28-key
+    SCOPE_RULES table was classified `assumed_scope3`. A preparer whose categories
+    all missed that table got Scope 1 = 0.0 and Scope 2 = 0.0, and the UK SECR
+    renderer published both — plus the intensity ratio built on them — as
+    disclosure-ready. This is the write path that was missing.
+
+    PREPARER-DECLARED and never written by the engine, for the same reason
+    `ghgp_category` and `series_key` are not: a derived value written here would be
+    indistinguishable from a declaration on the next run (it is re-read as
+    scope_source="explicit"), would drop the assumed-scope caveat from a run whose
+    data had not changed, and would put the row permanently beyond the reach of a
+    later SCOPE_RULES correction.
+
+    `scope` is "1", "2", "3", or "unset" — the last clears the declaration and
+    returns the rows to per-run derivation from their category, so a mis-declaration
+    is correctable rather than frozen onto the row forever.
+
+    Select by explicit ids, or in bulk by category and/or source_file — the same
+    selectors /activities/series_key and /activities/crosswalk_chain use.
+    """
+    _valid = ("1", "2", "3")
+    _s = (scope or "").strip().lower()
+    if _s == "unset":
+        _value = None
+    elif _s in _valid:
+        _value = _s
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"scope must be one of {list(_valid)} (GHG Protocol scope), or "
+                   f"'unset' to clear the declaration and derive the scope per run "
+                   f"from the activity category")
+    if not (activity_ids or category or source_file):
+        raise HTTPException(
+            status_code=400,
+            detail="supply activity_ids, category or source_file — declaring one scope "
+                   "across an entire organisation would assert a scope for activities "
+                   "nobody screened")
+    q = db.query(ActivityRecord).filter(ActivityRecord.organisation_id == org.id)
+    if activity_ids:
+        try:
+            ids = [int(x) for x in activity_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail="activity_ids must be comma-separated integers")
+        q = q.filter(ActivityRecord.id.in_(ids))
+    if category:
+        q = q.filter(ActivityRecord.category == category)
+    if source_file:
+        q = q.filter(ActivityRecord.source_file == source_file)
+    rows = q.all()
+    for a in rows:
+        a.scope = _value
+    db.commit()
+    return {"scope": _value, "activities_updated": len(rows),
+            "activity_ids": [a.id for a in rows],
+            "note": "Recompute the run to apply: the derived scope is frozen onto the "
+                    "line items, never written back onto the activity, so the "
+                    "declaration takes effect at the NEXT calculation and an existing "
+                    "run is reported STALE rather than silently changed."}
+
+
 # --- GHG Protocol Scope 3: the 15-category screen ----------------------------
 
 @app.post("/scope3/declarations")
@@ -1865,13 +1939,23 @@ def upsert_scope3_declaration(
 
     The evidence a status requires is enforced HERE, at the boundary — an
     unjustified exclusion is rejected rather than surfacing later as a blocker.
+
+    `materiality_threshold_pct` is a percentage of the TOTAL SCREENED INVENTORY for
+    the reporting period: Scope 1 + Scope 2 (location-based, measured from the run)
+    plus, for each of the 15 Scope 3 categories, its computed figure when `included`,
+    its declared `screening_estimate_tco2e` when `not_material`, and 0.0 when
+    `not_applicable`. A `not_measured` or `undeclared` category leaves the denominator
+    unresolvable, and the screen is then REFUSED rather than passed. The comparison
+    itself (estimate vs threshold x denominator) is made at the disclosure gate, which
+    is the first point where the whole screen and a run are both visible; see
+    `app/services/ghgp.py` (MATERIALITY_DENOMINATOR) for the full rationale.
     """
     import json as _json
     from .models import Scope3CategoryDeclaration
     from .services.ghgp import (
         STORABLE_STATUSES, SEVEN_CRITERIA, is_boilerplate, GHGP_STANDARD_VERSION,
         temporal_bases_for, TEMPORAL_BASES,
-        MIN_JUSTIFICATION_CHARS,
+        MIN_JUSTIFICATION_CHARS, MATERIALITY_DENOMINATOR_NOTE,
     )
     from .services.calc import _utcnow_iso
     _reject_narrative_query_params(request, "justification", "method_description",
@@ -1901,6 +1985,31 @@ def upsert_scope3_declaration(
             raise HTTPException(status_code=400,
                                 detail="NOT MATERIAL requires screening_estimate_tco2e and "
                                        "materiality_threshold_pct — it must be screened, not asserted")
+        # The two numbers must be COMPARABLE. The DB constraints are only `>= 0` and
+        # `0..100`, which inf satisfies, and an unusable number here would surface as a
+        # refusal at disclosure time rather than at the boundary that accepted it.
+        if not math.isfinite(screening_estimate_tco2e) or \
+                not math.isfinite(materiality_threshold_pct):
+            raise HTTPException(
+                status_code=400,
+                detail="screening_estimate_tco2e and materiality_threshold_pct must be "
+                       "finite numbers — a threshold that cannot be compared is not a screen")
+        # A 100% threshold admits the entire inventory as immaterial, so the comparison
+        # can never refuse anything. Rejected here because it needs no denominator to
+        # judge: it is the one value that disables the test outright.
+        if materiality_threshold_pct >= 100.0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"materiality_threshold_pct of {materiality_threshold_pct:g}% admits "
+                       f"the entire inventory as immaterial and so tests nothing — state "
+                       f"the threshold actually applied. {MATERIALITY_DENOMINATOR_NOTE}")
+        # The BINDING comparison (estimate vs threshold x denominator) is at the
+        # disclosure gate, not here, and deliberately: the denominator spans all
+        # fifteen categories and a run, so it does not exist while the preparer is
+        # part-way through declaring the screen. Rejecting category 1 because
+        # categories 2..15 are not declared yet would make a correct screen
+        # un-enterable. What the boundary can do is state what the number means, so a
+        # preparer screens against the right total instead of guessing at it.
         try:
             crit = _json.loads(criteria_json or "{}")
         except ValueError:
@@ -1984,6 +2093,11 @@ def upsert_scope3_declaration(
     d.updated_at = now
     db.commit(); db.refresh(d)
     return {"id": d.id, "category": d.category, "status": d.status,
+            # Stated back on every immateriality screen, at the moment the preparer
+            # commits to the number. The field shipped with no defined denominator at
+            # all, so a 1.0 could mean 1% of three different totals.
+            "materiality_denominator": (MATERIALITY_DENOMINATOR_NOTE
+                                        if d.status == "not_material" else None),
             "note": "Recompute the run so this screen is frozen onto it."}
 
 

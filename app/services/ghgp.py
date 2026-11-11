@@ -111,6 +111,142 @@ ALL_STATUSES = STORABLE_STATUSES + ("undeclared",)
 # Statuses that can appear in a disclosure-ready inventory.
 PASSING_STATUSES = ("included", "not_applicable", "not_material")
 
+# --- What `materiality_threshold_pct` is a percentage OF -----------------------
+#
+# The field shipped with NO DEFINED DENOMINATOR anywhere — no schema field, no
+# docstring, nothing saying whether 1.0 meant 1% of the total inventory, of Scope 3,
+# or of Scope 1 + 2. The engine therefore could not re-perform the preparer's screen
+# even in principle, and the B6 gate below only checked that the two numbers were
+# PRESENT; it never compared them. All fifteen categories could be excluded as
+# immaterial on estimates orders of magnitude ABOVE the stated threshold and the run
+# still certified disclosure_ready at 100% inventory coverage with Scope 3 = 0.0.
+#
+# THE DENOMINATOR IS THE TOTAL SCREENED INVENTORY FOR THE REPORTING PERIOD, in tCO2e:
+#
+#     Scope 1 (measured)  +  Scope 2 location-based (measured)
+#   + for each of the 15 Scope 3 categories:
+#         included       -> the category's own COMPUTED tCO2e from this run
+#         not_material   -> its DECLARED screening_estimate_tco2e
+#         not_applicable -> 0.0  (the preparer declares the activity does not occur)
+#         not_measured   -> UNKNOWN  -> the denominator cannot be determined
+#         undeclared     -> UNKNOWN  -> the denominator cannot be determined
+#
+# Why this one, and not the two alternatives:
+#
+#   * "percent of Scope 3" is CIRCULAR and unstable. The denominator would depend on
+#     which categories you chose to include, so excluding a category shrinks the
+#     denominator and makes the remaining exclusions look larger against it — and a
+#     screen that excluded everything would divide by zero, i.e. nothing could ever
+#     be immaterial. A threshold whose value moves when you exercise it is not a test.
+#   * "percent of Scope 1 + 2" is stable but is not what materiality to an inventory
+#     means. For most reporting entities Scope 3 dwarfs own operations, so a 1%
+#     threshold on Scope 1 + 2 would be an arbitrarily stricter test than the same
+#     number means anywhere else, and a company with no own-operations emissions
+#     could exclude an unbounded Scope 3.
+#   * The total screened inventory is NON-CIRCULAR (each category contributes a
+#     declared estimate or a computed figure, never its inclusion decision), STABLE
+#     (moving a category from not_material to included swaps its estimate for its
+#     computed figure — the same quantity measured two ways), and RE-PERFORMABLE from
+#     frozen state alone, which is what makes the comparison auditable at all.
+#
+# A run that cannot resolve the denominator is `cannot_determine`, never a pass:
+# `not_measured` and `undeclared` categories already block (B4/B3), and this gate
+# refuses alongside them rather than quietly screening against a partial total.
+MATERIALITY_DENOMINATOR = "total_screened_inventory_tco2e"
+MATERIALITY_BASIS_VERSION = "mat-v1"
+MATERIALITY_DENOMINATOR_NOTE = (
+    "materiality_threshold_pct is a percentage of the TOTAL SCREENED INVENTORY for the "
+    "reporting period: Scope 1 + Scope 2 (location-based, measured) plus, for each of "
+    "the 15 Scope 3 categories, its computed figure when included, its declared "
+    "screening_estimate_tco2e when not_material, and 0.0 when not_applicable. A "
+    "not_measured or undeclared category makes the denominator unresolvable, and the "
+    "screen is then refused rather than passed."
+)
+
+
+def materiality_denominator(db, run, decls: dict, lines_by_cat: dict) -> dict:
+    """The tCO2e that `materiality_threshold_pct` is a percentage of, from FROZEN state.
+
+    Returns ``{"tco2e": float|None, "terms": {...}, "unresolved": [...]}``;
+    ``tco2e`` is None exactly when the denominator cannot be determined, which is a
+    refusal (``cannot_determine``), never a zero and never a pass.
+    """
+    from ..models import EmissionLineItem, RunFinancedLine
+
+    # Scope 1 / Scope 2 from the run's OWN frozen line scopes — not the live activity,
+    # whose category (and so whose derived scope) a preparer can edit after filing.
+    own_kg = {"1": 0.0, "2": 0.0}
+    for scope, co2e in db.query(EmissionLineItem.scope, EmissionLineItem.co2e).filter(
+            EmissionLineItem.run_id == run.id,
+            EmissionLineItem.method == "location").all():
+        if scope in own_kg:
+            own_kg[scope] += co2e or 0.0
+
+    terms = {"scope1_tco2e": own_kg["1"] / 1000.0,
+             "scope2_location_tco2e": own_kg["2"] / 1000.0}
+    total = terms["scope1_tco2e"] + terms["scope2_location_tco2e"]
+    per_cat, unresolved = {}, []
+
+    _n_financed = db.query(RunFinancedLine).filter(
+        RunFinancedLine.run_id == run.id).count()
+
+    for c in CATEGORIES:
+        d = decls.get(c)
+        status = d.status if d is not None else "undeclared"
+        if status == "included":
+            v = sum(co2e for _, co2e in lines_by_cat.get(c, [])) / 1000.0
+            # Cat 15 carries PCAF financed lines rather than EmissionLineItem rows, so
+            # its contribution is the run's frozen financed figure. None with positions
+            # present is already a blocker (B14a); here it is simply unresolvable.
+            if c == 15 and _n_financed:
+                if run.financed_co2e is None:
+                    unresolved.append(f"category 15 is INCLUDED with {_n_financed} "
+                                      f"financed line(s) but the run froze no financed "
+                                      f"figure")
+                    continue
+                v += run.financed_co2e / 1000.0
+        elif status == "not_material":
+            if d.screening_estimate_tco2e is None:
+                # Already a B6 blocker in its own right; unresolvable here too.
+                unresolved.append(f"category {c} is NOT MATERIAL with no "
+                                  f"screening_estimate_tco2e")
+                continue
+            v = d.screening_estimate_tco2e
+        elif status == "not_applicable":
+            # The preparer declares the activity does not occur. A declared absence is
+            # a real zero — the one place in this file where zero is the right answer.
+            v = 0.0
+        else:
+            # not_measured / undeclared: a known gap is NEVER a zero (rule 4).
+            unresolved.append(f"category {c} is {status.upper()} — its contribution to "
+                              f"the inventory is unknown")
+            continue
+        if not math.isfinite(v):
+            unresolved.append(f"category {c} contributes a non-finite figure ({v!r})")
+            continue
+        # STRING key, as everywhere else a category-keyed dict is published here
+        # (scope3.py's `categories`, this file's drift counters). An int key would make
+        # the Python dict and the JSON payload disagree after one round trip, which for
+        # a figure a filed run must re-render identically is a defect, not a detail.
+        per_cat[str(c)] = v
+        total += v
+
+    terms["scope3_by_category_tco2e"] = per_cat
+    if unresolved or not math.isfinite(total) or total <= 0.0:
+        if not unresolved:
+            # A zero or non-finite total is not a denominator. Dividing a threshold into
+            # it would make every positive estimate "immaterial" (0 > 0 is False), which
+            # is the fail-open this gate exists to close.
+            unresolved.append(f"the total screened inventory is {total!r} tCO2e, which "
+                              f"cannot carry a percentage threshold")
+        return {"tco2e": None, "terms": terms, "unresolved": unresolved,
+                "denominator": MATERIALITY_DENOMINATOR,
+                "basis_version": MATERIALITY_BASIS_VERSION}
+    return {"tco2e": total, "terms": terms, "unresolved": [],
+            "denominator": MATERIALITY_DENOMINATOR,
+            "basis_version": MATERIALITY_BASIS_VERSION}
+
+
 # "We have not measured it" is a disclosure of incompleteness, not a justification
 # for excluding a category.
 BOILERPLATE_JUSTIFICATIONS = {
@@ -698,6 +834,12 @@ def scope3_completeness(db: Session, run) -> dict:
             "dimension. GHGP Scope 3 Ch.6 sector guidance was therefore NOT tested "
             "against any category; set a sector (GET /sectors) and recalculate to apply it")
 
+    # The denominator the B6 comparison below divides into. Computed ONCE for the run:
+    # it is the same total for all fifteen categories, and it is what makes the
+    # threshold a test rather than a decoration. See MATERIALITY_DENOMINATOR above.
+    _mat_den = materiality_denominator(db, run, decls, lines_by_cat)
+    _mat_untestable: list = []
+
     for c in CATEGORIES:
         d = decls.get(c)
         if d is None:
@@ -721,6 +863,48 @@ def scope3_completeness(db: Session, run) -> dict:
                 blockers.append(f"category {c} declared NOT MATERIAL without {missing} — an "
                                 f"immaterial exclusion must be screened against all seven "
                                 f"relevance criteria with an estimate and a threshold")
+            # B6b — COMPARE THE TWO NUMBERS. Presence was the whole of this gate: an
+            # estimate and a threshold had to exist, and could then contradict each
+            # other by any margin. A category estimated ABOVE its own stated threshold
+            # is material BY THE PREPARER'S OWN TEST, and excluding it is not a screen
+            # — it is the screen's answer being ignored.
+            elif not math.isfinite(d.screening_estimate_tco2e) or \
+                    not math.isfinite(d.materiality_threshold_pct):
+                blockers.append(
+                    f"category {c} declared NOT MATERIAL with a non-finite estimate "
+                    f"({d.screening_estimate_tco2e!r}) or threshold "
+                    f"({d.materiality_threshold_pct!r}) — neither can be compared")
+            elif _mat_den["tco2e"] is None:
+                # cannot_determine, not a pass. Screening against a total that cannot
+                # be resolved is the fail-open this gate closes. Collected and reported
+                # ONCE after the loop: the reason is the run's, not the category's, and
+                # fifteen copies of it would bury the fifteen it applies to.
+                _mat_untestable.append(c)
+            elif d.materiality_threshold_pct >= 100.0:
+                # A 100% threshold is not a threshold: the allowance becomes the WHOLE
+                # screened inventory, and no single category can exceed a total it is
+                # itself a term in — so the comparison can never refuse anything. This
+                # is the one value that silently disables the test rather than merely
+                # weakening it, which is why it is the one value rejected outright.
+                # (The DB constraint permits 0..100; a weak-but-binding 90% is left to
+                # the reader, who can see the number in the disclosure.)
+                blockers.append(
+                    f"category {c} declared NOT MATERIAL against a "
+                    f"{d.materiality_threshold_pct:g}% threshold — a threshold of 100% "
+                    f"or more admits the entire inventory as immaterial and so tests "
+                    f"nothing; state the threshold actually applied")
+            else:
+                _allow = _mat_den["tco2e"] * d.materiality_threshold_pct / 100.0
+                if d.screening_estimate_tco2e > _allow:
+                    blockers.append(
+                        f"category {c} ({category_name(c)}) is excluded as NOT MATERIAL on a "
+                        f"screening estimate of {d.screening_estimate_tco2e:g} tCO2e, which "
+                        f"EXCEEDS its own stated threshold of {d.materiality_threshold_pct:g}% "
+                        f"= {_allow:g} tCO2e of the {_mat_den['tco2e']:g} tCO2e "
+                        f"{MATERIALITY_DENOMINATOR} — by the preparer's own test the category "
+                        f"is MATERIAL and cannot be excluded; quantify it (status `included`), "
+                        f"or disclose the gap as `not_measured`, or state the threshold "
+                        f"actually applied")
         # B21 — sector guidance is the Scope 3 Standard's SIXTH relevance criterion, and
         # the one a company cannot answer from its own books. Excluding a category that
         # dominates in this entity's sector is the most common way an inventory
@@ -929,6 +1113,16 @@ def scope3_completeness(db: Session, run) -> dict:
             f"{_drift['undeterminable_lines']} line(s) — they were frozen before the "
             f"boundary token was recorded, and it is never back-filled from live data")
 
+    # B6c — the denominator itself could not be resolved, so NONE of the immateriality
+    # screens above could be tested. One blocker for the run, naming every category it
+    # leaves uncertified and why the total is unresolvable.
+    if _mat_untestable:
+        blockers.append(
+            f"categories {_mat_untestable} are excluded as NOT MATERIAL but the "
+            f"materiality denominator ({MATERIALITY_DENOMINATOR}) cannot be determined "
+            f"for this run, so no stated threshold can be tested: "
+            f"{_mat_den['unresolved']}. {MATERIALITY_DENOMINATOR_NOTE}")
+
     # B9 — anti-gaming: a category cannot be "not applicable" when the run's own
     # content proves the activity occurs.
     has_fuel_or_power = db.query(EmissionLineItem).filter(
@@ -1017,4 +1211,15 @@ def scope3_completeness(db: Session, run) -> dict:
         "sector_label": sectors.label(sector),
         "sector_dominant_categories": sectors.dominant_categories(sector),
         "sector_prior_applied": sectors.is_valid(sector) and sector != "other",
+        # The denominator the immateriality threshold was tested against, published
+        # BESIDE the verdict. A threshold a reader cannot reconcile is a decoration;
+        # `tco2e: None` says the screen could not be tested and names why.
+        "materiality": {
+            "denominator": _mat_den["denominator"],
+            "basis_version": _mat_den["basis_version"],
+            "denominator_tco2e": _mat_den["tco2e"],
+            "terms": _mat_den["terms"],
+            "unresolved": _mat_den["unresolved"],
+            "note": MATERIALITY_DENOMINATOR_NOTE,
+        },
     }

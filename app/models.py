@@ -1080,6 +1080,13 @@ class Scope3CategoryDeclaration(Base):
     category = Column(Integer, nullable=False)          # 1..15
     status = Column(String, nullable=False)             # the 4 storable states
     justification = Column(Text, nullable=True)         # required to exclude
+    # Required when status == not_material: the screened size of the category, in tCO2e.
+    # Compared against materiality_threshold_pct of the TOTAL SCREENED INVENTORY (Scope 1
+    # + Scope 2 measured, plus each category's computed figure when included / declared
+    # estimate when not_material / 0.0 when not_applicable). See MATERIALITY_DENOMINATOR
+    # in app/services/ghgp.py: the field shipped with NO defined denominator, so nothing
+    # said whether 1.0 meant 1% of the total inventory, of Scope 3, or of Scope 1 + 2 —
+    # and the gate never compared the two numbers at all.
     screening_estimate_tco2e = Column(Float, nullable=True)   # required: not_material
     screening_method = Column(Text, nullable=True)
     materiality_threshold_pct = Column(Float, nullable=True)  # required: not_material
