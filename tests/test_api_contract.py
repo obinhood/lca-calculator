@@ -951,3 +951,47 @@ def test_a_check_added_after_conclusion_is_not_run_drift(env):
 def _json_dumps(o):
     import json
     return json.dumps(o)
+
+
+def test_summary_shows_the_preparer_what_the_renderer_will_refuse(env):
+    """summary is where a preparer looks FIRST and it refuses nothing. Carrying only
+    the raw statement meant they would read a market figure resting on over-declared
+    instruments, see nothing said about it, and meet the refusal later at the renderer.
+    It carries the gate's own sentences now, in _residual_mix_block's shape."""
+    from app.reports.summary import summary
+    _client, db = env
+    org = _org(db)
+    f = _factor(db)
+    _act(db, org.id, factor_id=f.id, quantity=1000.0, status="approved")
+    _rec(db, org.id, coverage=1000.0)
+    _rec(db, org.id, coverage=1000.0)
+    run = compute_co2e(db, org.id)
+
+    block = summary(db, organisation_id=org.id, run_id=run.id)["scope2"]["declared_volume"]
+    assert block["assessable"] is True and block["legacy"] is False
+    assert block["statement"]["over_declared"] is True
+    assert block["blockers"], "the preparer must see the sentence that will refuse them"
+    assert "OVER-DECLARED" in block["blockers"][0]
+    # Same shape as the residual-mix block beside it — one question, two halves.
+    assert set(block) == {"assessable", "legacy", "statement", "blockers", "warnings"}
+
+
+def test_summary_distinguishes_unevaluated_from_nothing_to_report(env):
+    """A bare null said neither. legacy=true with a warning says the first; an
+    assessable statement with no blockers says the second."""
+    from app.reports.summary import summary
+    _client, db = env
+    org = _org(db)
+    f = _factor(db)
+    _act(db, org.id, factor_id=f.id, quantity=1000.0, status="approved")
+    run = compute_co2e(db, org.id)
+
+    clean = summary(db, organisation_id=org.id, run_id=run.id)["scope2"]["declared_volume"]
+    assert clean["assessable"] is True and clean["blockers"] == []
+
+    run.scope2_coverage_statement = None          # frozen before the comparison existed
+    db.commit()
+    legacy = summary(db, organisation_id=org.id, run_id=run.id)["scope2"]["declared_volume"]
+    assert legacy["legacy"] is True and legacy["statement"] is None
+    assert legacy["blockers"] == [], "history is not retroactively invalidated"
+    assert legacy["warnings"], "but the absence is stated rather than left as a null"

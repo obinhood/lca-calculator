@@ -42,6 +42,29 @@ def _residual_mix_block(db: Session, run) -> dict:
     }
 
 
+def _declared_volume_block(db: Session, run) -> dict:
+    """The run's frozen declared-volume verdict, read only from frozen state.
+
+    Deliberately the SAME SHAPE as _residual_mix_block, because the two answer the two
+    halves of one question about the market-based figure: that one says how uncovered
+    load was priced, this one says whether the covered load was ever consumed.
+
+    Carrying the gate's own `blockers` and `warnings`, not just the statement, is the
+    point. summary is where a preparer looks first and it does not refuse anything, so
+    without them they would read a market figure resting on over-declared instruments,
+    see nothing, and only meet the refusal at the renderer. It also makes the LEGACY
+    case legible: a run frozen before the comparison existed has no statement at all,
+    and a bare null there is indistinguishable from "this org holds no instruments".
+    """
+    from ..services.instruments import over_declaration_gate
+    g = over_declaration_gate(db, run)
+    return {
+        "assessable": g["assessable"], "legacy": g.get("legacy", False),
+        "statement": g.get("statement"),
+        "blockers": g.get("blockers", []), "warnings": g.get("warnings", []),
+    }
+
+
 def _cat15_double_declared(db, run) -> bool:
     """True when Cat 15 is declared through BOTH activity lines and a PCAF portfolio.
 
@@ -328,12 +351,12 @@ def summary(db: Session, organisation_id: Optional[int] = None, run_id: Optional
             # publish 0% renewable, with nothing anywhere saying why. Surfaced here so
             # every renderer reading scope2 inherits it.
             "instruments_excluded_by_gwp_vintage": sorted(skipped_vintage),
-            # Declared contractual volume against the load it was offered, frozen at run
-            # time. None for a run computed before the statement existed — which is
-            # "not evaluated", not "nothing to report", and the two must stay apart.
-            "coverage_statement": (
-                parse_detail(run.scope2_coverage_statement)
-                if getattr(run, "scope2_coverage_statement", None) else None),
+            # Declared contractual volume against the load it was offered, frozen at
+            # run time, in the same shape as `residual_mix` above — statement plus the
+            # gate's own blockers and warnings. "Not evaluated" and "nothing to report"
+            # stay apart: the former is legacy=true with a warning, the latter is an
+            # assessable statement with no blockers.
+            "declared_volume": _declared_volume_block(db, run),
         },
         "method_split": {
             "co2e_by_method": method_split,
