@@ -570,13 +570,13 @@ def retention_apply(db: Session, organisation_id: int, retention_days: int,
 #
 # TENANT_DIRECT: has its own organisation_id column.
 TENANT_DIRECT = (
-    "activities", "activity_findings", "assurance_engagements", "carbon_credits",
-    "cbam_goods", "calculation_runs", "deliverability_links", "emissions_targets",
-    "financed_positions", "granular_certificates", "hourly_loads", "lca_assessments",
-    "mapping_audit_events", "market_instruments", "nature_sites", "nature_targets",
-    "pact_clients", "pact_tokens", "product_footprints", "removal_records",
-    "reporting_entities", "reporting_periods", "scope3_category_declarations",
-    "taxonomy_activities",
+    "activities", "activity_findings", "api_tokens", "assurance_engagements",
+    "carbon_credits", "cbam_goods", "calculation_runs", "deliverability_links",
+    "emissions_targets", "financed_positions", "granular_certificates", "hourly_loads",
+    "lca_assessments", "mapping_audit_events", "market_instruments", "nature_sites",
+    "nature_targets", "pact_clients", "pact_tokens", "product_footprints",
+    "removal_records", "reporting_entities", "reporting_periods",
+    "scope3_category_declarations", "taxonomy_activities", "users",
 )
 
 # TENANT_VIA: no organisation_id of its own; reached through a parent that has one.
@@ -874,6 +874,12 @@ EXPORT_TABLES = (
     # reproduced. The TENANT_VIA join scopes this to their own factors; the platform
     # catalogue's gas rows are reference data and stay out, exactly as its factors do.
     "factor_gas_masses",
+    # The tenant's own people. A churning customer must be able to see who had access and
+    # with what role, and a data subject asking under Art. 15 is answered from here as
+    # well as from `activities` — `users.email` and `users.name` are the only columns in
+    # the schema that identify a person BY DESIGN rather than incidentally through free
+    # text. No credential travels with them: tokens live in `api_tokens`, excluded below.
+    "users",
 )
 
 # pact_tokens is deliberately NOT exported: the rows are bearer credentials, and an
@@ -881,6 +887,12 @@ EXPORT_TABLES = (
 # payload rather than left for the reader to notice.
 EXPORT_EXCLUDED = {
     "pact_tokens": "bearer tokens are credentials, not inventory data",
+    # Same reason, and the same doctrine as `pact_tokens`. The hash alone could not be
+    # replayed, but an export naming every live credential, its scope and its expiry is a
+    # map of the tenant's attack surface, and `NEVER_SERIALISE` would strip the hash
+    # while leaving that map intact. The row is excluded whole instead.
+    "api_tokens": ("API tokens are credentials, not inventory data; see the users "
+                   "export for who had access"),
     "emission_factors": ("factors this tenant contributed are included under "
                          "own_emission_factors; the platform's global catalogue is "
                          "reference data, not tenant data"),
