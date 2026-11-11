@@ -70,6 +70,46 @@ def period_info(db: Session, run) -> Optional[dict]:
             "end_date": p.end_date, "days": period_days(p)}
 
 
+def period_scope_gate(db: Session, run, *, framework: str, requirement: str) -> list:
+    """Reasons a SINGLE run cannot carry a period-bound disclosure, or [].
+
+    The cross-run gates above all presuppose two runs. This is the prior question, and
+    nothing was asking it: an ANNUAL disclosure rendered from an unscoped run reports
+    whatever history the organisation happens to have uploaded, and the figure is
+    correct for that span while being presented as the year's.
+
+    Measured on a two-year upload: the second year's headline came out at exactly 2.0x
+    the true year-two figure, with `reporting_period_id` null and nothing in the payload
+    saying so. Both halves of that are defects — the number, and the silence.
+
+    The engine only half-knew. `compute_co2e` scopes activities correctly when given a
+    period, `Scope3CategoryDeclaration.reporting_period_id` is NOT NULL so an unscoped
+    run freezes all fifteen categories as 'undeclared', and `period_comparable` treats an
+    unscoped run as a cannot-determine. So an unscoped run already failed — but via the
+    Scope 3 completeness gate, in a sentence about categories. A preparer reading
+    "15 categories undeclared" does not learn that their headline total spans two years.
+    The reason has to name the period.
+
+    Deliberately NOT a refusal to compute: an unscoped run stays a legitimate
+    whole-history view, and every run filed before periods reached the UI is unscoped, so
+    forbidding it would retroactively void history (the anti-cliff doctrine every NULL
+    sentinel on CalculationRun follows). It is refused at DISCLOSURE, where the claim
+    "this is the reporting period's figure" is actually made.
+    """
+    p = run_period(db, run)
+    if p is None:
+        return [f"{framework} is a period-bound disclosure and this run is NOT scoped to "
+                f"a reporting period — its figures cover the whole of the uploaded "
+                f"activity history, so {requirement} would state a multi-year total as "
+                f"the period's. Create a reporting period and recompute the run against "
+                f"it."]
+    if period_days(p) is None:
+        return [f"{framework} is a period-bound disclosure and reporting period "
+                f"{p.label!r} has non-ISO dates ({p.start_date!r}..{p.end_date!r}), so "
+                f"the span {requirement} covers cannot be determined"]
+    return []
+
+
 def period_comparable(db: Session, run_a, run_b, *, label_a: str, label_b: str,
                       quantity: str, measures: str,
                       tolerance_pct: float = PERIOD_TOLERANCE_PCT) -> Optional[str]:

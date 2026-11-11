@@ -7,6 +7,12 @@ export type Param = {
   label: string;
   def: string;                  // default value
   options?: string[];           // present -> render a <select>
+  // "run" -> render a <select> of this org's runs, labelled by reporting period. A run
+  // id is not something a preparer can be expected to type, and the comparative param
+  // is unusable as a free-text box: picking the WRONG prior run is the defect the
+  // comparability gates exist to catch, so the control should make the right one easy
+  // to find and show which period each run covers.
+  kind?: "run";
   help?: string;                // shown under the field
   width?: number;
 };
@@ -65,13 +71,31 @@ export const FRAMEWORKS: Framework[] = [
     path: "/reports/secr", params: [
       { name: "intensity_denominator", label: "Intensity denominator", def: "1.0", width: 110,
         help: "e.g. revenue in £m, or floor area" },
-      { name: "intensity_denominator_unit", label: "Unit", def: "£M revenue", width: 140 } ] },
+      { name: "intensity_denominator_unit", label: "Unit", def: "£M revenue", width: 140 },
+      // The span the denominator covers. The gate that checks it against the run's own
+      // period has existed since the intensity-ratio fix, but this client never sent
+      // the field, so every UI-rendered SECR report was refused for a missing input the
+      // form gave no way to supply.
+      { name: "intensity_denominator_period_days", label: "Denominator period (days)",
+        def: "365", width: 110,
+        help: "days the denominator covers — annual revenue over a quarter's emissions "
+              + "is a ratio 4x too low" },
+      { name: "comparative_run_id", label: "Prior-year run", def: "", kind: "run",
+        help: "the run holding the PREVIOUS period's figures; SECR requires them "
+              + "beside the current year's" } ] },
   { key: "esrs_e1", label: "CSRD ESRS E1", full: "EU Corporate Sustainability Reporting Directive — Climate",
     category: "Corporate reporting", needs: "run",
     blurb: "EU climate disclosure: gross Scopes 1/2/3, energy mix and intensity per revenue.",
     path: "/reports/esrs_e1", params: [
       { name: "net_revenue_millions", label: "Net revenue (millions)", def: "10", width: 110 },
-      { name: "revenue_currency", label: "Currency", def: "EUR", width: 90 } ] },
+      { name: "revenue_currency", label: "Currency", def: "EUR", width: 90 },
+      // Same omission as SECR's: E1-6's intensity gate asks for the revenue period and
+      // the form never offered it, so the report was blocked on an unsuppliable input.
+      { name: "revenue_period_days", label: "Revenue period (days)", def: "365",
+        width: 110,
+        help: "days the revenue figure covers — must match the run's reporting period" },
+      { name: "comparative_run_id", label: "Prior-year run", def: "", kind: "run",
+        help: "the run holding the PREVIOUS period's figures (ESRS 1 ¶78 comparatives)" } ] },
   { key: "issb_s2", label: "ISSB IFRS S2", full: "IFRS S2 Climate-related Disclosures",
     category: "Corporate reporting", needs: "run",
     blurb: "The global baseline standard, with UK / Japan / Singapore / Hong Kong profiles.",

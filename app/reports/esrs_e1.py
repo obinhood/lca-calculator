@@ -26,7 +26,8 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..models import CalculationRun, EmissionLineItem
-from ..services.comparability import denominator_period_comparable
+from ..services.comparability import denominator_period_comparable, period_scope_gate
+from .comparative import prior_period_comparative
 from .summary import summary, run_factor_sources
 from .scope3 import disclosed_totals_incl_financed
 from .secr import _energy_kwh
@@ -147,12 +148,45 @@ def _renewable_contractual_mwh(db: Session, run: CalculationRun) -> dict:
             "lines_without_share": lines_without_share}
 
 
+def _e1_comparative_figures(db: Session, run: CalculationRun) -> dict:
+    """The E1-6 figures that carry a comparative, for ONE run.
+
+    Applied by `prior_period_comparative` to both runs, so each figure is only ever
+    compared with itself — and via the same `summary()` /
+    `disclosed_totals_incl_financed` path the disclosure's own figures come from.
+
+    `disclosed["scope3"]` and the disclosed totals are None when the Cat-15
+    double-count refusal fired. That None is carried through, never substituted: a
+    change computed against a zero would publish a figure the report declines to state
+    as a movement.
+    """
+    s = summary(db, organisation_id=run.organisation_id, run_id=run.id)
+    by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}
+    disclosed = disclosed_totals_incl_financed(s, run)
+    return {
+        "scope1_tco2e": round(by_scope.get("1", 0.0) / 1000.0, 6),
+        "scope2_location_based_tco2e": round(s["scope2"]["location_based"] / 1000.0, 6),
+        "scope2_market_based_tco2e": round(s["scope2"]["market_based"] / 1000.0, 6),
+        "scope3_tco2e": disclosed["scope3"],
+        "total_location_based_tco2e": disclosed["total_location_based"],
+        "total_market_based_tco2e": disclosed["total_market_based"],
+        "biogenic_co2_separate_tco2e": round((run.total_biogenic_co2e or 0.0) / 1000.0, 6),
+    }
+
+
 def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
                    net_revenue_millions: Optional[float] = None,
                    revenue_period_days: Optional[int] = None,
                    revenue_currency: str = "EUR",
-                   credits_as_of: Optional[str] = None) -> dict:
-    """ESRS E1 quantitative disclosure payload for one run."""
+                   credits_as_of: Optional[str] = None,
+                   comparative_run_id: Optional[int] = None) -> dict:
+    """ESRS E1 quantitative disclosure payload for one run.
+
+    ``comparative_run_id`` names the run holding the PRIOR period's figures. ESRS 1 ¶78
+    requires comparatives for every quantitative E1-6 datapoint, so the block is always
+    present and distinguishes a legitimate first-year filing from an omitted comparative
+    from a pair the shared gates refused.
+    """
     s = summary(db, organisation_id=organisation_id, run_id=run_id)
     run_info = s.get("run")
     if run_info is None:
@@ -206,6 +240,25 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
     # GHG Protocol Land Sector & Removals: an unresolved/unpermanent removal blocks.
     blockers.extend(removals_completeness(db, run).get("blockers", []))
+    # ESRS E1 reports a FINANCIAL YEAR. An unscoped run spans the whole uploaded
+    # history: on a two-year upload the headline came out at exactly 2.0x the true
+    # year-two figure. The Scope 3 gate already refused such a run, but in a sentence
+    # about undeclared categories — which does not tell a preparer their total covers
+    # two years.
+    blockers.extend(period_scope_gate(
+        db, run, framework="CSRD ESRS E1",
+        requirement="the E1-6 gross emissions and the intensity per net revenue"))
+
+    # ESRS 1 ¶78 comparatives, through the ONE shared comparative builder — which asks
+    # services.comparability.cross_run_gates the single question and surfaces every answer.
+    _comp = prior_period_comparative(
+        db, organisation_id, run, comparative_run_id,
+        extract=_e1_comparative_figures,
+        clause="ESRS E1-6 comparative",
+        quantity="the year-on-year change",
+        measures="a real change in emissions")
+    comparative = _comp["comparative"]
+    blockers.extend(_comp["blockers"])
 
     # E1-5: ESRS reports energy in MWh, bounded to own operations (Scope 1/2
     # line items) — unlike SECR's deliberately scope-agnostic UK energy figure.
@@ -311,6 +364,11 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
         "scope_assumptions": s.get("scope_assumptions"),
         "run": run_info,
         "reporting_period_id": run.reporting_period_id,
+        # ESRS 1 ¶78: every quantitative E1-6 datapoint carries the prior period's
+        # figure. ALWAYS present: `status` is "computed" or "cannot_determine", and
+        # `reason_code` keeps a first-year filing, an omitted comparative and a refused
+        # pair as three distinguishable facts rather than one blank.
+        "e1_6_comparative": comparative,
         "e1_6_gross_ghg_emissions_tco2e": {
             "scope1": round(scope1_kg / 1000.0, 6),
             "scope2_location_based": round(scope2_loc_kg / 1000.0, 6),
