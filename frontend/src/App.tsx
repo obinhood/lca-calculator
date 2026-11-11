@@ -127,9 +127,9 @@ export default function App() {
   useEffect(() => {
     if (!settings.apiKey) return;
     api.runs(settings)
-      .then((rs: any[]) => {
-        setHasRun(rs.length > 0);
-        if (rs.length > 0) setHasData(true);
+      .then((r) => {
+        setHasRun(r.runs.length > 0);
+        if (r.runs.length > 0) setHasData(true);
       })
       .catch((e) => {
         if (isAuthError(e)) {
@@ -137,7 +137,12 @@ export default function App() {
         }
       });
     api.reviewQueue(settings)
-      .then((q: any[]) => { setReviewCount(q.length); if (q.length) setHasData(true); })
+      // total_matched, not the page length: the badge counts the whole queue, so it no
+      // longer under-reports once the queue is larger than one page.
+      .then((q) => {
+        setReviewCount(q.page.total_matched);
+        if (q.page.total_matched) setHasData(true);
+      })
       .catch(() => {});
   }, [settings.apiKey, settings.baseUrl, version]);
 

@@ -24,6 +24,7 @@ from ..models import ActivityRecord, CalculationRun, EmissionLineItem
 from ..services.units import convert, UnitConversionError
 from ..services.boundary import boundary_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
+from ..services.instruments import over_declaration_gate
 from ..services.comparability import denominator_period_comparable
 from .summary import summary, run_factor_sources
 from ..services.frozen import parse_detail
@@ -183,6 +184,10 @@ def secr_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
     # (UK energy use at operated sites), which is labelled via energy["basis"].
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
     blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
+    # Declared contractual VOLUME, beside the residual-mix treatment: one gate
+    # answers how uncovered load was priced, the other whether the covered load
+    # was ever consumed. A market-based figure needs both to be publishable.
+    blockers.extend(over_declaration_gate(db, run).get("blockers", []))
 
     energy = _energy_kwh(db, run)
 

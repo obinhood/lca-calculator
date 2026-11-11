@@ -1,20 +1,29 @@
 import { useEffect, useState } from "react";
-import { api, Settings } from "../api";
+import { api, Page, Settings } from "../api";
 
 // The review gate's human half: approve the resolver's suggestion or override
 // with an explicitly chosen factor. Unreviewed rows stay OUT of totals.
 export default function Review({ settings, version, onChanged }:
     { settings: Settings; version: number; onChanged: () => void }) {
   const [queue, setQueue] = useState<any[]>([]);
+  const [page, setPage] = useState<Page | null>(null);
   const [factors, setFactors] = useState<any[]>([]);
+  const [factorQuery, setFactorQuery] = useState("");
   const [overrideSel, setOverrideSel] = useState<Record<number, number>>({});
   const [error, setError] = useState<string | null>(null);
 
+  // Both of these are ENVELOPES now — { activities, page } and { factors, page }. The
+  // rows have to be taken out of them; handing the envelope itself to a state hook
+  // typed as an array is what blanked this screen, and the api types now make that a
+  // compile error rather than a TypeError in the browser.
   const refresh = () => {
-    api.reviewQueue(settings).then(setQueue).catch((e) => setError(e.message));
-    api.factors(settings).then(setFactors).catch(() => {});
+    api.reviewQueue(settings)
+      .then((d) => { setQueue(d.activities); setPage(d.page); })
+      .catch((e) => setError(e.message));
+    api.factors(settings, { q: factorQuery })
+      .then((d) => setFactors(d.factors)).catch(() => {});
   };
-  useEffect(refresh, [settings.apiKey, settings.baseUrl, version]);
+  useEffect(refresh, [settings.apiKey, settings.baseUrl, version, factorQuery]);
 
   const act = async (fn: () => Promise<any>) => {
     setError(null);
@@ -25,6 +34,13 @@ export default function Review({ settings, version, onChanged }:
     <div className="panel">
       <h2>Mapping review queue</h2>
       {error && <p className="bad">{error}</p>}
+      {page && page.has_more && (
+        <p className="muted">
+          Showing {page.returned} of {page.total_matched} activities awaiting review.
+          Clearing this page does not empty the queue — the next {page.total_matched - page.returned} are
+          at offset {page.next_offset}.
+        </p>
+      )}
       {queue.length === 0 ? (
         <p className="ok">Queue is empty — every mapped activity was an exact match or human-reviewed.</p>
       ) : (
@@ -64,6 +80,9 @@ export default function Review({ settings, version, onChanged }:
                               onClick={() => act(() => api.approve(settings, q.activity_id))}>
                         Approve
                       </button>
+                      <input className="factor-search" value={factorQuery}
+                             placeholder="search factors…"
+                             onChange={(e) => setFactorQuery(e.target.value)} />
                       <select value={overrideSel[q.activity_id] || ""}
                               onChange={(e) => setOverrideSel({ ...overrideSel, [q.activity_id]: Number(e.target.value) })}>
                         <option value="">override with…</option>

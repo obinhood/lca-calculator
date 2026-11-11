@@ -284,10 +284,12 @@ def test_endpoint_happy_path_and_guidance(client):
     base, proj = _two_scenarios(db, org)
     base_id, proj_id = base.id, proj.id
     db.close()
-    resp = c.get("/reports/iso_14064_2", headers=hdr, params={
-        "baseline_run_id": base_id, "project_run_id": proj_id,
-        "leakage_tco2e": 0.01, "baseline_justification": JUSTIFY,
-        "project_name": "Retrofit"})
+    # The narrative moved into the body, so this report is fetched with POST; the
+    # payload is identical to the GET form's for the same inputs.
+    resp = c.post("/reports/iso_14064_2", headers=hdr,
+                  params={"baseline_run_id": base_id, "project_run_id": proj_id,
+                          "leakage_tco2e": 0.01},
+                  json={"baseline_justification": JUSTIFY, "project_name": "Retrofit"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["disclosure_ready"] is True, body["blockers"]

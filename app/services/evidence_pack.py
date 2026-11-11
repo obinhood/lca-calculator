@@ -38,7 +38,10 @@ from ..models import (
 # Bumped when the pack's CONTENT or hashing changes in a way that would alter the
 # content_hash of an unchanged run. Frozen into every pack so an old hash stays
 # attributable to the assembler that produced it.
-PACK_VERSION = "evp-v5"
+# evp-v6: section 10 gained the Scope 2 over-declaration check, which alters the
+# content_hash of an unchanged run. Old packs keep evp-v5 and stay verifiable against
+# the assembler that produced them.
+PACK_VERSION = "evp-v6"
 
 # Transaction detail is the largest section by far and an inventory can carry tens
 # of thousands of lines. It is capped, and a truncated pack SAYS SO in its own

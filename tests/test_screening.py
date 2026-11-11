@@ -715,8 +715,9 @@ def test_dispose_endpoint_rejects_a_bare_note(env):
     client, hdr = env
     client.post("/activities/screen", headers=hdr)
     fid = client.get("/activities/findings", headers=hdr).json()["findings"][0]["id"]
-    r = client.post(f"/activities/findings/{fid}/dispose", headers=hdr, params={
-        "status": "accepted", "reason_code": "accepted_immaterial", "note": "fine"})
+    r = client.post(f"/activities/findings/{fid}/dispose", headers=hdr,
+                     params={"status": "accepted", "reason_code": "accepted_immaterial"},
+                     json={"note": "fine"})
     assert r.status_code == 400
     assert "SAPA 11" in r.json()["detail"]
 
@@ -725,9 +726,10 @@ def test_dispose_endpoint_accepts_a_substantive_note(env):
     client, hdr = env
     client.post("/activities/screen", headers=hdr)
     fid = client.get("/activities/findings", headers=hdr).json()["findings"][0]["id"]
-    r = client.post(f"/activities/findings/{fid}/dispose", headers=hdr, params={
-        "status": "accepted", "reason_code": "accepted_immaterial",
-        "note": "Traced to the source invoice; a credit note, correctly negative."})
+    r = client.post(f"/activities/findings/{fid}/dispose", headers=hdr,
+                     params={"status": "accepted", "reason_code": "accepted_immaterial"},
+                     json={"note": "Traced to the source invoice; a credit note, "
+                                   "correctly negative."})
     assert r.status_code == 200 and r.json()["disposed"] is True
 
 

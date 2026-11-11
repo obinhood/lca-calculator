@@ -20,9 +20,20 @@ export function saveSettings(s: Settings) {
   localStorage.setItem("apiKey", s.apiKey);
 }
 
-async function request(s: Settings, method: string, path: string,
+/** The window every paginated collection carries. `next_offset` is null on the last
+ *  page, so a client looping on it terminates. */
+export type Page = {
+  limit: number; offset: number; returned: number;
+  total_matched: number; has_more: boolean; next_offset: number | null;
+};
+export type ReviewPage = { activities: any[]; page: Page };
+export type RunsPage = { runs: any[]; page: Page };
+export type FactorsPage = { factors: any[]; page: Page };
+export type LineagePage = { run: any; exclusions: any[]; page: Page; line_items: any[] };
+
+async function request<T = any>(s: Settings, method: string, path: string,
                        opts: { params?: Record<string, string | number | undefined>,
-                               body?: FormData } = {}) {
+                               body?: FormData } = {}): Promise<T> {
   const url = new URL(s.baseUrl + path);
   for (const [k, v] of Object.entries(opts.params || {})) {
     if (v !== undefined && v !== "") url.searchParams.set(k, String(v));
@@ -44,7 +55,7 @@ async function request(s: Settings, method: string, path: string,
       : detail ? JSON.stringify(detail) : `${res.status}: ${text.slice(0, 200)}`;
     throw new ApiError(msg, res.status);
   }
-  return json;
+  return json as T;
 }
 
 export class ApiError extends Error {
@@ -67,22 +78,32 @@ export const api = {
   // Prove a key works before admitting it. Accepting a key optimistically and only
   // discovering it is dead on the next screen turns "wrong key" into "the app is broken":
   // /runs is org-scoped and cheap, so a 200 means the key resolves to a live tenant.
-  verifyKey: (s: Settings) => request(s, "GET", "/runs"),
+  verifyKey: (s: Settings) => request(s, "GET", "/runs", { params: { limit: 1 } }),
   upload: (s: Settings, file: File) => {
     const fd = new FormData();
     fd.append("file", file);
     return request(s, "POST", "/activities/upload_csv", { body: fd });
   },
-  reviewQueue: (s: Settings) => request(s, "GET", "/mappings/review"),
+  // Paginated: returns { activities, page }. The `page` block is the point — the queue
+  // used to truncate at 500 rows with nothing saying so, so clearing a page looked
+  // exactly like clearing the queue.
+  reviewQueue: (s: Settings, limit = 100, offset = 0): Promise<ReviewPage> =>
+    request<ReviewPage>(s, "GET", "/mappings/review", { params: { limit, offset } }),
   approve: (s: Settings, activityId: number) =>
     request(s, "POST", `/mappings/${activityId}/approve`),
   override: (s: Settings, activityId: number, factorId: number) =>
     request(s, "POST", `/mappings/${activityId}/override`, { params: { factor_id: factorId } }),
-  factors: (s: Settings, category?: string) =>
-    request(s, "GET", "/factors", { params: { category } }),
+  // Returns { factors, page }. `q` searches category/subcategory/source/geography; the
+  // dropdown used to receive the first 200 catalogue rows with no filter and no way to
+  // reach the rest, so most of the catalogue could not be chosen at all.
+  factors: (s: Settings,
+            opts: { category?: string; q?: string; limit?: number } = {}): Promise<FactorsPage> =>
+    request<FactorsPage>(s, "GET", "/factors",
+            { params: { category: opts.category, q: opts.q, limit: opts.limit ?? 1000 } }),
   run: (s: Settings, gwpSet: string) =>
     request(s, "POST", "/calculate/run", { params: { gwp_set: gwpSet } }),
-  runs: (s: Settings) => request(s, "GET", "/runs"),
+  runs: (s: Settings, limit = 100): Promise<RunsPage> =>
+    request<RunsPage>(s, "GET", "/runs", { params: { limit } }),
   seedDemo: (s: Settings) => request(s, "POST", "/demo/seed"),
   sectors: (s: Settings) => request(s, "GET", "/sectors"),
   setProfile: (s: Settings, params: Record<string, string | number | undefined>) =>
@@ -91,8 +112,12 @@ export const api = {
   applicabilityVocab: (s: Settings) => request(s, "GET", "/applicability/vocabulary"),
   summary: (s: Settings, runId?: number) =>
     request(s, "GET", "/results/summary", { params: { run_id: runId } }),
-  lineage: (s: Settings, runId: number) =>
-    request(s, "GET", `/runs/${runId}/lineage`),
+  // Returns { run, exclusions, page, line_items }. Paginated: this response was
+  // unbounded and reached 65.5 MB on a large run.
+  lineage: (s: Settings, runId: number, limit = 200,
+            offset = 0): Promise<LineagePage> =>
+    request<LineagePage>(s, "GET", `/runs/${runId}/lineage`,
+                         { params: { limit, offset } }),
   // Generic disclosure-report fetch: the report registry in Reports.tsx supplies the
   // endpoint path and its query params, so a new framework is one registry entry, not a
   // new client method. Every report endpoint is GET and org-scoped by the API key.

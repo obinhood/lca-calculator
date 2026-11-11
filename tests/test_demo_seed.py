@@ -69,8 +69,8 @@ def test_seed_is_idempotent(client):
 
 def test_seed_requires_api_key(client):
     c, _, _ = client
-    # org-scoped: rejected without a valid key (422 = header missing, 401 = key invalid)
-    assert c.post("/demo/seed").status_code in (401, 422)
+    # org-scoped: 401 whether the header is missing or the key is wrong
+    assert c.post("/demo/seed").status_code == 401
     assert c.post("/demo/seed", headers={"X-API-Key": "bogus"}).status_code == 401
 
 

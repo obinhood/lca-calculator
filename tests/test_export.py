@@ -124,7 +124,7 @@ def test_bad_format_400s(client):
 
 def test_export_requires_api_key(client):
     c, _ = client
-    assert c.get("/export/secr", params={"format": "csv"}).status_code in (401, 422)
+    assert c.get("/export/secr", params={"format": "csv"}).status_code == 401
     assert c.get("/export/secr", headers={"X-API-Key": "bogus"},
                  params={"format": "csv"}).status_code == 401
 

@@ -25,6 +25,7 @@ from .scope3 import disclosed_totals_incl_financed
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
+from ..services.instruments import over_declaration_gate
 
 _ASSURANCE_LEVELS = ("none", "limited", "reasonable")
 
@@ -49,6 +50,10 @@ def sb253_report(db: Session, organisation_id: int, run_id: Optional[int] = None
     blockers = []
     cov = s["coverage"]
     blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
+    # Declared contractual VOLUME, beside the residual-mix treatment: one gate
+    # answers how uncovered load was priced, the other whether the covered load
+    # was ever consumed. A market-based figure needs both to be publishable.
+    blockers.extend(over_declaration_gate(db, run).get("blockers", []))
     # § 38532 requires Scope 3 per the GHG Protocol, which means all 15 categories
     # screened and each quantified or excluded with a justification — and the GHGP Ch.3
     # organisational boundary that decides whose emissions these are. Both gate every

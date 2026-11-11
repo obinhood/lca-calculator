@@ -747,5 +747,5 @@ def test_grid_intensity_needs_the_admin_credential(env):
     r = client.post("/reference/hourly_grid_intensity", headers=tenant_only, params={
         "grid_region": "GB", "hour_start": "2027-01-01T00:00:00",
         "kg_co2e_per_kwh_average": 0.9, "source": "Beta guess"})
-    assert r.status_code in (401, 422), \
+    assert r.status_code == 401, \
         "a tenant key overwrote the grid intensity every tenant's Scope 2 depends on"

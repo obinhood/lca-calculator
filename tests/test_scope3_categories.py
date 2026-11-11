@@ -278,15 +278,17 @@ def test_declaration_endpoint_enforces_evidence(client):
                                                "end_date": "2025-12-31"}, headers=hdr).json()["id"]
     base = {"reporting_period_id": pid, "category": 1}
     # excluding without a real justification is rejected at the boundary
-    assert c.post("/scope3/declarations", params={**base, "status": "not_applicable",
-                  "justification": "n/a"}, headers=hdr).status_code == 400
+    assert c.post("/scope3/declarations", params={**base, "status": "not_applicable"},
+                  json={"justification": "n/a"}, headers=hdr).status_code == 400
     # not_material without screening evidence is rejected
-    assert c.post("/scope3/declarations", params={**base, "status": "not_material",
-                  "justification": "Screened and found to be small relative to total."},
+    assert c.post("/scope3/declarations", params={**base, "status": "not_material"},
+                  json={"justification": "Screened and found to be small relative to "
+                                         "total."},
                   headers=hdr).status_code == 400
     # a proper exclusion is accepted
-    ok = c.post("/scope3/declarations", params={**base, "status": "not_applicable",
-                "justification": "The entity purchases no capital goods in the period."},
+    ok = c.post("/scope3/declarations", params={**base, "status": "not_applicable"},
+                json={"justification": "The entity purchases no capital goods in the "
+                                       "period."},
                 headers=hdr)
     assert ok.status_code == 200
 
@@ -492,35 +494,34 @@ def test_temporal_basis_is_validated_at_the_api_boundary(client):
     pid = c.post("/reporting_periods", params={"label": "FY25", "start_date": "2025-01-01",
                                                "end_date": "2025-12-31"}, headers=hdr).json()["id"]
     just = "The entity does not sell products with a use phase in this period."
-    cat11 = {"reporting_period_id": pid, "category": 11,
-             "status": "not_applicable", "justification": just}
-    cat2 = {"reporting_period_id": pid, "category": 2,
-            "status": "not_applicable", "justification": just}
+    cat11 = {"reporting_period_id": pid, "category": 11, "status": "not_applicable"}
+    cat2 = {"reporting_period_id": pid, "category": 2, "status": "not_applicable"}
+    just_body = {"justification": just}
 
     # A Cat 11 lifetime token is not offerable on Cat 2 — a conforming Cat 2 figure has
     # no lifetime at all.
     r = c.post("/scope3/declarations",
-               params={**cat2, "temporal_basis": "sold_units_full_lifetime"}, headers=hdr)
+               params={**cat2, "temporal_basis": "sold_units_full_lifetime"}, json=just_body, headers=hdr)
     assert r.status_code == 400 and "category 2" in r.json()["detail"]
     # An unknown token is rejected rather than stored as free text.
     assert c.post("/scope3/declarations",
                   params={**cat11, "temporal_basis": "whatever"},
-                  headers=hdr).status_code == 400
+                  json=just_body, headers=hdr).status_code == 400
     # The entailed numbers are only meaningful with the token that claims them.
     r = c.post("/scope3/declarations",
                params={**cat11, "temporal_basis": "sold_quantity_consumed_in_use",
-                       "basis_units_sold": 100.0}, headers=hdr)
+                       "basis_units_sold": 100.0}, json=just_body, headers=hdr)
     assert r.status_code == 400 and "sold_units_full_lifetime" in r.json()["detail"]
     # Non-positive entailed numbers are rejected.
     assert c.post("/scope3/declarations",
                   params={**cat11, "temporal_basis": "sold_units_full_lifetime",
-                          "basis_units_sold": 0.0}, headers=hdr).status_code == 400
+                          "basis_units_sold": 0.0}, json=just_body, headers=hdr).status_code == 400
     # A well-formed assertion is accepted.
     assert c.post("/scope3/declarations",
                   params={**cat11, "temporal_basis": "sold_units_full_lifetime",
                           "basis_units_sold": 100.0, "basis_lifetime_years": 12.0,
                           "basis_per_unit_annual_co2e_kg": 1.0},
-                  headers=hdr).status_code == 200
+                  json=just_body, headers=hdr).status_code == 200
 
 
 # --- Table 5.4 policy drift (W3) -----------------------------------------------------

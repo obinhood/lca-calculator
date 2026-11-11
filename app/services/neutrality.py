@@ -26,7 +26,14 @@ def neutrality_assessment(db: Session, organisation_id: int, run: CalculationRun
     residual_blockers = []
     if basis == "market":
         from .residual_mix import scope2_residual_mix_completeness
+        from .instruments import over_declaration_gate
         residual_blockers = scope2_residual_mix_completeness(db, run).get("blockers", [])
+        # Over-declaration cuts the same way as the omission above: declaring more
+        # certificate volume than was consumed lowers the market figure, and a lower
+        # market figure makes a neutrality claim EASIER to reach. A claim resting on a
+        # figure no framework would publish cannot be made here either.
+        residual_blockers = residual_blockers + over_declaration_gate(
+            db, run).get("blockers", [])
 
     applied = db.query(CarbonCredit).filter(
         CarbonCredit.organisation_id == organisation_id,
