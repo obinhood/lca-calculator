@@ -27,7 +27,7 @@ def upgrade() -> None:
         sa.Column("client_id", sa.String(), nullable=False),
         sa.Column("client_secret_hash", sa.String(), nullable=False),
         sa.Column("partner_name", sa.String(), nullable=True),
-        sa.Column("revoked", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+        sa.Column("revoked", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("created_at", sa.String(), nullable=True),
         sa.UniqueConstraint("client_id", name="uq_pact_client_id"),
     )

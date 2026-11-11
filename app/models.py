@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Boolean, Text, UniqueConstraint, CheckConstraint, Index
+from typing import Optional
+
+from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Boolean, Text, UniqueConstraint, CheckConstraint, Index, or_
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -135,6 +137,12 @@ class EmissionFactor(Base):
         CheckConstraint("value >= 0", name="ck_factor_value_nonneg"),
     )
     id = Column(Integer, primary_key=True)
+    # Tenancy. NULL = platform reference data, readable by every tenant; set = this
+    # tenant's own row (a PACT supplier footprint, a privately licensed set) and
+    # readable only by them. Enforced through models.factor_visible_to(), never by
+    # a predicate written out again at the call site.
+    organisation_id = Column(Integer, ForeignKey("organisations.id"),
+                             nullable=True, index=True)
     source = Column(String)  # DEFRA2024 (demo), etc.
     version = Column(String) # 2024.1
     geography = Column(String) # GB, EU, Global
@@ -179,6 +187,29 @@ class EmissionFactor(Base):
     @property
     def has_gas_breakdown(self) -> bool:
         return any(v is not None for v in (self.kg_co2, self.kg_ch4, self.kg_n2o))
+
+
+def factor_visible_to(organisation_id: Optional[int]):
+    """THE visibility rule for emission factors. One definition, every read path.
+
+    NULL `organisation_id` is platform reference data — DEFRA, USEEIO, whatever the
+    operator loaded with scripts/load_factors.py — and every tenant may read it. A
+    non-NULL one was contributed BY that tenant: a supplier footprint received over
+    PACT, or a set they licensed themselves. Only they may read it.
+
+    `organisation_id=None` means an unauthenticated or platform caller, and sees the
+    global rows alone. That is deliberately the conservative default: a caller that
+    cannot name a tenant must never be handed a tenant's row.
+
+    Apply this at EVERY path that serves or resolves factors for a tenant. The
+    callers are pinned by tests/test_factor_tenancy.py, so a new read path that
+    forgets it fails the suite rather than leaking quietly.
+    """
+    if organisation_id is None:
+        return EmissionFactor.organisation_id.is_(None)
+    return or_(EmissionFactor.organisation_id.is_(None),
+               EmissionFactor.organisation_id == organisation_id)
+
 
 class FxRate(Base):
     """Reference FX rate: 1 base_currency = `rate` quote_currency in `year`.
@@ -688,6 +719,12 @@ class CalculationRun(Base):
     reporting_period_id = Column(Integer, ForeignKey("reporting_periods.id"), nullable=True)
     created_at = Column(String)  # ISO timestamp (UTC)
     gwp_set = Column(String)     # AR5 / AR6 applied
+    # Which pedigree compilation produced this run's uncertainty
+    # (services/dq.py PEDIGREE_METHOD). NULL means the run predates the
+    # correction of ecoinvent's SDg95 halving, so its intervals are twice as
+    # wide in log space as the same data yields now — comparability
+    # .pedigree_comparable() blocks subtracting across that change.
+    pedigree_method = Column(String, nullable=True)
     status = Column(String)      # pending | complete
     # frozen coverage snapshot
     total_activities = Column(Integer, default=0)
@@ -883,7 +920,11 @@ class ReportingEntity(Base):
                         name="ck_entity_acct_category"),
         # Joint financial control is the one place a control approach falls back to a
         # percentage; it is not compatible with sole financial control.
-        CheckConstraint("NOT (financial_control = 1 AND joint_financial_control = 1)",
+        # Written as a bare boolean conjunction, NOT `= 1`: SQLite stores BOOLEAN as
+        # INTEGER so `boolean = 1` is legal there, but Postgres has no boolean=integer
+        # operator and rejects the whole CREATE TABLE. Both engines agree on this form,
+        # NULL included — an unasserted control stays unresolved rather than false.
+        CheckConstraint("NOT (financial_control AND joint_financial_control)",
                         name="ck_entity_joint_vs_sole_fc"),
     )
     id = Column(Integer, primary_key=True)

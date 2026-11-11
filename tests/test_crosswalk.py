@@ -328,7 +328,7 @@ def test_nominal_precision_is_distinguished_from_effective_precision(db):
 # --- endpoints ----------------------------------------------------------------
 
 @pytest.fixture
-def env():
+def env(monkeypatch):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -351,7 +351,10 @@ def env():
     main_mod.app.dependency_overrides[main_mod.get_db] = override_get_db
     client = TestClient(main_mod.app)
     key = client.post("/organisations", params={"name": "A"}).json()["api_key"]
-    yield client, {"X-API-Key": key}
+    # Registering a concordance and adding its rows write GLOBAL reference data and
+    # are admin-gated, like FX/CPI. The tenant key alone can only read them.
+    monkeypatch.setenv("ADMIN_API_KEY", "test-admin")
+    yield client, {"X-API-Key": key, "X-Admin-Key": "test-admin"}
     main_mod.app.dependency_overrides.clear()
 
 
@@ -389,3 +392,33 @@ def test_the_uncitable_flag_reaches_the_api(env):
         "table_version": "v1"})
     assert r.json()["uncitable"] is True
     assert r.json()["uncitable_reason"]
+
+
+# --- the global-write gate ---------------------------------------------------------------
+# These two handlers resolved the caller's organisation and then never used it, so any
+# tenant key could register a concordance or add rows to another tenant's table. Adding
+# candidates widens the measured dispersion of every hop through it. Pinned here so the
+# gate cannot be quietly reopened.
+
+def _tenant_only(hdr):
+    return {k: v for k, v in hdr.items() if k != "X-Admin-Key"}
+
+
+def test_registering_a_concordance_needs_the_admin_credential(env):
+    client, hdr = env
+    r = client.post("/crosswalks", headers=_tenant_only(hdr), params={
+        "from_scheme": "CPA", "to_scheme": "CPC", "source": "Beta internal guess",
+        "table_version": "zz-beta"})
+    assert r.status_code in (401, 422), \
+        "a tenant key registered a global concordance table"
+
+
+def test_adding_concordance_rows_needs_the_admin_credential(env):
+    client, hdr = env
+    cid = client.post("/crosswalks", headers=hdr, params={
+        "from_scheme": "CPA", "to_scheme": "CPC", "source": "Eurostat",
+        "table_version": "2.1"}).json()["id"]
+    r = client.post(f"/crosswalks/{cid}/mappings", headers=_tenant_only(hdr),
+                    json=[{"from_code": "A01", "to_code": "999"}])
+    assert r.status_code in (401, 422), \
+        "a tenant key added rows to a global concordance table"

@@ -24,7 +24,7 @@ from .residual_mix import (
 )
 from .units import convert, UnitConversionError, QuantityError
 from .gwp import co2e_from_gases, gwp
-from .dq import line_dq
+from .dq import line_dq, PEDIGREE_METHOD
 from .screening import freeze_onto_run as screening_freeze_onto_run
 from .crosswalk import activity_verdict as crosswalk_verdict
 from .spend import normalize_spend, SpendNormalizationError
@@ -511,6 +511,10 @@ def compute_co2e(db: Session, organisation_id: int, gwp_set: str = "AR6",
         reporting_period_id=reporting_period_id,
         created_at=_utcnow_iso(),
         gwp_set=gwp_set,
+        # Frozen like the GWP vintage and for the same reason: changing it moves
+        # every interval on its own, so a later reader must be able to tell which
+        # compilation this run's uncertainty came from.
+        pedigree_method=PEDIGREE_METHOD,
         status="pending",
         total_activities=len(acts),
         mapped=0, unmapped=0, unit_errors=0, data_errors=0, gwp_mismatch=0,
