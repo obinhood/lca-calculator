@@ -145,9 +145,24 @@ def summary(db: Session, organisation_id: int) -> dict:
     # identity: closed" over a journal whose older half names nobody would be the
     # misleading answer the gap was left open to avoid — so the pack is handed the two
     # counts and says "closed from <date>" rather than "closed".
-    attributed = [e for e in human_rows if e.actor]
-    unattributed = human - len(attributed)
-    named_person = sum(1 for e in attributed if str(e.actor).startswith("user:"))
+    # ATTRIBUTED MEANS A PERSON IS NAMED, and the first version of this got it wrong.
+    # It counted any truthy actor, so 'org_key' and 'token:<id>' — which name an
+    # ORGANISATION and a CREDENTIAL, nobody — closed the gap. The pack then served
+    # "CLOSED ... all N human decisions name the principal that made them" with
+    # "(0 a named person)" in the same sentence. That is precisely the claim the
+    # docstring this replaced existed to refuse: "recording the organisation as though
+    # it were a reviewer would turn an honest gap into a misleading answer".
+    #
+    # ISSA 5000 / ISAE 3410 ask WHO made each judgement. Only "user:<email>" answers it.
+    attributed = [e for e in human_rows if str(e.actor or "").startswith("user:")]
+    # The rest are split out rather than lumped together, because "a credential acted and
+    # we know which" is genuinely more than "we have no idea", and an assuror deciding
+    # how much weight to give the journal needs to tell them apart.
+    impersonal = [e for e in human_rows
+                  if e.actor and not str(e.actor).startswith("user:")]
+    unknown = [e for e in human_rows if not e.actor]
+    unattributed = len(impersonal) + len(unknown)
+    named_person = len(attributed)
     earliest_attributed = min((e.at for e in attributed), default=None)
 
     gaps_closed = ["Override log with before/after values", "Reviewer timestamp"]
@@ -163,15 +178,24 @@ def summary(db: Session, organisation_id: int) -> dict:
                    "override made now records the principal that made it.",
         })
     elif unattributed:
+        bits = []
+        if unknown:
+            bits.append(f"{len(unknown)} journalled before authentication had any "
+                        f"concept of a person, so they name no actor at all")
+        if impersonal:
+            bits.append(f"{len(impersonal)} made with a credential that names no "
+                        f"person (the tenant's shared organisation key, or a token "
+                        f"issued to a firm rather than an individual)")
         still_open.append({
-            "gap": "Reviewer identity (historical events only)",
-            "why": f"{unattributed} of {human} human decisions were journalled before "
-                   f"authentication had any concept of a person, so they name no actor "
-                   f"and were deliberately NOT back-filled — inventing a reviewer for a "
-                   f"filed run is the misleading answer this gap was kept open to "
-                   f"avoid. The {len(attributed)} decision(s) recorded since do name "
-                   f"one.",
+            "gap": "Reviewer identity",
+            "why": f"{unattributed} of {human} human decisions do not name a person: "
+                   + "; ".join(bits)
+                   + f". Neither was back-filled — inventing a reviewer for a filed run "
+                     f"is the misleading answer this gap was kept open to avoid. "
+                     f"{len(attributed)} decision(s) name an individual.",
             "closed_from": earliest_attributed,
+            "unknown_actor": len(unknown),
+            "impersonal_actor": len(impersonal),
         })
     else:
         gaps_closed.append("Reviewer identity")
@@ -187,6 +211,8 @@ def summary(db: Session, organisation_id: int) -> dict:
             "attributed": len(attributed),
             "unattributed": unattributed,
             "by_a_named_person": named_person,
+            "by_an_impersonal_credential": len(impersonal),
+            "no_actor_recorded": len(unknown),
             "earliest_attributed_at": earliest_attributed,
             "note": "An unattributed event was recorded before authentication had any "
                     "concept of a person. NULL there means 'recorded before identity "

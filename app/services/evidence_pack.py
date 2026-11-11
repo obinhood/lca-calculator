@@ -16,7 +16,9 @@ the hash would make the pack unverifiable by construction.
 WHAT IT DOES NOT CONTAIN is as important as what it does, and is stated in
 `evidence_gaps` rather than left for the assuror to discover. The platform's
 auth model is an organisation-scoped API key with no concept of a person, so
-"reviewer identity" cannot be produced at all; the mapping override endpoint
+"reviewer identity" was once unproducible — it is now recorded on binding
+decisions made under a named user credential, and MEASURED per journal rather than
+asserted (see `_identity_gap`); the mapping override endpoint
 overwrites `factor_id` without journalling the prior value, so there is no
 before/after override log; and no field on ActivityRecord carries a GL account or
 cost centre, so no reconciliation to a trial balance is possible. Each is named
@@ -476,25 +478,36 @@ def _identity_gap(attribution: Optional[dict]) -> dict:
                               "attribute. mapping_status would prove a human decided; "
                               "here none has.",
                 "what_would_close_it": "Not applicable."}
+    impersonal = attribution.get("by_an_impersonal_credential") or 0
+    unknown = attribution.get("no_actor_recorded") or 0
     if unattributed:
-        return {"item": item, "expected_by": expected_by,
-                "why_absent": f"PARTLY CLOSED, and measured on this journal: "
-                              f"{attributed} of {human} human decisions name the "
-                              f"principal that made them; {unattributed} were recorded "
-                              f"before authentication had any concept of a person and "
-                              f"name nobody. Those were NOT back-filled — asserting a "
-                              f"reviewer for a filed run nobody can identify is the "
-                              f"misleading answer this gap was kept open to avoid.",
+        why = (f"OPEN on this journal, and measured: {attributed} of {human} human "
+               f"decisions name an individual.")
+        if unknown:
+            why += (f" {unknown} were journalled before authentication had any concept "
+                    f"of a person and name no actor at all.")
+        if impersonal:
+            why += (f" {impersonal} were made with a credential that names no person — "
+                    f"the tenant's shared organisation key, or a token issued to a firm "
+                    f"rather than an individual. Reporting those as a reviewer would "
+                    f"record an ORGANISATION as though it were a person, which is the "
+                    f"misleading answer this gap was kept open to avoid.")
+        why += " Neither kind was back-filled."
+        return {"item": item, "expected_by": expected_by, "why_absent": why,
                 "closed_from": attribution.get("earliest_attributed_at"),
-                "what_would_close_it": "Nothing, for the historical events: the "
-                                       "information was never captured. Decisions made "
-                                       "from now on carry their actor."}
+                "decisions_naming_a_person": attributed,
+                "decisions_naming_no_person": unattributed,
+                "what_would_close_it": (
+                    "Nothing, for events already journalled: the information was never "
+                    "captured. For future decisions, have reviewers act under their own "
+                    "user credential rather than the shared organisation key.")}
     return {"item": item, "expected_by": expected_by,
             "why_absent": f"CLOSED, and measured on this journal: all {human} human "
-                          f"decisions name the principal that made them "
-                          f"({attribution.get('by_a_named_person') or 0} a named "
-                          f"person). An actor is recorded on every binding decision.",
+                          f"decisions name the INDIVIDUAL who made them. An actor is "
+                          f"recorded on every binding decision, and none of them is the "
+                          f"tenant's shared key or an impersonal token.",
             "closed_from": attribution.get("earliest_attributed_at"),
+            "decisions_naming_a_person": attributed,
             "what_would_close_it": "Already closed."}
 
 

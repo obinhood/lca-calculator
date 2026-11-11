@@ -92,7 +92,7 @@ def test_the_organisation_key_still_authenticates_unchanged(env):
     """
     client, db = env
     _org(db)
-    assert client.get("/users", headers={H: "orgkey"}).status_code == 200
+    assert client.get("/activities", headers={H: "orgkey"}).status_code == 200
     assert client.get("/users").status_code == 401                  # missing, not 422
     assert client.get("/users", headers={H: "nope"}).status_code == 401
 
@@ -102,7 +102,8 @@ def test_the_organisation_key_may_still_write(env):
     tenant bootstraps its first user, so if it cannot write, nobody can ever be added."""
     client, db = env
     _org(db)
-    r = client.post("/users?email=first@acme.test&role=owner", headers={H: "orgkey"})
+    r = client.post("/users", json={"email": "first@acme.test", "role": "owner"},
+                    headers={H: "orgkey"})
     assert r.status_code == 200, r.text
     assert r.json()["role"] == "owner"
 
@@ -120,8 +121,8 @@ def test_a_read_token_reads_but_cannot_write(env):
     org = _org(db)
     _token(db, org, secret="ro", scopes="read")
 
-    assert client.get("/users", headers={H: "ro"}).status_code == 200
-    r = client.post("/users?email=x@acme.test", headers={H: "ro"})
+    assert client.get("/activities", headers={H: "ro"}).status_code == 200
+    r = client.post("/users", json={"email": "x@acme.test"}, headers={H: "ro"})
     assert r.status_code == 403, r.text
     assert "read-only" in r.json()["detail"]
 
@@ -133,10 +134,10 @@ def test_a_write_token_writes(env):
     client, db = env
     org = _org(db)
     _token(db, org, secret="rw", scopes="write")
-    assert client.post("/users?email=y@acme.test",
+    assert client.post("/users", json={"email": "y@acme.test"},
                        headers={H: "rw"}).status_code == 403   # needs ADMIN, not write
     _token(db, org, secret="adm", scopes="admin")
-    assert client.post("/users?email=y@acme.test",
+    assert client.post("/users", json={"email": "y@acme.test"},
                        headers={H: "adm"}).status_code == 200
 
 
@@ -144,7 +145,7 @@ def test_an_expired_token_is_refused(env):
     client, db = env
     org = _org(db)
     _token(db, org, secret="old", scopes="admin", expires_in=-1)
-    r = client.get("/users", headers={H: "old"})
+    r = client.get("/activities", headers={H: "old"})
     assert r.status_code == 401
     assert "expired" in r.json()["detail"]
 
@@ -157,7 +158,7 @@ def test_a_revoked_token_is_refused_before_its_expiry_window_closes(env):
     org = _org(db)
     _token(db, org, secret="dead", scopes="admin", expires_in=365,
            revoked_at=datetime.now(timezone.utc).isoformat())
-    r = client.get("/users", headers={H: "dead"})
+    r = client.get("/activities", headers={H: "dead"})
     assert r.status_code == 401
     assert "revoked" in r.json()["detail"]
 
@@ -170,15 +171,15 @@ def test_suspending_a_user_kills_every_credential_they_hold(env):
     u = _user(db, org, email="leaver@acme.test", role="member")
     _token(db, org, secret="theirs", scopes="write", user_id=u.id)
 
-    assert client.get("/users", headers={H: "theirs"}).status_code == 200
+    assert client.get("/activities", headers={H: "theirs"}).status_code == 200
     assert client.post(f"/users/{u.id}/status?status=suspended",
                        headers={H: "orgkey"}).status_code == 200
 
-    r = client.get("/users", headers={H: "theirs"})
+    r = client.get("/activities", headers={H: "theirs"})
     assert r.status_code == 401
     assert "suspended" in r.json()["detail"]
     # And the tenant's own key is untouched — the whole point.
-    assert client.get("/users", headers={H: "orgkey"}).status_code == 200
+    assert client.get("/activities", headers={H: "orgkey"}).status_code == 200
 
 
 def test_the_auditor_role_beats_a_write_scope(env):
@@ -195,8 +196,8 @@ def test_the_auditor_role_beats_a_write_scope(env):
     a = _user(db, org, email="auditor@firm.test", role="auditor")
     _token(db, org, secret="aud", scopes="write", user_id=a.id)
 
-    assert client.get("/users", headers={H: "aud"}).status_code == 200
-    r = client.post("/users?email=z@acme.test", headers={H: "aud"})
+    assert client.get("/activities", headers={H: "aud"}).status_code == 200
+    r = client.post("/users", json={"email": "z@acme.test"}, headers={H: "aud"})
     assert r.status_code == 403
     assert "auditor" in r.json()["detail"]
 
@@ -272,7 +273,7 @@ def test_the_minted_secret_is_returned_exactly_once(env):
     secret = r.json()["api_key"]
     assert secret and secret not in client.get("/tokens", headers={H: "orgkey"}).text
     # And it works.
-    assert client.get("/users", headers={H: secret}).status_code == 200
+    assert client.get("/activities", headers={H: secret}).status_code == 200
 
 
 # --- expiry cannot be evaded -------------------------------------------------------------
@@ -302,7 +303,7 @@ def test_an_unreadable_expiry_fails_closed(env, bad):
     client, db = env
     org = _org(db)
     _token(db, org, secret="weird", scopes="admin", expires_at=bad)
-    r = client.get("/users", headers={H: "weird"})
+    r = client.get("/activities", headers={H: "weird"})
     assert r.status_code == 401, f"{bad!r} was accepted as a live expiry"
 
 
@@ -314,7 +315,7 @@ def test_a_naive_expiry_is_read_as_utc_not_local(env):
     org = _org(db)
     past = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(tzinfo=None)
     _token(db, org, secret="naive", scopes="admin", expires_at=past.isoformat())
-    assert client.get("/users", headers={H: "naive"}).status_code == 401
+    assert client.get("/activities", headers={H: "naive"}).status_code == 401
 
 
 # --- the last owner ----------------------------------------------------------------------
@@ -353,7 +354,7 @@ def test_every_write_route_is_covered_by_one_enforcement_point(env):
     org = _org(db)
     _token(db, org, secret="ro", scopes="read")
 
-    probes = ["/users?email=a@b.test", "/tokens?label=x",
+    probes = ["/tokens?label=x",
               "/organisations/rotate_key", "/reporting_periods?label=FY25"
               "&start_date=2025-01-01&end_date=2025-12-31"]
     for path in probes:
@@ -367,5 +368,124 @@ def test_read_routes_are_not_refused_to_a_read_token(env):
     client, db = env
     org = _org(db)
     _token(db, org, secret="ro", scopes="read")
-    for path in ("/users", "/tokens", "/activities"):
+    for path in ("/activities", "/reporting_periods", "/entities"):
         assert client.get(path, headers={H: "ro"}).status_code == 200, path
+
+
+# --- what an adversarial review of this file's own subject found -------------------------
+#
+# Every test below pins a defect that was LIVE on main after the identity change merged,
+# found by a five-dimension review of it. They are here rather than in a new file because
+# they are the same subject: who may do what with which credential.
+
+def test_a_write_token_cannot_obtain_the_organisation_key(env):
+    """PRIVILEGE ESCALATION, reproduced on main before this fix.
+
+    `POST /organisations/rotate_key` RETURNS the organisation key, and
+    `_resolve_principal` resolves that key to scopes 'admin' with `may_administer` True.
+    Gated on `current_org` — which only asks "can this credential write" — a member-role
+    write token was refused POST /users with 403, called rotate_key, was handed the org
+    key, and created users with it. One call deep, and complete.
+    """
+    client, db = env
+    org = _org(db)
+    u = _user(db, org, email="member@acme.test", role="member")
+    _token(db, org, secret="mem", scopes="write", user_id=u.id)
+
+    assert client.post("/users", json={"email": "x@acme.test"},
+                       headers={H: "mem"}).status_code == 403
+    r = client.post("/organisations/rotate_key", headers={H: "mem"})
+    assert r.status_code == 403, f"escalation: {r.status_code} {r.text[:200]}"
+    assert "api_key" not in r.text
+
+
+def test_an_admin_token_may_still_rotate_the_key(env):
+    """The positive control. A gate that refused everyone would pass the test above
+    while locking the tenant out of its own key."""
+    client, db = env
+    _org(db)
+    r = client.post("/organisations/rotate_key", headers={H: "orgkey"})
+    assert r.status_code == 200, r.text
+    assert r.json()["api_key"]
+
+
+def test_a_member_write_token_cannot_delete_the_tenant(env):
+    """`models.User` promises a member "read and write inventory data" and reserves
+    deleting the tenant to an owner. Gated on write alone, a member destroyed the
+    organisation, every user and every token."""
+    client, db = env
+    org = _org(db)
+    u = _user(db, org, email="member@acme.test", role="member")
+    _token(db, org, secret="mem", scopes="write", user_id=u.id)
+    r = client.delete("/organisations/self?confirm_org_name=Acme&confirm_irreversible=true",
+                      headers={H: "mem"})
+    assert r.status_code == 403, r.text
+    assert db.get(Organisation, org.id) is not None
+
+
+def test_a_read_token_cannot_enumerate_users_or_credentials(env):
+    """The access-control state is not inventory.
+
+    The read-only token on an `auditor` user exists so an outside assurance firm need
+    not hold the tenant's write key. Listed through the ordinary factory it could read
+    every user's email and role and every token's label, scope, expiry and holder — the
+    payload this same change calls "a map of the tenant's attack surface" and excludes
+    from the tenant's own export.
+    """
+    client, db = env
+    org = _org(db)
+    a = _user(db, org, email="auditor@firm.test", role="auditor")
+    _token(db, org, secret="aud", scopes="read", user_id=a.id)
+
+    assert client.get("/users", headers={H: "aud"}).status_code == 403
+    assert client.get("/tokens", headers={H: "aud"}).status_code == 403
+    # An admin still sees them, or the tenant cannot manage its own access.
+    assert client.get("/users", headers={H: "orgkey"}).status_code == 200
+    assert client.get("/tokens", headers={H: "orgkey"}).status_code == 200
+
+
+def test_a_revoked_organisation_key_disables_its_tokens(env):
+    """The guard in `_resolve_principal`'s token branch had NO test: reducing it to
+    `if org is None:` left this file green at 24 passed. Whichever way the coupling is
+    decided it needs pinning, because without one both behaviours pass."""
+    client, db = env
+    org = _org(db)
+    _token(db, org, secret="tok", scopes="admin")
+    assert client.get("/activities", headers={H: "tok"}).status_code == 200
+
+    org.api_key_revoked = True
+    db.commit()
+    r = client.get("/activities", headers={H: "tok"})
+    assert r.status_code == 401, "a token outlived revocation of the org it belongs to"
+
+
+def test_a_persons_email_never_travels_in_a_query_string(env):
+    """`schemas.py` states the rule: the production command logs the full request line
+    verbatim, including on requests that fail authorisation, with no deletion path. An
+    email is person-identifying BY DESIGN, so it goes in the body.
+
+    Asserted against the ROUTE's declared parameters rather than by sending a request,
+    so a handler that still accepts the query form fails even if it also accepts a body.
+    """
+    from fastapi.routing import APIRoute
+    route = next(r for r in main_mod.app.routes
+                 if isinstance(r, APIRoute) and r.path == "/users" and "POST" in r.methods)
+    query_names = {p.name for p in route.dependant.query_params}
+    assert "email" not in query_names, query_names
+    assert "name" not in query_names, query_names
+
+
+def test_a_token_in_use_does_not_report_itself_as_never_used(env):
+    """`last_used_at` was declared, served by GET /tokens, and written by nothing, so a
+    credential used continuously was indistinguishable from one never touched — on the
+    surface an admin uses to decide what to revoke."""
+    client, db = env
+    org = _org(db)
+    t = _token(db, org, secret="tok", scopes="admin")
+    assert t.last_used_at is None
+    for _ in range(3):
+        assert client.get("/activities", headers={H: "tok"}).status_code == 200
+    db.refresh(t)
+    assert t.last_used_at, "a token used three times still reports never used"
+    rows = client.get("/tokens", headers={H: "orgkey"}).json()["items"]
+    assert rows[0]["last_used_at"]
