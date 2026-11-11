@@ -25,6 +25,7 @@ from .summary import summary, run_factor_sources
 from .scope3 import category_tco2e, disclosed_totals_incl_financed
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
+from ..services.calc import scope_declaration_completeness
 from ..services.removals import removals_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
 from ..services.instruments import over_declaration_gate
@@ -122,6 +123,12 @@ def issb_s2_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     blockers.extend(over_declaration_gate(db, run).get("blockers", []))
     # GHG Protocol Ch.3 boundary (S2 29(a)(iv) disaggregation depends on it).
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    # S2 29(a) requires Scope 1, 2 and 3 disclosed SEPARATELY, and 29(a)(iv)
+    # disaggregates Scope 1 and 2 again by accounting group. Every one of those
+    # figures IS the scope split, so an ASSUMED scope is not a caveat alongside
+    # them — it is the number. This payload already carried the caveat naming the
+    # very categories it guessed, then published scope1_gross 0.0 as ready.
+    blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
     blockers.extend(removals_completeness(db, run).get("blockers", []))
 
     # Cat 15 financed emissions (frozen) roll into the disclosed Scope 3 / totals — via

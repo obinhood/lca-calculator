@@ -157,3 +157,42 @@ def test_sb253_no_run_yet(db):
     r = sb253_report(db, org.id, assurance_level="limited")
     assert r["filing_ready"] is False
     assert any("no calculation run" in b for b in r["blockers"])
+
+
+# --- The scope-declaration gate ------------------------------------------------
+# The CCDAA phases Scope 1 + 2 in FIRST, and those are the only figures under
+# third-party assurance in the opening cycle — so the scope split IS the filing. An
+# activity category outside SCOPE_RULES defaults to Scope 3, so a California filing
+# carried an assured Scope 1 of 0.0 that the engine had inferred, with filing_ready
+# true once assurance was supplied. Note the readiness key here is `filing_ready`.
+
+def test_sb253_refuses_a_scope_split_it_guessed(db):
+    """Reverting the one wired line must fail this test."""
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    org, run = assumed_scope_run(db)
+    r = sb253_report(db, org.id, run_id=run.id, assurance_level="limited",
+                     assurance_provider="Acme Assurance LLP")
+    e = r["emissions_tco2e"]
+    assert e["scope1"] == 0.0
+    assert e["scope2_location_based"] == 0.0
+    assert e["scope3"] > 0.0
+    assert r["filing_ready"] is False
+    _b = [b for b in r["blockers"] if "ASSUMED" in b]
+    assert _b, f"SB 253 certified a guessed scope split; blockers were {r['blockers']}"
+    for cat in ASSUMED_CATEGORIES:
+        assert cat in _b[0], f"{cat} was assumed but is not named in the refusal"
+    assert not any("ghgp_category" in b for b in r["blockers"]), \
+        "fixture did not discharge the Scope 3 category gate — wrong blocker under test"
+
+
+def test_sb253_still_ready_when_every_scope_is_known(db):
+    """Negative control: the same three sources under RECOGNISED category names."""
+    from tests.scope3_util import declared_scope_run
+    org, run = declared_scope_run(db)
+    r = sb253_report(db, org.id, run_id=run.id, assurance_level="limited",
+                     assurance_provider="Acme Assurance LLP")
+    assert r["filing_ready"] is True, r["blockers"]
+    assert r["blockers"] == []
+    e = r["emissions_tco2e"]
+    assert e["scope1"] > 0.0
+    assert e["scope2_location_based"] > 0.0

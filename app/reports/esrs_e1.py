@@ -32,6 +32,7 @@ from .scope3 import disclosed_totals_incl_financed
 from .secr import _energy_kwh
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
+from ..services.calc import scope_declaration_completeness
 from ..services.removals import removals_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
 from ..services.instruments import over_declaration_gate
@@ -199,6 +200,10 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     # GHG Protocol Ch.3: the consolidation boundary determines what share of each
     # entity is in these figures — an unresolved boundary cannot be disclosed.
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    # E1-6 mandates gross Scope 1, 2 and 3 separately plus total GHG intensity per
+    # net revenue. The intensity numerator is the scope total, so an assumed scope
+    # moves both the mandated split and the ratio ESRS requires beside it.
+    blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
     # GHG Protocol Land Sector & Removals: an unresolved/unpermanent removal blocks.
     blockers.extend(removals_completeness(db, run).get("blockers", []))
 

@@ -24,6 +24,7 @@ from .summary import summary, run_factor_sources
 from .scope3 import disclosed_totals_incl_financed
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
+from ..services.calc import scope_declaration_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
 from ..services.instruments import over_declaration_gate
 
@@ -62,6 +63,11 @@ def sb253_report(db: Session, organisation_id: int, run_id: Optional[int] = None
     # waved a California one through.
     blockers.extend(scope3_completeness(db, run).get("blockers", []))
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
+    # The CCDAA phases Scope 1 + 2 in FIRST, and those are the only figures under
+    # third-party assurance in the opening cycle — so the scope split IS the filing.
+    # Filing an assured zero Scope 1 the engine inferred, rather than one the
+    # preparer declared, is the failure this gate exists to prevent.
+    blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
     if s.get("partial"):
         blockers.append(f"run is PARTIAL — excluded activities: {s['partial_reasons']}")
     if cov["stale"]:

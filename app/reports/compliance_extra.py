@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..models import TaxonomyActivity, CalculationRun
 from ..services.boundary import boundary_completeness
+from ..services.calc import scope_declaration_completeness
 from .summary import summary
 from .secr import _energy_kwh
 
@@ -71,6 +72,12 @@ def ets_mrv_report(db: Session, organisation_id: int, scheme: str,
     if not verified:
         blockers.append("ETS requires accredited third-party verification — set "
                         "verified=true once an accredited verifier has issued an opinion")
+    # Reportable ETS emissions are DIRECT (Scope 1) under the MRR — the figure an
+    # installation surrenders allowances against. An unrecognised category defaults to
+    # Scope 3, i.e. assumed OUT of that figure, so the assumption understates the
+    # surrender obligation. scope_assumptions below has always said so in prose while
+    # report_ready stayed True; a verified 0.0 direct total now refuses instead.
+    blockers.extend(scope_declaration_completeness(db, run).get("blockers", []))
 
     return {
         "framework": f"{scheme} MRV",

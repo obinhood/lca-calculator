@@ -127,3 +127,43 @@ def test_esrs_e1_no_run_yet(db):
     r = esrs_e1_report(db, org.id, net_revenue_millions=10.0)
     assert r["disclosure_ready"] is False
     assert any("no calculation run" in b for b in r["blockers"])
+
+
+# --- The scope-declaration gate ------------------------------------------------
+# E1-6 mandates gross Scope 1, 2 and 3 separately, plus total GHG intensity per net
+# revenue whose numerator is the scope total. An activity category outside SCOPE_RULES
+# defaults to Scope 3, so Scope 1 and Scope 2 both read 0.0 and the mandated split —
+# and the ratio built on it — was published as disclosure_ready with blockers empty.
+# The refusal test also asserts NO Scope-3-category blocker: on a bare fixture this
+# renderer does block, but on that different gate, whose own remedy leaves Scope 2 at 0.0.
+
+def test_esrs_e1_refuses_a_scope_split_it_guessed(db):
+    """Reverting the one wired line must fail this test."""
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    org, run = assumed_scope_run(db)
+    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0,
+                       revenue_period_days=365)
+    g = r["e1_6_gross_ghg_emissions_tco2e"]
+    assert g["scope1"] == 0.0
+    assert g["scope2_location_based"] == 0.0
+    assert g["scope3"] > 0.0
+    assert r["disclosure_ready"] is False
+    _b = [b for b in r["blockers"] if "ASSUMED" in b]
+    assert _b, f"E1-6 certified a guessed scope split; blockers were {r['blockers']}"
+    for cat in ASSUMED_CATEGORIES:
+        assert cat in _b[0], f"{cat} was assumed but is not named in the refusal"
+    assert not any("ghgp_category" in b for b in r["blockers"]), \
+        "fixture did not discharge the Scope 3 category gate — wrong blocker under test"
+
+
+def test_esrs_e1_still_ready_when_every_scope_is_known(db):
+    """Negative control: the same three sources under RECOGNISED category names."""
+    from tests.scope3_util import declared_scope_run
+    org, run = declared_scope_run(db)
+    r = esrs_e1_report(db, org.id, run_id=run.id, net_revenue_millions=10.0,
+                       revenue_period_days=365)
+    assert r["disclosure_ready"] is True, r["blockers"]
+    assert r["blockers"] == []
+    g = r["e1_6_gross_ghg_emissions_tco2e"]
+    assert g["scope1"] > 0.0
+    assert g["scope2_location_based"] > 0.0

@@ -173,3 +173,113 @@ def test_cdp_blocks_partial_and_missing_denominator(db, seeded):
     assert r["submission_ready"] is False
     assert any("PARTIAL" in b for b in r["blockers"])
     assert any("intensity_denominator" in b for b in r["blockers"])
+
+
+# --- The scope-declaration gate ------------------------------------------------
+# Every figure these three frameworks key by scope was published over a split the
+# ENGINE GUESSED: an activity category outside SCOPE_RULES defaults to Scope 3, so
+# Scope 1 and Scope 2 both read 0.0 and the whole inventory lands in Scope 3 — with
+# disclosure_ready true and blockers empty, beside a scope_assumptions caveat naming
+# the very activities that were guessed.
+#
+# Each refusal test below also asserts that NO Scope-3-category blocker is present.
+# On a bare fixture these renderers do block, but on the GHGP category gate — a
+# different fact with a different remedy, whose own instruction ("set
+# activities.ghgp_category") clears it while leaving Scope 2 at 0.0. The fixture
+# discharges it on purpose, so a test that passed because of it would be lying.
+
+def test_issb_s2_refuses_a_scope_split_it_guessed(db):
+    """IFRS S2 29(a) mandates Scope 1/2/3 separately. Reverting the gate must fail this."""
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    org, run = assumed_scope_run(db)
+    r = issb_s2_report(db, org.id, run_id=run.id)
+    g = r["ghg_emissions_tco2e"]
+    # The two mandated gross figures really are zero...
+    assert g["scope1_gross"] == 0.0
+    assert g["scope2_location_based_gross"] == 0.0
+    # ...while the entire inventory sits in Scope 3, so those zeros are a GUESS.
+    assert g["scope3_gross"] > 0.0
+    assert r["disclosure_ready"] is False
+    _b = [b for b in r["blockers"] if "ASSUMED" in b]
+    assert _b, f"S2 certified a guessed scope split; blockers were {r['blockers']}"
+    for cat in ASSUMED_CATEGORIES:
+        assert cat in _b[0], f"{cat} was assumed but is not named in the refusal"
+    assert not any("ghgp_category" in b for b in r["blockers"]), \
+        "fixture did not discharge the Scope 3 category gate — wrong blocker under test"
+
+
+def test_issb_s2_still_ready_when_every_scope_is_known(db):
+    """Negative control: the same three sources under RECOGNISED category names."""
+    from tests.scope3_util import declared_scope_run
+    org, run = declared_scope_run(db)
+    r = issb_s2_report(db, org.id, run_id=run.id)
+    assert r["disclosure_ready"] is True, r["blockers"]
+    assert r["blockers"] == []
+    # The split is derived from a rule, so the figures come back rather than collapsing.
+    g = r["ghg_emissions_tco2e"]
+    assert g["scope1_gross"] > 0.0
+    assert g["scope2_location_based_gross"] > 0.0
+
+
+def test_gri_refuses_a_scope_split_it_guessed(db):
+    """305-1/-2/-3 are three disclosures by scope and 305-4 divides 305-1 + 305-2."""
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    org, run = assumed_scope_run(db)
+    r = gri_report(db, org.id, run_id=run.id, intensity_denominator=2.0,
+                   intensity_denominator_unit="revenue_musd",
+                   intensity_denominator_period_days=365)
+    assert r["gri_305_1_scope1"]["gross_tco2e"] == 0.0
+    assert r["gri_305_2_scope2"]["location_based_tco2e"] == 0.0
+    assert r["gri_305_3_scope3"]["gross_tco2e"] > 0.0
+    assert r["disclosure_ready"] is False
+    _b = [b for b in r["blockers"] if "ASSUMED" in b]
+    assert _b, f"GRI certified a guessed scope split; blockers were {r['blockers']}"
+    for cat in ASSUMED_CATEGORIES:
+        assert cat in _b[0], f"{cat} was assumed but is not named in the refusal"
+    assert not any("ghgp_category" in b for b in r["blockers"]), \
+        "fixture did not discharge the Scope 3 category gate — wrong blocker under test"
+
+
+def test_gri_still_ready_when_every_scope_is_known(db):
+    from tests.scope3_util import declared_scope_run
+    org, run = declared_scope_run(db)
+    r = gri_report(db, org.id, run_id=run.id, intensity_denominator=2.0,
+                   intensity_denominator_unit="revenue_musd",
+                   intensity_denominator_period_days=365)
+    assert r["disclosure_ready"] is True, r["blockers"]
+    assert r["blockers"] == []
+    assert r["gri_305_1_scope1"]["gross_tco2e"] > 0.0
+    assert r["gri_305_2_scope2"]["location_based_tco2e"] > 0.0
+
+
+def test_cdp_refuses_a_scope_split_it_guessed(db):
+    """C6.1/C6.3/C6.5 are scope-keyed questionnaire rows: the response IS the split."""
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    org, run = assumed_scope_run(db)
+    r = cdp_export(db, org.id, run_id=run.id, intensity_denominator=2.0,
+                   intensity_denominator_unit="revenue_musd",
+                   intensity_denominator_period_days=365)
+    m = r["answers"]
+    assert m["C6.1_scope1_gross_tco2e"] == 0.0
+    assert m["C6.3_scope2_location_tco2e"] == 0.0
+    assert m["C6.5_scope3_excl_financed_tco2e"] > 0.0
+    assert r["submission_ready"] is False
+    _b = [b for b in r["blockers"] if "ASSUMED" in b]
+    assert _b, f"CDP certified a guessed scope split; blockers were {r['blockers']}"
+    for cat in ASSUMED_CATEGORIES:
+        assert cat in _b[0], f"{cat} was assumed but is not named in the refusal"
+    assert not any("ghgp_category" in b for b in r["blockers"]), \
+        "fixture did not discharge the Scope 3 category gate — wrong blocker under test"
+
+
+def test_cdp_still_ready_when_every_scope_is_known(db):
+    from tests.scope3_util import declared_scope_run
+    org, run = declared_scope_run(db)
+    r = cdp_export(db, org.id, run_id=run.id, intensity_denominator=2.0,
+                   intensity_denominator_unit="revenue_musd",
+                   intensity_denominator_period_days=365)
+    assert r["submission_ready"] is True, r["blockers"]
+    assert r["blockers"] == []
+    m = r["answers"]
+    assert m["C6.1_scope1_gross_tco2e"] > 0.0
+    assert m["C6.3_scope2_location_tco2e"] > 0.0

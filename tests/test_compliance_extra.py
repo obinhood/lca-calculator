@@ -103,3 +103,40 @@ def test_reports_are_org_scoped(db):
     db.commit()
     r = taxonomy_report(db, org_a.id, 2025)
     assert r["activities"] == 0 and r["disclosure_ready"] is False
+
+
+# --- The scope-declaration gate ------------------------------------------------
+# Reportable ETS emissions are DIRECT (Scope 1) under the MRR — the figure an
+# installation surrenders allowances against. An activity category outside SCOPE_RULES
+# defaults to Scope 3, i.e. assumed OUT of that figure, so the assumption UNDERSTATES
+# the surrender obligation. `scope_assumptions` always said so in prose while
+# report_ready stayed True once a verifier signed off.
+
+def test_ets_mrv_refuses_a_direct_total_it_guessed(db):
+    """Reverting the one wired line must fail this test.
+
+    Verification is supplied here on purpose: it is a real and unrelated duty, and
+    while it is outstanding it masks the defect behind its own blocker.
+    """
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    org, run = assumed_scope_run(db)
+    r = ets_mrv_report(db, org.id, "UK ETS", run_id=run.id, verified=True)
+    # A refrigerant top-up and a generator's fuel are both direct sources, but the
+    # surrender basis reads zero because neither category was recognised.
+    assert r["direct_emissions_tco2e"] == 0.0
+    assert r["report_ready"] is False
+    _b = [b for b in r["blockers"] if "ASSUMED" in b]
+    assert _b, f"ETS certified a guessed direct total; blockers were {r['blockers']}"
+    for cat in ASSUMED_CATEGORIES:
+        assert cat in _b[0], f"{cat} was assumed but is not named in the refusal"
+
+
+def test_ets_mrv_still_ready_when_every_scope_is_known(db):
+    """Negative control: the same three sources under RECOGNISED category names."""
+    from tests.scope3_util import declared_scope_run
+    org, run = declared_scope_run(db)
+    r = ets_mrv_report(db, org.id, "UK ETS", run_id=run.id, verified=True)
+    assert r["report_ready"] is True, r["blockers"]
+    assert r["blockers"] == []
+    # The two direct sources (refrigerant 12 kg, diesel 3000 L) are back in the figure.
+    assert r["direct_emissions_tco2e"] > 0.0
