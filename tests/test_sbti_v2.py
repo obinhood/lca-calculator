@@ -321,6 +321,57 @@ def test_one_of_three_size_tests_is_not_enough():
     assert r["category"] == "B"
 
 
+def test_undeclared_high_income_country_refuses_when_it_decides_the_category():
+    """An UNDECLARED country is not a low-income one.
+
+    `high_income_country` arrives as None when the caller never said. Reading that as
+    False deleted the whole high-income route to Category A, so a group that already
+    meets an A.1 high-income criterion came back determinable: True, category: "B" on a
+    question nobody had answered — the exemption this function exists to refuse, reached
+    through an absent input rather than an absent figure.
+    """
+    # The emissions route is decisive.
+    r = company_category(scope12_tco2e=15_000, turnover_eur=1_000_000, fte=50)
+    assert r["determinable"] is False and r["category"] is None, r
+    assert r["high_income_criterion_already_met"]
+    assert "high-income country was not supplied" in r["reason"]
+    # The two-of-three size route is decisive.
+    r = company_category(turnover_eur=60_000_000, fte=300, balance_sheet_eur=10_000_000)
+    assert r["determinable"] is False and r["category"] is None, r
+    # Each would have been Category A had the country been declared high-income.
+    assert company_category(scope12_tco2e=15_000, turnover_eur=1_000_000, fte=50,
+                            high_income_country=True)["category"] == "A"
+    assert company_category(turnover_eur=60_000_000, fte=300,
+                            balance_sheet_eur=10_000_000,
+                            high_income_country=True)["category"] == "A"
+
+
+def test_declared_non_high_income_country_is_an_answer_not_a_gap():
+    """False is a DECLARATION. Only None is the missing input, and they must not merge."""
+    for kw in (dict(scope12_tco2e=15_000, turnover_eur=1_000_000, fte=50),
+               dict(turnover_eur=60_000_000, fte=300, balance_sheet_eur=10_000_000)):
+        r = company_category(high_income_country=False, **kw)
+        assert r["determinable"] is True and r["category"] == "B", r
+
+
+def test_undeclared_high_income_country_still_answers_when_it_cannot_decide():
+    """Over-refusal guard: the flag is gated only where it changes the outcome.
+
+    Where no high-income route could fire the answer is B whatever the country is, and
+    where turnover or FTE already reached Category A that branch is never entered.
+    Refusing these would withhold an answer the missing flag cannot change.
+    """
+    # One of three size tests is not enough, so the route cannot fire either way.
+    r = company_category(turnover_eur=60_000_000, fte=100, balance_sheet_eur=10_000_000)
+    assert r["determinable"] is True and r["category"] == "B", r
+    # Nothing near any threshold.
+    r = company_category(turnover_eur=1_000_000, fte=10)
+    assert r["determinable"] is True and r["category"] == "B", r
+    # Category A already settled on a universal test.
+    assert company_category(turnover_eur=CATEGORY_A_TURNOVER_EUR)["category"] == "A"
+    assert company_category(fte=CATEGORY_A_FTE)["category"] == "A"
+
+
 def test_categorisation_refuses_with_no_inputs():
     """Defaulting to B would exempt a large company from criteria that bind only A."""
     r = company_category()
@@ -542,10 +593,16 @@ def test_sbti_v2_company_category_refuses_only_where_it_reads_the_guessed_invent
 
     # Category A already settled by turnover: reached before that branch, so unaffected.
     assert cat(assumed_scope_run, high_income_country=True, **big)["category"] == "A"
-    # Not high-income: the Scope 1+2 figure is never consulted at all.
-    for hic in (False, None):
-        assert cat(assumed_scope_run, high_income_country=hic, **small)["category"] == "B"
-        assert cat(assumed_scope_run, high_income_country=hic, **big)["category"] == "A"
+    # A DECLARED non-high-income country excludes the branch that reads the figure, so
+    # the answer stands even though the split was guessed.
+    assert cat(assumed_scope_run, high_income_country=False, **small)["category"] == "B"
+    assert cat(assumed_scope_run, high_income_country=False, **big)["category"] == "A"
+    # An UNDECLARED one does not exclude it: with the country unknown AND the Scope 1 + 2
+    # figure assumed away, neither half of the A.1 emissions test is known.
+    c = cat(assumed_scope_run, high_income_country=None, **small)
+    assert c["determinable"] is False and c["category"] is None, c
+    # ...but a Category A already settled by turnover is still reached first.
+    assert cat(assumed_scope_run, high_income_country=None, **big)["category"] == "A"
     # A declared split answers in every corner.
     for hic in (True, False, None):
         assert cat(declared_scope_run_with_scope3, high_income_country=hic,

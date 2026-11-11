@@ -160,13 +160,19 @@ def sbti_v2_report(db: Session, run: CalculationRun, *,
                            scope12_tco2e=_scope12_tco2e(db, run),
                            balance_sheet_eur=balance_sheet_eur,
                            high_income_country=high_income_country)
-    # All three conjuncts, because only their conjunction rests on the guess. Without
-    # `high_income_country` the Scope 1 + 2 figure is never read at all (execution-verified:
-    # the category is B either way), and a Category A already established by turnover or
-    # FTE is reached before that branch and so is unaffected. A "B" under a high-income
-    # flag is the one answer that could have been an A but for the absent figure — gating
-    # the others would refuse answers the guess did not touch.
-    if _scope_gate["blockers"] and high_income_country and cat.get("category") == "B":
+    # All three conjuncts, because only their conjunction rests on the guess. A Category A
+    # already established by turnover or FTE is reached before the high-income branch and
+    # so is unaffected, and `company_category` consults the Scope 1 + 2 figure ONLY inside
+    # that branch — so gating a wider set would refuse answers the guess never touched.
+    #
+    # `is not False`, not a truth test. The branch that reads the figure is excluded by a
+    # DECLARED False and not by an undeclared None: with the country unknown AND the Scope
+    # 1 + 2 figure assumed away, a high-income group over 10,000 tCO2e is Category A and
+    # nothing in the run can rule that out. `company_category` already refuses an
+    # undeclared country where the size tests alone decide it; this covers the case where
+    # the emissions route is the decisive one and the emissions are what went missing.
+    if (_scope_gate["blockers"] and high_income_country is not False
+            and cat.get("category") == "B"):
         cat = {
             "determinable": False, "category": None,
             "reason": "Category B here rests on a Scope 1 + 2 figure the run never "
@@ -175,7 +181,11 @@ def sbti_v2_report(db: Session, run: CalculationRun, *,
                         f"{HIGH_INCOME_SCOPE12_TCO2E:,} tCO2e' is what separates A from B "
                         "at this size, and every tonne that would answer it was assumed "
                         "into Scope 3, so B cannot be distinguished from an A whose "
-                        "emissions were misfiled",
+                        "emissions were misfiled"
+                      + ("" if high_income_country else
+                         ". high_income_country was not supplied either, so neither half "
+                         "of that test is known; pass False to state the group is not in "
+                         "a high-income country, or declare the scope and recompute"),
             "scope_declaration_blockers": _scope_gate["blockers"],
         }
     from ..models import ReportingPeriod
