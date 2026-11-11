@@ -517,7 +517,10 @@ def test_a_run_is_always_produced_even_with_open_blocking_findings(db):
     screen(db, org.id)
     run = compute_co2e(db, org.id)
     assert run is not None
-    assert run.status == "complete"
+    # Produced, and honest about what it left out: the negative-quantity line is a
+    # data_error, so the status reports exclusions rather than "complete".
+    assert run.status == "complete_with_exclusions"
+    assert run.data_errors == 1
     assert run.total_co2e == pytest.approx(200.0)
 
 

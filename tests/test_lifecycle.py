@@ -805,7 +805,18 @@ _FILL_OVERRIDES = {
     ("run_residual_mix_statements", "status"): "fully_contractual",
     ("scope3_category_declarations", "category"): 1,   # 1..15
     ("run_scope3_declarations", "category"): 1,
+    # factor_gas_masses.gas must be a gas services/gwp.py knows, or the factor it
+    # belongs to could not be calculated with.
+    ("factor_gas_masses", "gas"): "SF6",
 }
+
+# Tables that are MIXED tenancy: classified GLOBAL_REFERENCE because most of their rows
+# are platform data, but carrying an `organisation_id` so a tenant can contribute rows
+# of their own (emission_factors — see lifecycle.GLOBAL_REFERENCE). They are not in the
+# org-scoped walk, so a tenant child of one has no parent to point at. The filler seeds
+# a tenant-OWNED row in each before the walk, which is also the only parent a child's
+# rows are expected to be deleted with.
+_MIXED_TENANCY_PARENTS = ("emission_factors",)
 
 
 def _fill_every_tenant_table(db, org_id: int) -> dict:
@@ -823,6 +834,26 @@ def _fill_every_tenant_table(db, org_id: int) -> dict:
     # Parents first, which is the reverse of the delete order.
     order = list(reversed(L._org_scoped_tables(md)))
     ids = {}
+    # Mixed-tenancy parents first: a tenant child of one (factor_gas_masses under a
+    # factor this tenant contributed) otherwise has nothing to point at, and would be
+    # inserted against a factor belonging to nobody — which the org-scoped count then
+    # cannot see, so the table would look unpopulated rather than uncovered.
+    for name in _MIXED_TENANCY_PARENTS:
+        t = md.tables[name]
+        enums = _enum_choices(t)
+        values = {"organisation_id": org_id}
+        for col in t.columns:
+            if col.primary_key or col.name == "organisation_id" or list(col.foreign_keys):
+                continue
+            override = _FILL_OVERRIDES.get((name, col.name))
+            if override is not None:
+                values[col.name] = override
+            elif col.name in enums:
+                values[col.name] = enums[col.name]
+            elif not col.nullable and col.default is None and col.server_default is None:
+                values[col.name] = _dummy(col)
+        ids[name] = db.execute(insert(t).values(**values)).inserted_primary_key[0]
+
     for name in order:
         t = md.tables[name]
         enums = _enum_choices(t)

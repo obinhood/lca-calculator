@@ -13,19 +13,30 @@ from app.services.ghgp import boundary_meets_minimum
 SAMPLES = Path("app/ef_catalog/samples")
 
 
-def test_defra_flat_adapter_parses_totals_only():
+def test_defra_flat_adapter_emits_one_row_per_published_factor():
+    """One FactorRow per published factor, not per CSV line: a factor's total line and
+    its per-gas lines describe ONE factor and are folded together.
+
+    This test used to assert "totals only", because the adapter kept the aggregate and
+    discarded the per-gas lines. That made every DEFRA factor vintage-locked to AR5 and
+    excluded from the platform's default AR6 run — see tests/test_factors_gwp.py, which
+    pins the resulting zero-total-called-complete defect. The per-gas lines are now
+    ingested as GAS MASSES; what is still refused is INVENTING a split where DESNZ
+    published only a total."""
     rows = parse_defra_flat_csv((SAMPLES / "defra_flat_sample.csv").read_bytes())
-    # Only the "kg CO2e" total rows — per-gas "... of CO2 ..." rows excluded.
-    assert len(rows) == 4
+    assert len(rows) == 5
     gas = next(r for r in rows if "Natural gas" in r.subcategory)
     assert gas.category == "Fuels"
     assert gas.unit == "kWh"
     assert gas.value == pytest.approx(0.18293)
-    assert gas.gwp_set == "AR5"            # DEFRA is AR5
-    assert gas.kg_co2 is None              # aggregate only, no back-solved per-gas
+    assert gas.gwp_set == "AR5"            # the AGGREGATE value is still AR5-weighted
+    assert gas.kg_co2 == pytest.approx(0.18256)   # ...and the per-gas masses are real
     assert gas.year == 2024                # parsed from the column header
     diesel = next(r for r in rows if "Diesel" in r.subcategory)
     assert diesel.unit == "L"              # 'litres' normalised
+    # DESNZ publishes no per-gas lines for diesel in this sample, so no split is
+    # invented: the row stays aggregate-only and its vintage stays visible.
+    assert (diesel.kg_co2, diesel.kg_ch4, diesel.kg_n2o) == (None, None, None)
 
 
 def test_defra_boundary_backfill_on_the_real_sample():
@@ -164,7 +175,7 @@ def test_defra_then_useeio_load_end_to_end(db):
                      source="DEFRA_DESNZ", version="2024")
     u = load_factors(db, parse_useeio_csv((SAMPLES / "useeio_sample.csv").read_bytes()),
                      source="USEEIO", version="1.3")
-    assert d["added"] == 4 and u["added"] == 3
+    assert d["added"] == 5 and u["added"] == 3
     # a spend factor is resolvable and flagged spend_based
     hit = propose_mapping(db, "spend", "541110", None, "US", gwp_set="AR6")
     assert hit and hit[0].method_type == "spend_based"

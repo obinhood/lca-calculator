@@ -185,6 +185,13 @@ class EmissionFactor(Base):
     # the calc engine applies the requested GWP set at CALCULATION time
     # (co2e = kg_co2*1 + kg_ch4*GWP(CH4) + kg_n2o*GWP(N2O)) — this is what makes
     # the AR5/AR6 switch real. When NULL, `value` is used with a gwp_set check.
+    #
+    # These three columns hold ONLY CO2, CH4 and N2O. Every other gas — the HFCs,
+    # PFCs, SF6 and NF3 that complete the Kyoto basket — lives in the
+    # `factor_gas_masses` association table below, so that adding a gas is data
+    # rather than a migration. gwp.gas_masses_for_factor() is the ONE reader that
+    # unions the two stores; no other code path may read these columns to build a
+    # CO2e figure, or the stores drift apart.
     kg_co2 = Column(Float, nullable=True)
     kg_ch4 = Column(Float, nullable=True)
     kg_n2o = Column(Float, nullable=True)
@@ -203,10 +210,75 @@ class EmissionFactor(Base):
 
     activities = relationship("ActivityRecord", back_populates="factor",
                               foreign_keys="ActivityRecord.factor_id")
+    # Per-gas masses for every gas WITHOUT a dedicated column (HFCs, PFCs, SF6, NF3).
+    # Eager-loaded: the calculation engine reads the gas map for every mapped activity,
+    # so a lazy load here is an N+1 across the whole inventory.
+    gas_masses = relationship("FactorGasMass", back_populates="factor",
+                              cascade="all, delete-orphan", lazy="selectin")
 
     @property
     def has_gas_breakdown(self) -> bool:
-        return any(v is not None for v in (self.kg_co2, self.kg_ch4, self.kg_n2o))
+        """True if this factor carries per-gas masses, so GWP applies at calc time.
+
+        Must consider the association table as well as the three columns: an SF6 or
+        refrigerant factor has NO column-backed mass at all, and reading only the
+        columns would class it as aggregate-only and vintage-check a factor that is
+        in fact vintage-free.
+        """
+        if any(v is not None for v in (self.kg_co2, self.kg_ch4, self.kg_n2o)):
+            return True
+        return bool(self.gas_masses)
+
+
+class FactorGasMass(Base):
+    """One gas's mass on one emission factor, for every gas without a column.
+
+    This is what makes all seven Kyoto-basket gas families representable. Before it
+    existed the schema had mass columns for CO2, CH4 and N2O only: SF6 and NF3 had
+    GWP values no code path could reach, and HFCs and PFCs had neither a GWP nor a
+    column — so a fugitive refrigerant leak could not be expressed at all, and any
+    installation with an F-gas had its "annual emissions" figure wrong by
+    construction.
+
+    An ASSOCIATION TABLE rather than a column per species, because:
+
+      * The AR6 halocarbon list runs to ~90 species and grows with every assessment
+        cycle. A column per gas is a migration per cycle, and a schema that can only
+        hold today's gases is wrong again at the next expansion.
+      * A nullable column cannot distinguish "never measured" from "measured and
+        zero". Here, NO ROW means the gas was not measured and a row of 0.0 means it
+        was measured and is zero — the platform's NULL-vs-empty invariant.
+      * It is queryable: "does this factor carry an F-gas?" is a predicate an ETS or
+        F-gas completeness check can run in SQL, not a JSON scan.
+
+    `gas` is the identity used by services/gwp.py — a pure species ("HFC-134a",
+    "SF6") or a shipped refrigerant blend ("R-410A"), whose GWP is composed from its
+    components at calculation time. It must NOT name a column-backed gas
+    (CO2/CH4/N2O); gwp.gas_masses_for_factor() raises if it does, rather than
+    double counting or dropping that gas.
+
+    `kg_per_unit` is kg of ACTUAL GAS per activity unit — never a CO2e figure. The
+    whole point is that the GWP set is applied at calculation time, so a stored CO2e
+    would re-freeze a vintage into the factor and make the AR5/AR6 switch cosmetic
+    again for exactly the gases where the two sets differ most.
+    """
+    __tablename__ = "factor_gas_masses"
+    __table_args__ = (
+        # One row per (factor, gas): a second row for the same gas would be summed or
+        # silently shadowed depending on read order.
+        UniqueConstraint("factor_id", "gas", name="uq_factor_gas"),
+        # A negative mass would turn a source into a sink and net a removal into the
+        # gross total — the same reasoning as ck_factor_value_nonneg on the aggregate
+        # `value`, which the per-gas path would otherwise bypass.
+        CheckConstraint("kg_per_unit >= 0", name="ck_factor_gas_mass_nonneg"),
+    )
+    id = Column(Integer, primary_key=True)
+    factor_id = Column(Integer, ForeignKey("emission_factors.id"), nullable=False,
+                       index=True)
+    gas = Column(String, nullable=False)
+    kg_per_unit = Column(Float, nullable=False)
+
+    factor = relationship("EmissionFactor", back_populates="gas_masses")
 
 
 def factor_visible_to(organisation_id: Optional[int]):
@@ -757,7 +829,12 @@ class CalculationRun(Base):
     # wide in log space as the same data yields now — comparability
     # .pedigree_comparable() blocks subtracting across that change.
     pedigree_method = Column(String, nullable=True)
-    status = Column(String)      # pending | complete
+    # pending | complete | complete_with_exclusions. "complete" means EVERY activity
+    # in scope was computed; "complete_with_exclusions" means the run succeeded but
+    # some activities landed in an exclusion bucket (unmapped / unit_errors /
+    # data_errors / gwp_mismatch), so total_co2e is a PARTIAL figure and the
+    # coverage counters below say which lines are missing and why.
+    status = Column(String)
     # frozen coverage snapshot
     total_activities = Column(Integer, default=0)
     mapped = Column(Integer, default=0)
