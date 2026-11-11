@@ -266,6 +266,11 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
     # SAME basis as the E1-6 emissions beside it — otherwise the payload implies
     # a wrong intensity (gross kWh over consolidated tCO2e).
     energy_kwh = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
+    # E1-5 is its own datapoint, so it carries its own refusal: the MWh figure is the sum
+    # of the line items the Scope 1/2 filter matched, and on a run whose scope was guessed
+    # it matched none — 0.0 MWh that E1-5 published with no way to tell it from a measured
+    # zero. Same verdict object the GRI 302 and EcoVadis energy KPIs read.
+    blockers.extend(energy_kwh["blockers"])
     renew = _renewable_contractual_mwh(db, run)
     total_mwh = energy_kwh["total_kwh"] / 1000.0
     electricity_mwh = energy_kwh["electricity"] / 1000.0
@@ -283,6 +288,13 @@ def esrs_e1_report(db: Session, organisation_id: int, run_id: Optional[int] = No
         # the share — dividing it by the consolidated electricity above mixes boundaries.
         "electricity_renewable_contractual_gross_mwh": round(renew["gross_mwh"], 6),
         "electricity_renewable_share_pct": renewable_share,
+        # E1-5 had no completeness field at all, so a 0.0 MWh total the engine could not
+        # measure was indistinguishable from an entity that consumed no own-operations
+        # energy. One shared verdict with the GRI 302 and EcoVadis energy KPIs: None means
+        # cannot_determine, never True over an empty measurement.
+        "complete": energy_kwh["complete"],
+        "determinable": energy_kwh["determinable"],
+        "carriers_omitted": energy_kwh.get("carriers_omitted"),
         "basis": "entity-share weighted (GHG Protocol Ch.3), the same basis as total_mwh "
                  "and the E1-6 emissions — so the renewable share reconciles",
         "renewable_lines_without_frozen_share": renew["lines_without_share"],
