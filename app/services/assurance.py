@@ -98,6 +98,25 @@ def readiness_assessment(db: Session, run: CalculationRun) -> dict:
                     "engagement."}
 
 
+def _verdicts(readiness) -> dict:
+    return {c["check"]: bool(c["pass"]) for c in (readiness or {}).get("checks", [])
+            if isinstance(c, dict) and "check" in c}
+
+
+def _verdict_drift(snapshot, live) -> bool:
+    """True only where a check PRESENT AT CONCLUSION now answers differently."""
+    if snapshot is None:
+        return False
+    was, now = _verdicts(snapshot), _verdicts(live)
+    return any(name in now and now[name] != verdict for name, verdict in was.items())
+
+
+def _checks_added(snapshot, live) -> list:
+    if snapshot is None:
+        return []
+    return sorted(set(_verdicts(live)) - set(_verdicts(snapshot)))
+
+
 def engagement_view(db: Session, eng: AssuranceEngagement,
                     include_owner_fields: bool = True) -> dict:
     run = db.get(CalculationRun, eng.run_id)
@@ -128,8 +147,18 @@ def engagement_view(db: Session, eng: AssuranceEngagement,
         "materiality_tco2e": round(materiality_t, 6),
         "readiness": readiness_shown,
         "readiness_is_snapshot_at_conclusion": snapshot is not None,
-        "run_changed_since_conclusion": bool(
-            snapshot is not None and snapshot.get("ready") != ready_now),
+        # Compared CHECK BY CHECK, over the checks that existed at conclusion.
+        #
+        # A run is immutable, so this field can only honestly mean "a check that was
+        # applied then reaches a different verdict now". Comparing the two `ready`
+        # booleans does not mean that: adding a check to this module flips the live
+        # verdict and the field then reports that the RUN drifted, when what changed
+        # was this code. The engagement is a filed record and that is a false claim
+        # about it.
+        "run_changed_since_conclusion": _verdict_drift(snapshot, live_readiness),
+        # A check introduced after conclusion is not drift, but it is not nothing
+        # either — the run was never assessed against it. Named rather than hidden.
+        "readiness_checks_added_since_conclusion": _checks_added(snapshot, live_readiness),
         "findings": [{
             "id": f.id, "severity": f.severity, "status": f.status,
             "description": f.description, "line_item_id": f.line_item_id,

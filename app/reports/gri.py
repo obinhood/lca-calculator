@@ -26,6 +26,7 @@ from ..services.boundary import boundary_completeness, boundary_comparable
 from ..services.residual_mix import (
     scope2_residual_mix_completeness, residual_mix_comparable,
 )
+from ..services.instruments import over_declaration_gate
 from ..services.comparability import (
     PERIOD_TOLERANCE_PCT, period_comparable, period_payload, period_info,
     denominator_period_comparable, cross_run_gates,
@@ -78,6 +79,10 @@ def gri_report(db: Session, organisation_id: int, run_id: Optional[int] = None,
     # GRI 305-3 discloses Scope 3 by category — screen all 15.
     blockers.extend(scope3_completeness(db, run).get("blockers", []))
     blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
+    # Declared contractual VOLUME, beside the residual-mix treatment: one gate
+    # answers how uncovered load was priced, the other whether the covered load
+    # was ever consumed. A market-based figure needs both to be publishable.
+    blockers.extend(over_declaration_gate(db, run).get("blockers", []))
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
 
     by_scope = {row["scope"]: row["co2e"] for row in s["by_scope"]}

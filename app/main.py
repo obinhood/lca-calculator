@@ -137,28 +137,6 @@ def _reject_narrative_query_params(request: Request, *names: str) -> None:
             moved_parameters=sent, remedy="send these keys in the JSON request body")
 
 
-def _instrument_submission_hash(organisation_id: int, instrument_type: str,
-                                kg_co2e_per_kwh: float, coverage_kwh, gwp_set: str,
-                                market, start_date, end_date) -> str:
-    """Stable content hash identifying ONE market-instrument submission.
-
-    Over the normalised values actually stored, so a resubmission differing only in the
-    whitespace or case of a market code is still recognised as the same certificate.
-
-    `description` is deliberately EXCLUDED. It is prose attached to the certificate, not
-    part of its substance, and including it would let a retry with a corrected typo
-    create a second instrument and double the declared coverage — the exact failure this
-    hash exists to prevent. The safe direction of error here is refusing a genuine
-    second certificate, not accepting a duplicate of the first.
-    """
-    blob = _json.dumps(
-        ["mi-v1", organisation_id, instrument_type, repr(float(kg_co2e_per_kwh)),
-         None if coverage_kwh is None else repr(float(coverage_kwh)),
-         gwp_set, market, start_date, end_date],
-        separators=(",", ":"), default=str)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
 def _page_args(limit=None, offset=None):
     """Normalise and validate a collection window, as a 400 on refusal.
 
@@ -922,13 +900,18 @@ def create_market_instrument(request: Request, instrument_type: str = Query(...)
     # passed. There is no serial-number field on this model, so the system cannot tell
     # two identical certificates apart from one sent twice; it refuses, and says how to
     # declare a genuinely separate one.
+    from .services.instruments import find_duplicate, submission_hash as _sub_hash
     market_norm = market.strip() if market else None
-    submission_hash = _instrument_submission_hash(
-        org.id, instrument_type, kg_co2e_per_kwh, coverage_kwh, gwp_set,
-        market_norm, start_date, end_date)
-    clash = db.query(MarketInstrument).filter(
-        MarketInstrument.organisation_id == org.id,
-        MarketInstrument.submission_hash == submission_hash).first()
+    fields = dict(instrument_type=instrument_type, kg_co2e_per_kwh=kg_co2e_per_kwh,
+                  coverage_kwh=coverage_kwh, gwp_set=gwp_set, market=market_norm,
+                  start_date=start_date, end_date=end_date)
+    submission_hash = _sub_hash(org.id, **fields)
+    # Matched on the FIELDS, not on the stored hash. A row written before the hash
+    # column existed carries NULL and a hash lookup cannot see it, so the check would
+    # have protected only instruments created after the migration while every one
+    # already in the database stayed freely duplicable. The hash's unique index still
+    # closes the race a query cannot.
+    clash = find_duplicate(db, MarketInstrument, org.id, **fields)
     if clash is not None:
         # Names the instrument it duplicates: "no" alone leaves the caller unable to tell
         # a replay apart from a genuine second certificate.
@@ -3812,7 +3795,7 @@ def get_iso_14064_2_report(request: Request, baseline_run_id: Optional[int] = No
 
 
 @app.post("/reports/iso_14064_2")
-def post_iso_14064_2_report(baseline_run_id: Optional[int] = None,
+def post_iso_14064_2_report(request: Request, baseline_run_id: Optional[int] = None,
                             project_run_id: Optional[int] = None,
                             leakage_tco2e: Optional[float] = None,
                             body: Optional[Iso140642Body] = None,
@@ -3823,7 +3806,12 @@ def post_iso_14064_2_report(baseline_run_id: Optional[int] = None,
     A POST that reads rather than writes, because the alternative was logging a baseline
     justification in a URL. The payload is byte-for-byte what the GET returns for the
     same inputs — one renderer serves both.
+
+    The guard applies HERE TOO. Sending the narrative in this endpoint's query string
+    put it straight back in the access log, and reading only the body meant the report
+    was filed with the justification absent and a 200 saying it went fine.
     """
+    _reject_narrative_query_params(request, "baseline_justification", "project_name")
     return JSONResponse(_iso_14064_2_payload(
         db, org.id, baseline_run_id=baseline_run_id, project_run_id=project_run_id,
         leakage_tco2e=leakage_tco2e,
@@ -3891,11 +3879,17 @@ def get_sb253_report(request: Request, run_id: Optional[int] = None,
 
 
 @app.post("/reports/sb253")
-def post_sb253_report(run_id: Optional[int] = None, assurance_level: str = "none",
+def post_sb253_report(request: Request, run_id: Optional[int] = None,
+                      assurance_level: str = "none",
                       body: Optional[Sb253Body] = None,
                       org: Organisation = Depends(current_org),
                       db: Session = Depends(get_db)):
-    """The same report as GET /reports/sb253, with the assuror named in the body."""
+    """The same report as GET /reports/sb253, with the assuror named in the body.
+
+    Guarded like the GET: a provider sent in this endpoint's query string was logged AND
+    dropped from the filing, which is the worse half of the defect, not the better one.
+    """
+    _reject_narrative_query_params(request, "assurance_provider")
     return JSONResponse(with_guidance(sb253_report(
         db, org.id, run_id=run_id, assurance_level=assurance_level,
         assurance_provider=(body.assurance_provider if body else None))))

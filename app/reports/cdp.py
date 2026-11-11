@@ -19,6 +19,7 @@ from .scope3 import category_tco2e
 from ..services.ghgp import scope3_completeness
 from ..services.boundary import boundary_completeness
 from ..services.residual_mix import scope2_residual_mix_completeness
+from ..services.instruments import over_declaration_gate
 
 
 def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
@@ -59,6 +60,10 @@ def cdp_export(db: Session, organisation_id: int, run_id: Optional[int] = None,
     # CDP C6.5 IS the 15-category Scope 3 grid — screen all 15.
     blockers.extend(scope3_completeness(db, run).get("blockers", []))
     blockers.extend(scope2_residual_mix_completeness(db, run).get("blockers", []))
+    # Declared contractual VOLUME, beside the residual-mix treatment: one gate
+    # answers how uncovered load was priced, the other whether the covered load
+    # was ever consumed. A market-based figure needs both to be publishable.
+    blockers.extend(over_declaration_gate(db, run).get("blockers", []))
     blockers.extend(boundary_completeness(db, run).get("blockers", []))
     _financed_tco2e = (run.financed_co2e or 0.0) / 1000.0
 

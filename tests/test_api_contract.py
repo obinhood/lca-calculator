@@ -736,3 +736,218 @@ def test_the_pact_host_still_gets_a_flat_spec_message(env):
     r = client.get("/3/footprints", headers={"Authorization": "Bearer nope"})
     assert set(r.json()) == {"code", "message"}
     assert isinstance(r.json()["message"], str)
+
+
+# =============================================================================
+# 5. The follow-up review: five ways the market-instrument work did not hold
+#
+# Each of these reproduced before it was fixed. They share one shape — a rule that
+# existed but did not reach far enough — and four of the five let the ORIGINAL defect
+# back in by another route: a double-counted certificate driving market-based Scope 2
+# toward zero.
+# =============================================================================
+
+def test_a_case_varied_market_is_the_same_certificate(env):
+    """The allocator compares markets as .strip().upper(), so "GB" and "gb" are ONE
+    market when coverage is allocated. Identity has to agree, or the two are separate
+    certificates going in and one coming out — each declaring the full volume."""
+    client, db = env
+    _org(db)
+    first = client.post("/market_instruments", headers=HDR,
+                        params=_instrument_params(market="GB"))
+    assert first.status_code == 200
+    for variant in ("gb", " GB ", "Gb"):
+        r = client.post("/market_instruments", headers=HDR,
+                        params=_instrument_params(market=variant))
+        assert r.status_code == 409, f"{variant!r} registered a second certificate"
+    assert db.query(MarketInstrument).count() == 1
+
+
+def test_an_instrument_written_before_the_column_existed_is_still_protected(env):
+    """A hash lookup cannot see a NULL hash, so matching on the stored hash would have
+    protected only rows created after the migration while every instrument a customer
+    already held stayed freely duplicable."""
+    client, db = env
+    _org(db)
+    client.post("/market_instruments", headers=HDR, params=_instrument_params())
+    legacy = db.query(MarketInstrument).one()
+    legacy.submission_hash = None          # exactly what a pre-migration row looks like
+    db.commit()
+
+    replay = client.post("/market_instruments", headers=HDR, params=_instrument_params())
+    assert replay.status_code == 409, "a pre-existing instrument was duplicable"
+    assert db.query(MarketInstrument).count() == 1
+
+
+def _dated_rec(db, org_id, coverage, start, end):
+    i = MarketInstrument(organisation_id=org_id, instrument_type="rec",
+                         kg_co2e_per_kwh=0.0, coverage_kwh=coverage, gwp_set="AR6",
+                         market="GB", start_date=start, end_date=end)
+    db.add(i); db.commit(); db.refresh(i)
+    return i
+
+
+def test_a_declaration_is_measured_against_the_load_it_can_reach(env):
+    """A REC dated to January declaring the whole year sits inside the annual total and
+    over-declares its month many times over. Comparing with TOTAL load alone misses it."""
+    _client, db = env
+    org = _org(db)
+    f = _factor(db)
+    _act(db, org.id, factor_id=f.id, quantity=100.0, status="approved")   # January
+    jan = db.query(ActivityRecord).one()
+    jan.date = "2025-01-15"
+    feb = ActivityRecord(organisation_id=org.id, date="2025-02-15", category="electricity",
+                         subcategory="", description="", quantity=900.0, unit="kWh",
+                         geo="GB", factor_id=f.id, mapping_status="approved")
+    db.add(feb); db.commit()
+    _dated_rec(db, org.id, coverage=1000.0, start="2025-01-01", end="2025-01-31")
+
+    run = compute_co2e(db, org.id)
+    cov = _statement(db, run)
+    assert cov["declared_contractual_kwh"] == 1000.0
+    assert cov["load_kwh"] == 1000.0, "within the annual total, which is why this hid"
+    assert cov["over_declared"] is True
+    per = {p["instrument_id"]: p for p in cov["per_instrument"]}
+    only = next(iter(per.values()))
+    assert only["eligible_load_kwh"] == 100.0
+    assert only["over_declared_kwh"] == 900.0
+
+
+# --- the gate has to reach what is PUBLISHED, not only what is assured -------
+
+_RENDERERS = ("sb253_report", "esrs_e1_report", "issb_s2_report",
+              "cdp_export", "secr_report", "gri_report")
+
+
+def _render_all(db, org_id, run):
+    from app.reports.cdp import cdp_export
+    from app.reports.esrs_e1 import esrs_e1_report
+    from app.reports.gri import gri_report
+    from app.reports.issb_s2 import issb_s2_report
+    from app.reports.sb253 import sb253_report
+    from app.reports.secr import secr_report
+    out = {}
+    for name, fn in (("sb253_report", sb253_report), ("esrs_e1_report", esrs_e1_report),
+                     ("issb_s2_report", issb_s2_report), ("cdp_export", cdp_export),
+                     ("secr_report", secr_report), ("gri_report", gri_report)):
+        out[name] = fn(db, org_id, run_id=run.id)
+    return out
+
+
+def _over_declaration_blockers(report):
+    return [b for b in report.get("blockers", []) if "OVER-DECLARED" in str(b)]
+
+
+def test_every_published_scope2_verdict_blocks_an_over_declared_run(env):
+    """The gate had ONE caller — the assurance checklist — so a run declaring twice the
+    volume it consumed, and publishing a market-based Scope 2 of zero on that basis,
+    passed all six disclosure renderers. The defect was reachable by not asking for
+    assurance."""
+    _client, db = env
+    org = _org(db)
+    f = _factor(db)
+    _act(db, org.id, factor_id=f.id, quantity=1000.0, status="approved")
+    _rec(db, org.id, coverage=1000.0)
+    _rec(db, org.id, coverage=1000.0)          # the double submission
+    run = compute_co2e(db, org.id)
+    assert _statement(db, run)["over_declared"] is True
+    assert run.total_co2e_market == 0.0, "the figure the claim rests on"
+
+    for name, report in _render_all(db, org.id, run).items():
+        assert _over_declaration_blockers(report), f"{name} published it anyway"
+
+
+def test_an_honest_full_coverage_claim_still_publishes(env):
+    """The discrimination that matters: one REC covering exactly the load is a genuine
+    100%-renewable claim and a market-based zero. It must not be caught."""
+    _client, db = env
+    org = _org(db)
+    f = _factor(db)
+    _act(db, org.id, factor_id=f.id, quantity=1000.0, status="approved")
+    _rec(db, org.id, coverage=1000.0)
+    run = compute_co2e(db, org.id)
+    assert _statement(db, run)["over_declared"] is False
+    assert run.total_co2e_market == 0.0
+
+    for name, report in _render_all(db, org.id, run).items():
+        assert not _over_declaration_blockers(report), f"{name} blocked an honest claim"
+
+
+def test_a_run_frozen_before_the_comparison_is_warned_not_blocked(env):
+    """Re-evaluating a filed run at render time would retroactively invalidate a filing
+    that was correct when made — the cliff scope2_residual_mix_completeness refuses.
+    Assurance readiness is stricter on purpose; a published disclosure is not."""
+    from app.services.instruments import over_declaration_gate
+    _client, db = env
+    org = _org(db)
+    f = _factor(db)
+    _act(db, org.id, factor_id=f.id, quantity=1000.0, status="approved")
+    _rec(db, org.id, coverage=5000.0)
+    run = compute_co2e(db, org.id)
+    run.scope2_coverage_statement = None       # a run frozen before this existed
+    db.commit()
+
+    gate = over_declaration_gate(db, run)
+    assert gate["legacy"] is True
+    assert gate["blockers"] == [], "history must not be retroactively invalidated"
+    assert gate["warnings"], "but the absence has to be stated, not hidden"
+    for name, report in _render_all(db, org.id, run).items():
+        assert not _over_declaration_blockers(report), f"{name} blocked a legacy run"
+
+
+# --- my own POST forms dropped the narrative they were added to protect -----
+
+@pytest.mark.parametrize("path,param", [
+    ("/reports/sb253", "assurance_provider"),
+    ("/reports/iso_14064_2", "baseline_justification"),
+])
+def test_the_post_report_forms_refuse_a_query_narrative_too(env, path, param):
+    """These endpoints exist BECAUSE a GET cannot carry a body. Reading only the body
+    meant a provider sent in the query was logged AND dropped from the filing — the
+    worse half of the defect, inside the fix for it."""
+    client, db = env
+    _org(db)
+    r = client.post(path, headers=HDR, params={param: "in the URL"})
+    assert r.status_code == 400
+    assert param in r.json()["detail"]
+    assert param in r.json()["error"]["context"]["moved_parameters"]
+
+
+# --- a check added later is not evidence that an immutable run changed ------
+
+def test_a_check_added_after_conclusion_is_not_run_drift(env):
+    """`run_changed_since_conclusion` is a claim about an IMMUTABLE run. Comparing the
+    two `ready` booleans made it true whenever this module gained a check — reporting
+    that the run drifted when what changed was the code."""
+    from app.models import AssuranceEngagement
+    from app.services.assurance import engagement_view
+    from app.services.calc import _utcnow_iso
+    _client, db = env
+    org = _org(db)
+    f = _factor(db)
+    _act(db, org.id, factor_id=f.id, quantity=1000.0, status="approved")
+    _rec(db, org.id, coverage=9000.0)          # fails the NEW check only
+    run = compute_co2e(db, org.id)
+
+    # Concluded before the check existed: its snapshot cannot contain that verdict.
+    snapshot = {"ready": True, "checks": [
+        {"check": "completeness", "pass": True},
+        {"check": "traceability", "pass": True}]}
+    eng = AssuranceEngagement(
+        organisation_id=org.id, run_id=run.id, standard="ISO_14064_3", level="limited",
+        status="concluded", opinion="unqualified", materiality_pct=5.0,
+        created_at=_utcnow_iso(), concluded_at=_utcnow_iso(),
+        readiness_snapshot=_json_dumps(snapshot))
+    db.add(eng); db.commit(); db.refresh(eng)
+
+    view = engagement_view(db, eng)
+    assert view["run_changed_since_conclusion"] is False, \
+        "the run is immutable; only this module changed"
+    # Not hidden either — the run was never assessed against the new check.
+    assert "scope2_declared_coverage_within_load" in \
+        view["readiness_checks_added_since_conclusion"]
+
+
+def _json_dumps(o):
+    import json
+    return json.dumps(o)

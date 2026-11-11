@@ -266,6 +266,12 @@ class _InstrumentPool:
         # claim over this inventory and is exactly what a duplicate submission looks like.
         self.load_kwh = 0.0
         self.applicable_ids = set()
+        # Per instrument, the load it was ELIGIBLE for — the only load its declaration
+        # could ever be matched against. Comparing a declaration with the run's TOTAL
+        # load hides the common case: a REC dated to one month, declaring the whole
+        # year's volume, is within the annual total and over-declares its month many
+        # times over.
+        self.eligible_kwh = {}
         self.skipped_vintage = sorted({
             i.id for i in self.instruments
             if i.gwp_set and run_gwp_set and i.gwp_set != run_gwp_set})
@@ -324,23 +330,52 @@ class _InstrumentPool:
                              if i.coverage_kwh is not None), 6)
         load = round(self.load_kwh, 6)
         determinable = not unbounded
-        over = (declared > load) if determinable else None
+
+        # Per instrument, against the load IT could reach. An instrument dated or
+        # market-scoped to part of the inventory can sit inside the annual total while
+        # claiming many times the consumption it is actually matched to.
+        per_instrument = []
+        excess_eligible = 0.0
+        for i in contractual:
+            eligible = round(self.eligible_kwh.get(i.id, 0.0), 6)
+            if i.coverage_kwh is None:
+                per_instrument.append({"instrument_id": i.id, "declared_kwh": None,
+                                       "eligible_load_kwh": eligible,
+                                       "over_declared_kwh": None})
+                continue
+            over_i = round(max(0.0, i.coverage_kwh - eligible), 6)
+            excess_eligible += over_i
+            per_instrument.append({"instrument_id": i.id,
+                                   "declared_kwh": round(i.coverage_kwh, 6),
+                                   "eligible_load_kwh": eligible,
+                                   "over_declared_kwh": over_i})
+        excess_eligible = round(excess_eligible, 6)
+
+        # Either test failing is an over-declaration: the aggregate catches duplicates
+        # of one certificate, the per-instrument test catches a declaration aimed at
+        # load it can never cover.
+        over_total = declared > load
+        over = (over_total or excess_eligible > 0) if determinable else None
         return {
             "load_kwh": load,
             "declared_contractual_kwh": declared,
             "contractual_instruments": sorted(i.id for i in contractual),
             "unbounded_contractual_instruments": unbounded,
+            "per_instrument": per_instrument,
             "determinable": determinable,
             "over_declared": over,
-            "over_declared_kwh": (round(declared - load, 6) if over else
-                                  (0.0 if determinable else None)),
+            "over_declared_kwh": (round(max(declared - load, excess_eligible), 6) if over
+                                  else (0.0 if determinable else None)),
             "reason": (
                 "a contractual instrument declares no coverage_kwh, so the volume "
                 "claimed over this inventory is unbounded and cannot be compared with "
                 "the load consumed" if not determinable
                 else "declared contractual coverage exceeds the electricity load it was "
                      "offered against — more certificate volume is claimed than was "
-                     "consumed" if over
+                     "consumed" if over_total
+                else "a contractual instrument declares more volume than the load it is "
+                     "eligible for — its dates or market confine it to less consumption "
+                     "than it claims" if over
                 else "declared contractual coverage is within the load consumed"),
         }
 
@@ -368,6 +403,7 @@ class _InstrumentPool:
         for _inst in self.instruments:
             if self._applies(_inst, activity_date, activity_market):
                 self.applicable_ids.add(_inst.id)
+                self.eligible_kwh[_inst.id] = self.eligible_kwh.get(_inst.id, 0.0) + kwh
         # Instruments excluded because their DECLARED market differs from this
         # consumption's grid — computed pool-wide (like skipped_vintage) so the audit
         # signal is complete and id-order-independent, not dependent on whether the
