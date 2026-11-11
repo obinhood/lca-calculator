@@ -175,11 +175,171 @@ def _page_args(limit=None, offset=None):
     return limit, offset
 
 
-def current_org(x_api_key: Optional[str] = Header(None),
+_WRITE_METHODS = frozenset(("POST", "PUT", "PATCH", "DELETE"))
+
+
+def _token_expired(expires_at: Optional[str]) -> bool:
+    """True if this expiry has passed — or cannot be read at all. FAILS CLOSED.
+
+    `services/pact_host.py:159` compares expiry strings directly and is correct to,
+    because the same `_iso()` helper writes both sides there. Here the value can also
+    reach the row from a fixture, a migration or an operator, so it is parsed instead:
+    `services.calc._parse_iso_date` records why this codebase does not compare ISO
+    strings casually — "string comparison of dates is only valid for zero-padded
+    YYYY-MM-DD, which nothing upstream guarantees".
+
+    An UNPARSEABLE expiry counts as expired. A credential whose lifetime cannot be
+    determined is the case this platform refuses rather than waves through, and the
+    opposite choice would make a malformed timestamp a token that never expires — the
+    defect this table exists to remove.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    if not expires_at:
+        return True
+    try:
+        exp = _dt.fromisoformat(expires_at.strip().replace("Z", "+00:00"))
+    except (AttributeError, ValueError, TypeError):
+        return True
+    if exp.tzinfo is None:                      # a naive stamp is read as UTC, not local
+        exp = exp.replace(tzinfo=_tz.utc)
+    return exp <= _dt.now(_tz.utc)
+
+
+class Principal:
+    """WHO is making this request, not merely which tenant it belongs to.
+
+    One credential header, `X-API-Key`, now carries either of two things:
+
+      * the ORGANISATION key (`organisations.api_key_hash`) — the only credential that
+        existed before, kept working exactly as it was and treated as the tenant acting
+        on its own behalf, with full scope. Every existing client keeps working.
+      * an API TOKEN (`api_tokens.token_hash`) — scoped, expiring and revocable, and
+        optionally attached to a named `User`.
+
+    Resolving the token kind first and the org key second matters: the token table is the
+    one with an expiry and a revocation, so a credential that appears in both is treated
+    as the narrower one.
+    """
+
+    __slots__ = ("org", "user", "scopes", "source", "token_id")
+
+    def __init__(self, org, user, scopes, source, token_id=None):
+        self.org, self.user, self.scopes = org, user, scopes
+        self.source, self.token_id = source, token_id
+
+    @property
+    def may_write(self) -> bool:
+        """An AUDITOR never writes, whatever scope the token claims.
+
+        Role and scope are deliberately both consulted, and the role wins. A token is a
+        credential the tenant hands out and can get wrong; the role is what the tenant
+        said the person IS. If an admin issues a `write` token to an auditor account by
+        mistake, the mistake should not become write access to a filed inventory.
+        """
+        if self.user is not None and self.user.role == "auditor":
+            return False
+        return self.scopes in ("write", "admin")
+
+    @property
+    def may_administer(self) -> bool:
+        """Manage users and tokens. Needs BOTH an admin scope and an owner/admin role."""
+        if self.user is not None and self.user.role not in ("owner", "admin"):
+            return False
+        return self.scopes == "admin"
+
+    @property
+    def actor(self) -> str:
+        """How this principal should appear in an audit trail."""
+        if self.user is not None:
+            return f"user:{self.user.email}"
+        if self.source == "token":
+            return f"token:{self.token_id}"
+        return "org_key"
+
+
+def _resolve_principal(x_api_key: Optional[str], db: Session) -> Principal:
+    """The ONE place a credential becomes a principal. See `current_org`."""
+    from .models import ApiToken, User as _User
+
+    if not x_api_key:
+        raise HTTPException(status_code=401,
+                            detail="missing API key — send it in the X-API-Key header")
+    hashed = _hash_key(x_api_key)
+
+    tok = db.query(ApiToken).filter(ApiToken.token_hash == hashed).first()
+    if tok is not None:
+        # Revoked and expired are both 401 and both say which, because a client that
+        # cannot tell them apart cannot tell "ask for a new token" from "you were cut
+        # off". Neither message reveals anything the holder of the token did not have.
+        if tok.revoked_at:
+            raise HTTPException(status_code=401, detail="this API token was revoked")
+        if _token_expired(tok.expires_at):
+            raise HTTPException(
+                status_code=401,
+                detail=f"this API token expired at {tok.expires_at} — request a new one")
+        org = db.get(Organisation, tok.organisation_id)
+        if org is None or org.api_key_revoked:
+            raise HTTPException(status_code=401,
+                                detail="the organisation this token belongs to is revoked")
+        user = db.get(_User, tok.user_id) if tok.user_id else None
+        # A suspended user's tokens stop working. This is the LEAVER path: suspend the
+        # person, and every credential they hold dies with the account, without rotating
+        # the tenant's own key for everybody else.
+        if user is not None and user.status != "active":
+            raise HTTPException(status_code=401,
+                                detail="the user this token belongs to is suspended")
+        _bind_tenant(org.id)
+        return Principal(org, user, tok.scopes, "token", tok.id)
+
+    org = db.query(Organisation).filter(
+        Organisation.api_key_hash == hashed).first()
+    if org is None or org.api_key_revoked:
+        raise HTTPException(status_code=401, detail="invalid or revoked API key")
+    _bind_tenant(org.id)
+    # The organisation key is the tenant acting as itself: full scope, no named user.
+    # It is NOT deprecated — it is how a tenant bootstraps its first admin user, and how
+    # a machine integration that predates tokens keeps working.
+    return Principal(org, None, "admin", "org_key")
+
+
+def current_principal(request: Request,
+                      x_api_key: Optional[str] = Header(None),
+                      db: Session = Depends(get_db)) -> Principal:
+    """The principal behind this request, with write access enforced centrally.
+
+    ENFORCEMENT LIVES HERE, ON PURPOSE, and this is the whole reason the change is small.
+    `current_org` is already the dependency on 114 of this application's routes, so
+    deciding write access from the REQUEST METHOD at this one point covers every one of
+    them — including routes written after this, which depend on it without being told to.
+    The alternative, a `require_write` added to each handler, is 114 edits and a 115th
+    route that forgets. Same doctrine as `models.factor_visible_to()`: one definition,
+    every path.
+
+    A read-only principal reaching a write method is 403, not 401: the credential worked,
+    and it is the action that was refused. A client must be able to tell "sign in again"
+    from "you may not do this".
+    """
+    principal = _resolve_principal(x_api_key, db)
+    if request.method in _WRITE_METHODS and not principal.may_write:
+        raise HTTPException(
+            status_code=403,
+            detail=(f"this credential is read-only (scope '{principal.scopes}'"
+                    + (f", role '{principal.user.role}'" if principal.user else "")
+                    + f") — {request.method} requires write access"))
+    return principal
+
+
+def current_org(request: Request,
+                x_api_key: Optional[str] = Header(None),
                 db: Session = Depends(get_db)) -> Organisation:
-    """Resolve the calling organisation from its API key — the ONLY way any
-    org-scoped endpoint identifies a tenant (org names are not credentials).
-    A revoked key is rejected even though its hash still matches.
+    """Resolve the calling organisation — the ONLY way any org-scoped endpoint
+    identifies a tenant (org names are not credentials). A revoked key is rejected even
+    though its hash still matches.
+
+    Now a thin wrapper over `current_principal`, so the 114 routes that depend on it gain
+    token authentication and read-only enforcement without being edited. It still returns
+    an `Organisation`, so no handler's body changes. A handler that needs to know WHO
+    acted — to attribute an audit event, say — depends on `current_principal` instead.
 
     A MISSING key is 401, not 422. Declared as `Header(...)` it was request-validation's
     problem, so omitting the header entirely produced a 422 with an array-shaped body
@@ -187,16 +347,20 @@ def current_org(x_api_key: Optional[str] = Header(None),
     reported two different ways. A client could not write one branch for "your
     credential did not work".
     """
-    if not x_api_key:
-        raise HTTPException(status_code=401,
-                            detail="missing API key — send it in the X-API-Key header")
-    org = db.query(Organisation).filter(
-        Organisation.api_key_hash == _hash_key(x_api_key)).first()
-    if org is None or org.api_key_revoked:
-        raise HTTPException(status_code=401, detail="invalid or revoked API key")
-    # Attribute every log line for this request to the tenant it authenticated as.
-    _bind_tenant(org.id)
-    return org
+    return current_principal(request, x_api_key, db).org
+
+
+def require_tenant_admin(principal: Principal = Depends(current_principal)) -> Principal:
+    """For managing users and tokens: an owner or admin, not merely a write credential.
+
+    Distinct from `require_admin`, which is the PLATFORM operator's credential for global
+    reference data. This one is about authority inside one tenant.
+    """
+    if not principal.may_administer:
+        raise HTTPException(
+            status_code=403,
+            detail="managing users and tokens requires an owner or admin credential")
+    return principal
 
 
 # --- ONE error envelope, for every error this API returns --------------------
@@ -575,6 +739,198 @@ def revoke_api_key(confirm_org_name: str = Query(...),
     db.commit()
     return {"id": org.id, "revoked": True,
             "note": "Key disabled. Contact an administrator to re-enable access."}
+
+
+# --- Users and tokens: the joiner-mover-leaver surface -----------------------
+#
+# Before these, the tenant's whole identity was one shared key. There was no way to give
+# a person their own credential, no way to take one away without rotating everybody's,
+# and no way to let an auditor read a filed run short of handing over the write key.
+#
+# `users.email` and `users.name` are the only columns in this schema that identify a
+# person BY DESIGN rather than incidentally through free text, so both are reachable in
+# the tenant export (GDPR Art. 15 and Art. 20) and neither travels in a query string —
+# see `_reject_narrative_query_params` for why that distinction is enforced.
+
+_ROLES = ("owner", "admin", "member", "auditor")
+_SCOPES = ("read", "write", "admin")
+# A token has to expire. The ceiling is a year because an unbounded credential is the
+# defect being fixed; the floor is a day so an operator cannot mint something already
+# dead and be puzzled by the 401.
+_MAX_TOKEN_DAYS = 365
+
+
+@app.post("/users")
+def create_user(email: str = Query(..., max_length=320),
+                role: str = Query("member"),
+                name: Optional[str] = Query(None, max_length=200),
+                principal: "Principal" = Depends(require_tenant_admin),
+                db: Session = Depends(get_db)):
+    """Add a named person to the calling organisation.
+
+    The FIRST user is created with the organisation key, which is how a tenant
+    bootstraps: the org key is a full-scope principal, so it can mint an owner and then
+    never be used again. The org key is deliberately not disabled by doing so — a machine
+    integration that predates tokens keeps working, and a tenant that locks itself out of
+    its own key has no recovery path.
+    """
+    from .models import User as _User
+    from .services.calc import _utcnow_iso
+    if role not in _ROLES:
+        raise HTTPException(status_code=400,
+                            detail=f"role must be one of {', '.join(_ROLES)}")
+    email = email.strip().lower()
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise HTTPException(status_code=400, detail="email is not an address")
+    if db.query(_User).filter(_User.organisation_id == principal.org.id,
+                              _User.email == email).first():
+        raise HTTPException(status_code=409,
+                            detail=f"{email} is already a user of this organisation")
+    u = _User(organisation_id=principal.org.id, email=email, name=name, role=role,
+              status="active", created_at=_utcnow_iso())
+    db.add(u); db.commit(); db.refresh(u)
+    return {"id": u.id, "email": u.email, "name": u.name, "role": u.role,
+            "status": u.status, "created_at": u.created_at,
+            "note": "A user cannot authenticate until a token is issued to them."}
+
+
+@app.post("/users/{user_id}/status")
+def set_user_status(user_id: int, status: str = Query(...),
+                    principal: "Principal" = Depends(require_tenant_admin),
+                    db: Session = Depends(get_db)):
+    """The LEAVER path, and the mover path back.
+
+    Suspension is deliberately not a delete. A departed preparer's name must stay
+    attached to the decisions they made, or the audit trail this platform exists to
+    produce loses its actor — the same reason `revoked_at` on a token is recorded rather
+    than the row removed.
+
+    Suspending a user kills every credential they hold, immediately: `_resolve_principal`
+    refuses a token whose user is not active. That is the window revocation exists to
+    close, and `services/pact_host.py` records the same lesson — a bearer token already
+    issued would otherwise stay valid until it expired.
+    """
+    from .models import User as _User
+    from .services.calc import _utcnow_iso
+    if status not in ("active", "suspended"):
+        raise HTTPException(status_code=400, detail="status must be active or suspended")
+    u = db.query(_User).filter(_User.id == user_id,
+                               _User.organisation_id == principal.org.id).first()
+    # 404 rather than 403 for another tenant's user id, so the response cannot be used as
+    # an existence oracle over the table — same shape as the factor override route.
+    if u is None:
+        raise HTTPException(status_code=404, detail="no such user")
+    if u.role == "owner" and status == "suspended":
+        others = db.query(_User).filter(
+            _User.organisation_id == principal.org.id, _User.role == "owner",
+            _User.status == "active", _User.id != u.id).count()
+        if not others:
+            raise HTTPException(
+                status_code=409,
+                detail=("this is the last active owner — promote another owner first, "
+                        "or the organisation would have nobody who can manage access"))
+    from .models import ApiToken as _Tok
+    u.status = status
+    u.suspended_at = _utcnow_iso() if status == "suspended" else None
+    db.commit()
+    live = (db.query(_Tok).filter(_Tok.user_id == u.id,
+                                  _Tok.revoked_at.is_(None)).count()
+            if status == "suspended" else 0)
+    return {"id": u.id, "email": u.email, "status": u.status,
+            "suspended_at": u.suspended_at,
+            "tokens_disabled": live,
+            "note": ("Every token held by a suspended user stops working immediately; "
+                     "the rows are kept so the audit trail can still name the actor."
+                     if status == "suspended" else "Access restored.")}
+
+
+@app.post("/tokens")
+def issue_token(label: str = Query(..., max_length=200),
+                expires_in_days: int = Query(30, ge=1, le=_MAX_TOKEN_DAYS),
+                scopes: str = Query("read"),
+                user_id: Optional[int] = Query(None),
+                principal: "Principal" = Depends(require_tenant_admin),
+                db: Session = Depends(get_db)):
+    """Mint a scoped, expiring credential. The secret is returned ONCE.
+
+    THIS IS THE FIX FOR ASSUROR ACCESS. `assurance_engagements.access_token_hash` is a
+    bare hash with no expiry, no revocation and no scope, so in practice the only way to
+    let an auditor read a filed run was to hand over the tenant's write key. A token with
+    `scopes=read` and `user_id` pointing at an `auditor` user — or at nobody, for a firm
+    rather than a person — replaces that, and can be revoked without disturbing anyone
+    else's access.
+
+    `expires_in_days` has no "never" value on purpose. The schema column is NOT NULL and
+    carries no sentinel, so an unexpiring credential cannot be expressed at all.
+    """
+    from .models import ApiToken, User as _User
+    from .services.calc import _utcnow_iso
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    if scopes not in _SCOPES:
+        raise HTTPException(status_code=400,
+                            detail=f"scopes must be one of {', '.join(_SCOPES)}")
+    user = None
+    if user_id is not None:
+        user = db.query(_User).filter(_User.id == user_id,
+                                      _User.organisation_id == principal.org.id).first()
+        if user is None:
+            raise HTTPException(status_code=404, detail="no such user")
+        if user.status != "active":
+            raise HTTPException(status_code=409,
+                                detail="cannot issue a token to a suspended user")
+        # Refused rather than silently downgraded. A caller who asked for write access on
+        # an auditor account has misunderstood something, and `Principal.may_write` would
+        # deny it at request time anyway — better to say so when the token is minted than
+        # to hand over a credential that does less than its scope claims.
+        if user.role == "auditor" and scopes != "read":
+            raise HTTPException(
+                status_code=409,
+                detail=("an auditor account is read-only, so a write or admin token "
+                        "would not work — issue scopes=read, or change the role"))
+    secret = secrets.token_urlsafe(32)
+    expires = (_dt.now(_tz.utc) + _td(days=expires_in_days)).isoformat()
+    tok = ApiToken(organisation_id=principal.org.id, user_id=user.id if user else None,
+                   label=label, token_hash=_hash_key(secret), scopes=scopes,
+                   expires_at=expires, created_at=_utcnow_iso())
+    db.add(tok); db.commit(); db.refresh(tok)
+    return {"id": tok.id, "api_key": secret, "label": tok.label, "scopes": tok.scopes,
+            "expires_at": tok.expires_at,
+            "user": {"id": user.id, "email": user.email, "role": user.role} if user else None,
+            "note": ("Store this key now; only its hash is kept and it is not "
+                     "retrievable later. Send it in the X-API-Key header.")}
+
+
+# GET /users and GET /tokens are NOT written here. They are registered from the
+# `_register_list_endpoints` table below, which applies the organisation filter centrally
+# and puts every row through `lifecycle.safe_row` — so `token_hash` is stripped by the
+# same one set of names that protects `api_key_hash` and `access_token_hash`. Writing
+# them by hand would have been copies 20 and 21 of a helper whose whole purpose is that
+# "no list endpoint is given the chance to forget".
+
+
+@app.post("/tokens/{token_id}/revoke")
+def revoke_token(token_id: int,
+                 principal: "Principal" = Depends(require_tenant_admin),
+                 db: Session = Depends(get_db)):
+    """Kill one credential without touching any other.
+
+    Recorded rather than deleted, so the audit trail can still say which credential acted
+    before it was revoked. `_resolve_principal` checks `revoked_at` before anything else,
+    so the kill is immediate and does not wait for the expiry window.
+    """
+    from .models import ApiToken
+    from .services.calc import _utcnow_iso
+    tok = db.query(ApiToken).filter(
+        ApiToken.id == token_id,
+        ApiToken.organisation_id == principal.org.id).first()
+    if tok is None:
+        raise HTTPException(status_code=404, detail="no such token")
+    already = tok.revoked_at is not None
+    if not already:
+        tok.revoked_at = _utcnow_iso()
+        db.commit()
+    return {"id": tok.id, "label": tok.label, "revoked": True,
+            "already_revoked": already, "revoked_at": tok.revoked_at}
 
 
 @app.post("/activities/upload_csv")
@@ -4322,16 +4678,21 @@ def _list_page(db: Session, org: Organisation, model, limit: int, offset: int,
 
 def _register_list_endpoints():
     from .models import (
-        ActivityRecord as _Act, AssuranceEngagement as _AsEng, CarbonCredit as _Cred,
-        CbamGood as _Cbam, DeliverabilityLink as _Deliv, EmissionsTarget as _Tgt,
-        FinancedPosition as _Fin, GranularCertificate as _Gc, HourlyLoad as _Hl,
-        LcaAssessment as _Lca, MarketInstrument as _Mi, NatureSite as _NSite,
-        NatureTarget as _NTgt, PactClient as _PClient, RemovalRecord as _Rem,
-        ReportingEntity as _Ent, ReportingPeriod as _Per,
-        Scope3CategoryDeclaration as _S3Decl, TaxonomyActivity as _Tax,
+        ActivityRecord as _Act, ApiToken as _Tok, AssuranceEngagement as _AsEng,
+        CarbonCredit as _Cred, CbamGood as _Cbam, DeliverabilityLink as _Deliv,
+        EmissionsTarget as _Tgt, FinancedPosition as _Fin, GranularCertificate as _Gc,
+        HourlyLoad as _Hl, LcaAssessment as _Lca, MarketInstrument as _Mi,
+        NatureSite as _NSite, NatureTarget as _NTgt, PactClient as _PClient,
+        RemovalRecord as _Rem, ReportingEntity as _Ent, ReportingPeriod as _Per,
+        Scope3CategoryDeclaration as _S3Decl, TaxonomyActivity as _Tax, User as _User,
     )
     specs = (
         ("/activities", _Act, "list_activities"),
+        # Identity. `users` carries no credential; `api_tokens` carries `token_hash`,
+        # which `safe_row` strips here by the same name set that protects the
+        # organisation key — so neither needs a bespoke serialiser.
+        ("/users", _User, "list_users"),
+        ("/tokens", _Tok, "list_api_tokens"),
         ("/reporting_periods", _Per, "list_reporting_periods"),
         ("/entities", _Ent, "list_reporting_entities"),
         ("/market_instruments", _Mi, "list_market_instruments"),

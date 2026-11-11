@@ -52,6 +52,96 @@ class Organisation(Base):
     # scheduler, so nothing is ever deleted by the mere passage of time.
     retention_days = Column(Integer, nullable=True)
 
+class User(Base):
+    """A named person inside ONE organisation, so "who decided" can be recorded.
+
+    Until now the only principal was `Organisation.api_key_hash` — one shared secret per
+    tenant, with no owner, no role and no way to offboard a leaver without rotating the
+    key for everybody. The mapping audit trail could record that a decision was made and
+    not who made it.
+
+    SCOPED TO ONE ORGANISATION ON PURPOSE, and this is the design decision worth
+    defending. A person who works across three tenants gets three rows and three
+    credentials, not one identity spanning them. The alternative — a global `users` table
+    joined by a membership — is the better entity model in the abstract and the wrong one
+    here: `services/lifecycle.py` classifies EVERY table as tenant-scoped or global
+    reference, and a cross-tenant table would be a second unscoped tenant surface in a
+    product whose last security finding was exactly that (`emission_factors`, readable
+    without a credential). It would also make tenant deletion conditional on a user's
+    other memberships, so "delete everything for this tenant" would stop being a
+    statement about one organisation.
+
+    Consultancies and assurors, who genuinely work across tenants, are served by
+    `ApiToken` instead: a scoped, expiring, revocable credential issued BY the tenant,
+    which is what an auditor should hold rather than a seat inside the client.
+    """
+    __tablename__ = "users"
+    __table_args__ = (
+        # Email identifies a person WITHIN a tenant. Not globally unique, because the
+        # same person legitimately holds a separate account in each tenant they serve.
+        UniqueConstraint("organisation_id", "email", name="uq_user_org_email"),
+        CheckConstraint("role IN ('owner','admin','member','auditor')",
+                        name="ck_user_role"),
+        CheckConstraint("status IN ('active','suspended')", name="ck_user_status"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False,
+                             index=True)
+    email = Column(String, nullable=False)
+    name = Column(String, nullable=True)
+    # owner  — may manage users and tokens, and delete the tenant
+    # admin  — may manage users and tokens
+    # member — may read and write inventory data
+    # auditor— may READ only; never writes, whatever the token says
+    role = Column(String, nullable=False, default="member")
+    # Suspension is the joiner-mover-LEAVER path. It is deliberately not a delete: a
+    # departed preparer's name must stay attached to the decisions they made, or the
+    # audit trail this platform exists to produce loses its actor.
+    status = Column(String, nullable=False, default="active")
+    created_at = Column(String, nullable=True)
+    suspended_at = Column(String, nullable=True)
+
+
+class ApiToken(Base):
+    """A credential a request actually authenticates with: hashed, scoped, EXPIRING.
+
+    Modelled on `PactToken`, which already got the two things that matter right — stored
+    by hash, and `expires_at` NOT NULL so "a leaked token has a bounded life and
+    revocation is a delete rather than a hope". The gap it leaves is scope, which is why
+    this carries one.
+
+    THIS IS ALSO THE FIX FOR ASSUROR ACCESS. `AssuranceEngagement.access_token_hash` is a
+    bare hash column: no expiry, no revocation flag, no scope. In practice the only way
+    to let an auditor read a filed run was to hand over the tenant's write key. A token
+    here with `scopes='read'`, an expiry and `revoked_at` replaces that, and because the
+    column is named `token_hash` it is already covered by
+    `services/lifecycle.NEVER_SERIALISE`, so no read path can serialise it by forgetting.
+    """
+    __tablename__ = "api_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_api_token_hash"),
+        # An unexpiring credential is the defect, so the column is NOT NULL and there is
+        # no sentinel for "never".
+        CheckConstraint("scopes IN ('read','write','admin')", name="ck_api_token_scopes"),
+    )
+    id = Column(Integer, primary_key=True)
+    organisation_id = Column(Integer, ForeignKey("organisations.id"), nullable=False,
+                             index=True)
+    # NULL for a token issued to a party that is not a seat inside the tenant — an
+    # assuror, a consultancy, a CI job. Those are exactly the cases that previously had
+    # to borrow the tenant's own key.
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    label = Column(String, nullable=False)          # what this credential is for
+    token_hash = Column(String, nullable=False, index=True)
+    scopes = Column(String, nullable=False, default="read")
+    expires_at = Column(String, nullable=False)     # ISO-8601 UTC, mandatory
+    created_at = Column(String, nullable=True)
+    last_used_at = Column(String, nullable=True)
+    # Revocation is recorded rather than deleted so a filed audit trail can still say
+    # which credential acted, after that credential stops working.
+    revoked_at = Column(String, nullable=True)
+
+
 class ActivityRecord(Base):
     __tablename__ = "activities"
     id = Column(Integer, primary_key=True)
