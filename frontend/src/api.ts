@@ -31,6 +31,18 @@ export type RunsPage = { runs: any[]; page: Page };
 export type FactorsPage = { factors: any[]; page: Page };
 export type LineagePage = { run: any; exclusions: any[]; page: Page; line_items: any[] };
 
+/** The generic list endpoints (`/reporting_periods`, `/entities`, …) carry their own
+ *  envelope: `items` plus limit/offset/has_more, not the `page` block above. */
+export type ItemsPage<T = any> = {
+  items: T[]; total_matched: number;
+  limit: number; offset: number; has_more: boolean; next_offset: number | null;
+};
+
+export type ReportingPeriod = {
+  id: number; label: string;
+  start_date: string | null; end_date: string | null; frozen: boolean;
+};
+
 async function request<T = any>(s: Settings, method: string, path: string,
                        opts: { params?: Record<string, string | number | undefined>,
                                body?: FormData } = {}): Promise<T> {
@@ -100,8 +112,21 @@ export const api = {
             opts: { category?: string; q?: string; limit?: number } = {}): Promise<FactorsPage> =>
     request<FactorsPage>(s, "GET", "/factors",
             { params: { category: opts.category, q: opts.q, limit: opts.limit ?? 1000 } }),
-  run: (s: Settings, gwpSet: string) =>
-    request(s, "POST", "/calculate/run", { params: { gwp_set: gwpSet } }),
+  // A run SCOPED to a reporting period, when one is given. Passing no period was the
+  // whole of the cumulative-run defect: every run this client created spanned the entire
+  // uploaded activity history, so a second year's upload produced a headline of exactly
+  // 2.0x the true year-two figure. `reportingPeriodId` is undefined only for a
+  // deliberate whole-history view, which the caller has to choose explicitly.
+  run: (s: Settings, gwpSet: string, reportingPeriodId?: number) =>
+    request(s, "POST", "/calculate/run",
+            { params: { gwp_set: gwpSet, reporting_period_id: reportingPeriodId } }),
+  reportingPeriods: (s: Settings, limit = 200): Promise<ItemsPage<ReportingPeriod>> =>
+    request<ItemsPage<ReportingPeriod>>(s, "GET", "/reporting_periods",
+                                        { params: { limit } }),
+  createReportingPeriod: (s: Settings, label: string,
+                          startDate: string, endDate: string): Promise<ReportingPeriod> =>
+    request<ReportingPeriod>(s, "POST", "/reporting_periods",
+            { params: { label, start_date: startDate, end_date: endDate } }),
   runs: (s: Settings, limit = 100): Promise<RunsPage> =>
     request<RunsPage>(s, "GET", "/runs", { params: { limit } }),
   seedDemo: (s: Settings) => request(s, "POST", "/demo/seed"),

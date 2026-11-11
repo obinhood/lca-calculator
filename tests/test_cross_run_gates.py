@@ -15,12 +15,39 @@ denominator covered the numerator's period.
 
 So the rule is enforced rather than documented: ask the shared question, or do not ask.
 """
+import ast
 import pathlib
 import re
 
 import pytest
 
 REPORTS = pathlib.Path("app/reports")
+
+# The ONE shared prior-period comparative builder. A renderer may reach the gates
+# through it instead of calling them directly — it exists precisely so the annual
+# frameworks do not each grow their own two-run logic — but it must itself ask the
+# shared question, which `test_the_delegate_asks_the_shared_question` pins.
+DELEGATES = {"prior_period_comparative"}
+ASKS_DIRECTLY = {"cross_run_gates"}
+
+
+def _called_names(src: str) -> set:
+    """Every function name CALLED in `src`.
+
+    By AST, not substring: both the previous version of this guard and the renderers
+    it guards mention `cross_run_gates` in prose, so a file could satisfy a substring
+    check with a comment while calling nothing at all. A guard that a comment can
+    satisfy is the same fail-open shape as a gate that an absent figure can pass.
+    """
+    out = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = (f.id if isinstance(f, ast.Name)
+                    else f.attr if isinstance(f, ast.Attribute) else None)
+            if name:
+                out.add(name)
+    return out
 
 # export.py renders whatever another renderer already produced — it re-serialises a
 # payload and never subtracts two runs itself, so it has nothing to gate.
@@ -39,20 +66,44 @@ def _sources():
 
 
 def _two_run_renderers(srcs):
+    # `comparative_run_id` is the prior-PERIOD shape (app/reports/comparative.py), added
+    # when the annual frameworks gained comparatives. It belongs in this pattern for the
+    # reason the whole file exists: a guard keyed only on the parameter names that
+    # happened to exist when it was written PASSES every renderer that subtracts two runs
+    # under a new name — and a guard that passes is read as "checked and fine", which is
+    # the fail-open shape this codebase gets wrong most often.
     return {n: s for n, s in srcs.items()
-            if re.search(r"\b(base_run_id|baseline_run_id)\b", s)
+            if re.search(r"\b(base_run_id|baseline_run_id|comparative_run_id)\b", s)
             and n not in PASSTHROUGH}
 
 
 def test_every_two_run_renderer_asks_the_shared_question():
     srcs = _sources()
     missing = [n for n, s in _two_run_renderers(srcs).items()
-               if "cross_run_gates" not in s and n not in DECLARED_EXEMPT]
+               if not (_called_names(s) & (ASKS_DIRECTLY | DELEGATES))
+               and n not in DECLARED_EXEMPT]
     assert not missing, (
         f"{missing} subtract or compare two runs without calling "
-        f"services.comparability.cross_run_gates. Assembling the gates by hand is how ISO "
-        f"14064-2 came to publish a divestment as abatement with an empty blocker list. "
-        f"Call the shared helper, or add the file to DECLARED_EXEMPT with the reason.")
+        f"services.comparability.cross_run_gates, directly or through "
+        f"reports.comparative.prior_period_comparative. Assembling the gates by hand is "
+        f"how ISO 14064-2 came to publish a divestment as abatement with an empty "
+        f"blocker list. Call one of them, or add the file to DECLARED_EXEMPT with the "
+        f"reason.")
+
+
+def test_the_delegate_asks_the_shared_question():
+    """The cost of letting renderers delegate.
+
+    Two renderers now reach the gates through `prior_period_comparative` rather than
+    calling them. That is the point of having one builder — but it means one deletion
+    inside it silently removes the gates from every framework that delegates, exactly as
+    `test_the_shared_gate_actually_covers_all_four_dimensions` guards the layer below.
+    """
+    src = (REPORTS / "comparative.py").read_text()
+    assert ASKS_DIRECTLY & _called_names(src), (
+        "app/reports/comparative.py no longer CALLS cross_run_gates. Every renderer that "
+        "delegates its comparative to it is now publishing a difference between two runs "
+        "with nothing checking that they may be subtracted.")
 
 
 def test_no_renderer_re_derives_the_boundary_test():
@@ -111,5 +162,6 @@ def test_the_shared_gate_actually_covers_all_four_dimensions():
     src = pathlib.Path("app/services/comparability.py").read_text()
     body = src[src.index("def cross_run_gates"):]
     for gate in ("period_comparable", "boundary_comparable", "gwp_comparable",
-                 "residual_mix_comparable"):
+                 "residual_mix_comparable", "pedigree_comparable",
+                 "scope_basis_comparable"):
         assert gate in body, f"cross_run_gates no longer applies {gate}"
