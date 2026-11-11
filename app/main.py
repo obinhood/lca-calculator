@@ -1176,8 +1176,17 @@ def _visible_factor(db: Session, org: Organisation, factor_id: int) -> EmissionF
 
 
 @app.post("/mappings/{activity_id}/approve")
-def approve_mapping(activity_id: int, org: Organisation = Depends(current_org),
+def approve_mapping(activity_id: int,
+                    principal: "Principal" = Depends(current_principal),
                     db: Session = Depends(get_db)):
+    """Accept the engine's suggestion. A HUMAN decision, so it names its actor.
+
+    Depends on `current_principal` rather than `current_org` because this is one of the
+    three actions the evidence pack counts as a reviewer decision — the question an
+    assuror asks is "who approved this binding, and when", and the second half alone was
+    the gap `mapping_audit` used to declare.
+    """
+    org = principal.org
     a = _get_own_activity(db, org, activity_id)
     if a.mapping_status != "needs_review" or a.suggested_factor_id is None:
         raise HTTPException(status_code=400, detail="activity is not awaiting review")
@@ -1186,15 +1195,18 @@ def approve_mapping(activity_id: int, org: Organisation = Depends(current_org),
     a.factor_id = a.suggested_factor_id
     a.mapping_status = "approved"
     _audit(db, a, "approved", from_factor_id=prev_factor,
-           from_status=prev_status, commit=False)
+           from_status=prev_status, actor=principal.actor,
+           actor_user_id=principal.user.id if principal.user else None, commit=False)
     db.commit()
     return {"activity_id": a.id, "factor_id": a.factor_id, "mapping_status": a.mapping_status}
 
 
 @app.post("/mappings/{activity_id}/override")
 def override_mapping(activity_id: int, factor_id: int = Query(...),
-                     org: Organisation = Depends(current_org),
+                     principal: "Principal" = Depends(current_principal),
                      db: Session = Depends(get_db)):
+    """Bind a factor by hand. The reviewer decision the override log exists for."""
+    org = principal.org
     a = _get_own_activity(db, org, activity_id)
     factor = _visible_factor(db, org, factor_id)
     from .services.mapping_audit import record as _audit
@@ -1203,7 +1215,8 @@ def override_mapping(activity_id: int, factor_id: int = Query(...),
     a.mapping_status = "overridden"
     a.mapping_confidence = 1.0   # human decision
     _audit(db, a, "overridden", from_factor_id=prev_factor,
-           from_status=prev_status, commit=False)
+           from_status=prev_status, actor=principal.actor,
+           actor_user_id=principal.user.id if principal.user else None, commit=False)
     db.commit()
     return {"activity_id": a.id, "factor_id": a.factor_id, "mapping_status": a.mapping_status}
 
@@ -3732,7 +3745,7 @@ def preview_pact_factor(footprint_id: int,
 
 @app.post("/pact/factors/{factor_id}/bind")
 def bind_pact_factor(factor_id: int, activity_ids: str = Query(...),
-                     org: Organisation = Depends(current_org),
+                     _p: "Principal" = Depends(current_principal),
                      db: Session = Depends(get_db)):
     """Bind activities to a materialised supplier factor. `activity_ids` is a
     comma-separated list.
@@ -3742,6 +3755,7 @@ def bind_pact_factor(factor_id: int, activity_ids: str = Query(...),
     someone else's footprint on a line with nothing in the result to reveal it.
     """
     from .services.pact_factor import bind_activities
+    org = _p.org
     try:
         ids = [int(x) for x in activity_ids.split(",") if x.strip()]
     except ValueError:
@@ -3749,7 +3763,9 @@ def bind_pact_factor(factor_id: int, activity_ids: str = Query(...),
                             detail="activity_ids must be a comma-separated list of integers")
     if not ids:
         raise HTTPException(status_code=400, detail="activity_ids must not be empty")
-    result = bind_activities(db, org.id, factor_id, ids)
+    result = bind_activities(db, org.id, factor_id, ids,
+                             actor=_p.actor,
+                             actor_user_id=_p.user.id if _p.user else None)
     if result.get("reason") and result["bound"] == 0 and "not a materialised" in result["reason"]:
         raise HTTPException(status_code=404, detail=result["reason"])
     return JSONResponse(result)

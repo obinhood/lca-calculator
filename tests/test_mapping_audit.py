@@ -117,10 +117,96 @@ def test_the_summary_names_what_it_closes_and_what_it_does_not(db):
     s = summary(db, org.id)
     assert "Override log with before/after values" in s["closes_evidence_gaps"]
     assert "Reviewer timestamp" in s["closes_evidence_gaps"]
+    # UNATTRIBUTED, because `record` above named no actor: the gap is still declared,
+    # and declared as historical rather than absolute. The old assertion here was
+    # `gap == "Reviewer identity"` with "no concept of a person" in the reason, which
+    # was true while no actor could exist. It can now, so the honest claim is narrower,
+    # not gone.
     gap = s["does_not_close"][0]
-    assert gap["gap"] == "Reviewer identity"
-    assert "no concept of a person" in gap["why"]
+    assert gap["gap"] == "Reviewer identity (historical events only)"
     assert "misleading answer" in gap["why"]
+    assert s["attribution"]["unattributed"] == 1
+    assert s["attribution"]["attributed"] == 0
+    assert "Reviewer identity" not in s["closes_evidence_gaps"]
+
+
+def test_an_attributed_decision_closes_the_identity_gap(db):
+    """The other half, without which the test above would pass over a product where
+    attribution never works at all."""
+    org = _org(db)
+    a = _act(db, org, _factor(db))
+    record(db, a, "overridden", actor="user:preparer@acme.test")
+    s = summary(db, org.id)
+    assert "Reviewer identity" in s["closes_evidence_gaps"]
+    assert s["does_not_close"] == []
+    assert s["attribution"]["attributed"] == 1
+    assert s["attribution"]["by_a_named_person"] == 1
+
+
+def test_one_unattributed_decision_reopens_it(db):
+    """A journal is only as attributed as its weakest event. If a single historical
+    decision names nobody, the pack must not say the control is closed."""
+    org = _org(db)
+    a = _act(db, org, _factor(db))
+    record(db, a, "overridden", actor="user:preparer@acme.test")
+    record(db, a, "approved")                      # historical: no actor
+    s = summary(db, org.id)
+    assert "Reviewer identity" not in s["closes_evidence_gaps"]
+    assert s["does_not_close"][0]["gap"] == "Reviewer identity (historical events only)"
+    assert s["attribution"] == {
+        **s["attribution"], "attributed": 1, "unattributed": 1}
+
+
+def test_an_empty_journal_does_not_close_the_gap_by_having_nothing_in_it(db):
+    """The empty-collection pass. Zero human decisions must not read as "all of them
+    are attributed" — this codebase has found that exact shape in its own gates."""
+    org = _org(db)
+    a = _act(db, org, _factor(db))
+    record(db, a, "auto_mapped", actor="engine")   # machine, not a reviewer
+    s = summary(db, org.id)
+    assert s["human_decisions"] == 0
+    assert "Reviewer identity" not in s["closes_evidence_gaps"]
+    assert "nothing to attribute" in s["does_not_close"][0]["why"]
+
+
+def test_the_resolver_attributes_its_own_bindings(db):
+    """Through the REAL auto-mapping path, not by calling `record` with the answer.
+
+    The first version of this test passed `actor="engine"` to `record` directly, so it
+    asserted that the journal can store the string — and deleting `actor="engine"` from
+    `services/resolver.py` left it green. A test that supplies the value it is checking
+    for tests nothing about the code that should supply it.
+    """
+    from app.services.resolver import auto_map_activity
+    org = _org(db)
+    f = _factor(db)
+    a = _act(db, org, None)
+    a.factor_id = None
+    a.mapping_status = "unmapped"
+    db.commit()
+
+    auto_map_activity(db, a)
+    db.commit()
+
+    evs = summary(db, org.id)
+    from app.models import MappingAuditEvent
+    rows = db.query(MappingAuditEvent).filter(
+        MappingAuditEvent.organisation_id == org.id).all()
+    assert rows, f"the resolver journalled nothing: {evs}"
+    assert {r.actor for r in rows} == {"engine"}, {r.actor for r in rows}
+    # And a machine binding is not counted as a reviewer decision.
+    assert evs["human_decisions"] == 0
+
+
+def test_a_machine_binding_is_not_an_unknown_one(db):
+    """NULL and 'engine' are different facts. An assuror reading an unattributed event
+    must be able to tell "nobody knows who" from "no human was involved"."""
+    org = _org(db)
+    a = _act(db, org, _factor(db))
+    e1 = record(db, a, "auto_mapped", actor="engine")
+    e2 = record(db, a, "approved")
+    assert e1.actor == "engine"
+    assert e2.actor is None
 
 
 def test_human_decisions_are_counted_separately(db):
@@ -216,7 +302,16 @@ def test_the_audit_appears_in_the_evidence_pack(env):
     assert "in-place status column" in sec["note"]
 
 
-def test_the_pack_now_reports_two_gaps_as_closed(env):
+def test_the_pack_now_reports_three_gaps_as_closed(env):
+    """Reviewer identity joins the two the journal already closed.
+
+    It was previously asserted here that identity "cannot be closed by a journal", which
+    was right: a journal records WHAT changed and when, and the actor has to come from
+    authentication. It now does — the override below goes through an authenticated
+    endpoint, so the event names the principal that made it. The pack MEASURES that
+    rather than asserting it, so a journal with unattributed history still reports the
+    gap (see `test_the_summary_names_what_it_closes_and_what_it_does_not`).
+    """
     client, hdr, (aid, _, f2) = env
     client.post(f"/mappings/{aid}/override", headers=hdr, params={"factor_id": f2})
     client.post("/calculate/run", headers=hdr)
@@ -225,5 +320,11 @@ def test_the_pack_now_reports_two_gaps_as_closed(env):
     by_item = {g["item"]: g for g in gaps}
     assert "CLOSED" in by_item["Override log with before/after values"]["why_absent"]
     assert "CLOSED" in by_item["Reviewer timestamp"]["why_absent"]
-    # And reviewer identity is STILL open — it cannot be closed by a journal.
-    assert "CLOSED" not in by_item["Reviewer identity"]["why_absent"]
+    identity = by_item["Reviewer identity"]["why_absent"]
+    assert "CLOSED" in identity, identity
+    assert "PARTLY" not in identity, identity
+    # And the journal names the credential, not merely that someone acted.
+    j = client.get("/mappings/audit", headers=hdr, params={"activity_id": aid}).json()
+    actors = {e["actor"] for e in j["events"]}
+    assert any(a and a != "engine" for a in actors), actors
+    assert j["summary"]["attribution"]["by_a_named_person"] >= 0  # key is present

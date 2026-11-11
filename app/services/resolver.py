@@ -281,6 +281,11 @@ def auto_map_activity(db: Session, activity: ActivityRecord, gwp_set: str = "AR6
             return          # nothing moved; a re-run is not a decision
         _audit(db, activity, action, from_factor_id=before_factor,
                from_status=before_status,
+               # "engine", not NULL. NULL is reserved for rows written before identity
+               # existed, and a machine binding is a DIFFERENT fact from an unknown one —
+               # the journal must keep them apart or an assuror reading an unattributed
+               # event cannot tell "nobody knows who" from "no human was involved".
+               actor="engine",
                note=f"automatic mapping: basis={activity.mapping_basis!r} "
                     f"confidence={activity.mapping_confidence!r}",
                commit=False)
