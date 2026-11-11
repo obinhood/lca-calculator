@@ -116,11 +116,20 @@ def csddd_report(db: Session, organisation_id: int, run_id: Optional[int] = None
             "ready": target_ready,
             "meets_1p5c_minimum": meets_1p5c,
             "blockers": _sb_blockers,
-            # When the target resolved, any SBTi blockers are optional trajectory-PLACEMENT
-            # issues that do NOT affect target-input readiness; say so. (When not found, the
-            # blockers are the not-found reason and this note stays absent.)
-            "blockers_note": ("these are optional trajectory-placement issues and do not affect "
-                              "target-input readiness" if (found and _sb_blockers) else None),
+            # When the target resolved, SBTi's blockers do NOT affect target-input
+            # readiness, which is the target's OWN declared ambition (meets_1p5c reads
+            # target_reduction_pct and the two years, never the inventory). What they are
+            # is no longer only trajectory placement: SBTi now also refuses a pathway whose
+            # base-year total rests on a scope the engine guessed, and calling that an
+            # "optional" placement issue would understate it. So the note asserts only what
+            # is true of every blocker in the list and points at the input that does carry
+            # it. (When not found, the blockers are the not-found reason and this note stays
+            # absent.)
+            "blockers_note": ("these do not affect target-INPUT readiness, which is the "
+                              "target's own declared ambition; they are blockers on placing "
+                              "the optional trajectory or on the base run the pathway is "
+                              "anchored to, and the ghg_inventory input above carries its "
+                              "own readiness" if (found and _sb_blockers) else None),
             "target": sb.get("target"),
             "ambition_assessment": sb.get("ambition_assessment"),
             "trajectory": sb.get("trajectory"),

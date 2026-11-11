@@ -101,6 +101,33 @@ EXCLUSION_REQUIRED_FIELDS = (
 )
 
 
+def _high_income_category_a_reasons(
+        *, turnover_eur: Optional[float], fte: Optional[int],
+        scope12_tco2e: Optional[float],
+        balance_sheet_eur: Optional[float]) -> list:
+    """The A.1 reasons that apply ONLY in a high-income country.
+
+    Extracted so the question "would the high-income route have reached Category A?"
+    can be asked WITHOUT a second copy of the thresholds. `company_category` asks it
+    twice for two different purposes: to apply the route when the country is declared
+    high-income, and to decide whether an UNDECLARED country is decisive.
+    """
+    if scope12_tco2e is not None and scope12_tco2e >= HIGH_INCOME_SCOPE12_TCO2E:
+        return [f"high-income country and scope 1+2 "
+                f"{scope12_tco2e:,.0f} tCO2e >= {HIGH_INCOME_SCOPE12_TCO2E:,}"]
+    met = []
+    if balance_sheet_eur is not None and balance_sheet_eur >= HIGH_INCOME_BALANCE_SHEET_EUR:
+        met.append("balance sheet")
+    if turnover_eur is not None and turnover_eur >= HIGH_INCOME_TURNOVER_EUR:
+        met.append("net turnover")
+    if fte is not None and fte >= HIGH_INCOME_FTE:
+        met.append("FTE")
+    if len(met) >= 2:
+        return [f"high-income country and two of three size tests met "
+                f"({', '.join(met)})"]
+    return []
+
+
 def company_category(*, turnover_eur: Optional[float] = None,
                      fte: Optional[int] = None,
                      scope12_tco2e: Optional[float] = None,
@@ -131,22 +158,41 @@ def company_category(*, turnover_eur: Optional[float] = None,
     if fte is not None and fte >= CATEGORY_A_FTE:
         reasons.append(f"{fte:,} FTE >= {CATEGORY_A_FTE:,}")
 
-    if not reasons and high_income_country:
-        if scope12_tco2e is not None and scope12_tco2e >= HIGH_INCOME_SCOPE12_TCO2E:
-            reasons.append(f"high-income country and scope 1+2 "
-                           f"{scope12_tco2e:,.0f} tCO2e >= "
-                           f"{HIGH_INCOME_SCOPE12_TCO2E:,}")
-        else:
-            met = []
-            if balance_sheet_eur is not None and balance_sheet_eur >= HIGH_INCOME_BALANCE_SHEET_EUR:
-                met.append("balance sheet")
-            if turnover_eur is not None and turnover_eur >= HIGH_INCOME_TURNOVER_EUR:
-                met.append("net turnover")
-            if fte is not None and fte >= HIGH_INCOME_FTE:
-                met.append("FTE")
-            if len(met) >= 2:
-                reasons.append(f"high-income country and two of three size tests met "
-                               f"({', '.join(met)})")
+    if not reasons:
+        # AN UNDECLARED COUNTRY IS NOT A LOW-INCOME ONE. `high_income_country` arrives as
+        # None when the caller never said, and reading that as False silently deleted the
+        # entire high-income route to Category A: a company meeting "scope 1+2 >= 10,000
+        # tCO2e" or two of the three size tests came back `determinable: True, category:
+        # "B"` on a question nobody had answered. That is the exemption this function's
+        # docstring says it refuses, arriving through an absent input instead of an absent
+        # figure.
+        #
+        # Asked only where the flag is DECISIVE, which is the whole of the tightness here.
+        # Measured across the six shapes the thresholds admit, it decides exactly two: the
+        # scope-1+2 route and the two-of-three route. Where neither could fire the answer
+        # is B whatever the country is, and where turnover or FTE already reached Category
+        # A this branch is never entered — refusing in those cases would withhold an answer
+        # the missing flag cannot change.
+        _hi = _high_income_category_a_reasons(
+            turnover_eur=turnover_eur, fte=fte, scope12_tco2e=scope12_tco2e,
+            balance_sheet_eur=balance_sheet_eur)
+        if high_income_country:
+            reasons.extend(_hi)
+        elif high_income_country is None and _hi:
+            return {
+                "determinable": False, "category": None,
+                "reason": "whether the consolidated group is in a high-income country was "
+                          "not supplied, and it decides this categorisation: the group "
+                          "already meets the A.1 high-income criterion (" + _hi[0] + "), "
+                          "so it is Category A there and Category B otherwise. Returning B "
+                          "would exempt a large company from the criteria that bind only "
+                          "Category A on a question nobody answered. Supply "
+                          "high_income_country (True or False) and re-ask.",
+                "high_income_criterion_already_met": _hi,
+                "note": "An UNDECLARED country is not a low-income one. Pass False to "
+                        "state that the group is not in a high-income country; that is a "
+                        "declaration and is answered normally.",
+            }
 
     category = "A" if reasons else "B"
     return {

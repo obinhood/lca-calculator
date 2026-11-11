@@ -321,6 +321,57 @@ def test_one_of_three_size_tests_is_not_enough():
     assert r["category"] == "B"
 
 
+def test_undeclared_high_income_country_refuses_when_it_decides_the_category():
+    """An UNDECLARED country is not a low-income one.
+
+    `high_income_country` arrives as None when the caller never said. Reading that as
+    False deleted the whole high-income route to Category A, so a group that already
+    meets an A.1 high-income criterion came back determinable: True, category: "B" on a
+    question nobody had answered — the exemption this function exists to refuse, reached
+    through an absent input rather than an absent figure.
+    """
+    # The emissions route is decisive.
+    r = company_category(scope12_tco2e=15_000, turnover_eur=1_000_000, fte=50)
+    assert r["determinable"] is False and r["category"] is None, r
+    assert r["high_income_criterion_already_met"]
+    assert "high-income country was not supplied" in r["reason"]
+    # The two-of-three size route is decisive.
+    r = company_category(turnover_eur=60_000_000, fte=300, balance_sheet_eur=10_000_000)
+    assert r["determinable"] is False and r["category"] is None, r
+    # Each would have been Category A had the country been declared high-income.
+    assert company_category(scope12_tco2e=15_000, turnover_eur=1_000_000, fte=50,
+                            high_income_country=True)["category"] == "A"
+    assert company_category(turnover_eur=60_000_000, fte=300,
+                            balance_sheet_eur=10_000_000,
+                            high_income_country=True)["category"] == "A"
+
+
+def test_declared_non_high_income_country_is_an_answer_not_a_gap():
+    """False is a DECLARATION. Only None is the missing input, and they must not merge."""
+    for kw in (dict(scope12_tco2e=15_000, turnover_eur=1_000_000, fte=50),
+               dict(turnover_eur=60_000_000, fte=300, balance_sheet_eur=10_000_000)):
+        r = company_category(high_income_country=False, **kw)
+        assert r["determinable"] is True and r["category"] == "B", r
+
+
+def test_undeclared_high_income_country_still_answers_when_it_cannot_decide():
+    """Over-refusal guard: the flag is gated only where it changes the outcome.
+
+    Where no high-income route could fire the answer is B whatever the country is, and
+    where turnover or FTE already reached Category A that branch is never entered.
+    Refusing these would withhold an answer the missing flag cannot change.
+    """
+    # One of three size tests is not enough, so the route cannot fire either way.
+    r = company_category(turnover_eur=60_000_000, fte=100, balance_sheet_eur=10_000_000)
+    assert r["determinable"] is True and r["category"] == "B", r
+    # Nothing near any threshold.
+    r = company_category(turnover_eur=1_000_000, fte=10)
+    assert r["determinable"] is True and r["category"] == "B", r
+    # Category A already settled on a universal test.
+    assert company_category(turnover_eur=CATEGORY_A_TURNOVER_EUR)["category"] == "A"
+    assert company_category(fte=CATEGORY_A_FTE)["category"] == "A"
+
+
 def test_categorisation_refuses_with_no_inputs():
     """Defaulting to B would exempt a large company from criteria that bind only A."""
     r = company_category()
@@ -434,3 +485,147 @@ def test_scope2_endpoint_rejects_category_c(env):
                     params={"target_types": "LCE_ALIGNMENT", "company_category": "C"})
     assert r.status_code == 400
     assert "no Category C" in r.json()["detail"]
+
+
+# --- The significance denominator over a scope the engine GUESSED --------------------
+# `_scope3_by_category` buckets every line frozen as scope "3", and an activity category
+# outside SCOPE_RULES is defaulted to Scope 3. So a run whose categories all miss that
+# dict reports its WHOLE inventory as scope 3 category emissions: the 5% test and the
+# C14.1 target boundary get a denominator built from emissions that are not Scope 3.
+
+def test_sbti_v2_refuses_a_significance_denominator_it_guessed(db):
+    """Reverting the gate in sbti_v2_report must fail this."""
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    from app.reports.sbti_v2 import sbti_v2_report, _scope3_by_category
+    org, run = assumed_scope_run(db)
+
+    # The distortion being refused, stated first so the test fails loudly if the
+    # fixture ever stops producing it: the entire inventory is in one Scope 3 category.
+    assert sum(_scope3_by_category(db, run).values()) > 0.0
+
+    r = sbti_v2_report(db, run, turnover_eur=1e7, fte=50)
+    sig = r["significance"]
+    assert sig["determinable"] is False, \
+        f"significance was determined over a guessed scope split: {sig}"
+    # UNKNOWN, not measured-at-zero. The two must stay distinguishable: a declared run
+    # with no value chain legitimately reports 0.0 here (pinned below).
+    assert sig["denominator_tco2e"] is None
+    assert sig["significant"] == []
+    _b = sig.get("scope_declaration_blockers") or []
+    assert _b, f"refused without naming the scope assumption: {sig}"
+    for cat in ASSUMED_CATEGORIES:
+        assert cat in _b[0], f"{cat} was assumed but is not named in the refusal"
+    assert sig["assumed_scope3_by_category"], sig
+    # The verdict derived from it must fall with it, not stand on its own.
+    assert r["target_boundary"]["determinable"] is False
+    assert r["target_boundary"]["conformant"] is False
+    # Guard against testing the wrong gate: the fixture discharges the GHGP Scope 3
+    # category gate on purpose, whose own remedy clears it while leaving Scope 2 at 0.0.
+    assert not any("ghgp_category" in b for b in _b)
+
+
+def test_sbti_v2_still_determines_significance_when_every_scope_is_known(db):
+    """Negative control. A gate that refuses this refuses everything.
+
+    NOT `declared_scope_run`: every line there is correctly Scope 1 or Scope 2, so
+    categories 1-14 total zero and significance is already non-determinable for its own
+    legitimate reason — which would make this control pass while proving nothing.
+    """
+    from tests.scope3_util import declared_scope_run_with_scope3
+    from app.reports.sbti_v2 import sbti_v2_report
+    org, run = declared_scope_run_with_scope3(db)
+    r = sbti_v2_report(db, run, turnover_eur=1e7, fte=50)
+    sig = r["significance"]
+    assert sig["determinable"] is True, sig
+    assert sig["denominator_tco2e"] > 0.0
+    assert sig["significant"], "a real Scope 3 category vanished from the screen"
+    assert "scope_declaration_blockers" not in sig
+    assert r["scope_declaration"]["blockers"] == []
+    # The derived verdict is produced too, not merely left non-refused.
+    assert r["target_boundary"]["determinable"] is True
+    assert r["target_boundary"]["significant_categories"] == sig["significant"]
+
+
+def test_sbti_v2_keeps_unknown_distinct_from_measured_at_zero(db):
+    """A declared run with no value chain is a DIFFERENT fact from a guessed split.
+
+    Both are non-determinable; only one is the scope gate's doing. Collapsing them would
+    hide the remedy — screen the value chain vs declare the scope — behind one message.
+    """
+    from tests.scope3_util import declared_scope_run
+    from app.reports.sbti_v2 import sbti_v2_report
+    org, run = declared_scope_run(db)
+    sig = sbti_v2_report(db, run, turnover_eur=1e7, fte=50)["significance"]
+    assert sig["determinable"] is False
+    # Measured at zero -> 0.0, and NOT attributed to the scope gate.
+    assert sig["denominator_tco2e"] == 0.0
+    assert "scope_declaration_blockers" not in sig
+    assert "total zero" in sig["reason"]
+
+
+def test_sbti_v2_company_category_refuses_only_where_it_reads_the_guessed_inventory(db):
+    """The A.1 high-income test is the ONE place company_category reads the inventory.
+
+    `_scope12_tco2e` sums scope IN ("1","2"); on a guessed split that is a sum over zero
+    rows, so SQL SUM returns NULL and the "scope 1+2 >= 10,000 tCO2e" test cannot fire —
+    a company that is Category A falls through to B, which is the exact exemption
+    company_category's docstring says it refuses. Every OTHER corner must be untouched,
+    or the gate is refusing answers the guess never reached.
+    """
+    from tests.scope3_util import assumed_scope_run, declared_scope_run_with_scope3
+    from app.reports.sbti_v2 import sbti_v2_report
+
+    seq = iter(range(100))
+
+    def cat(maker, **kw):
+        # A fresh org per corner: organisations.name is UNIQUE, and each corner needs its
+        # own run anyway so one corner's lines cannot reach another's.
+        org, run = maker(db, name=f"Corner{next(seq)}")
+        return sbti_v2_report(db, run, **kw)["company_category"]
+
+    small = dict(turnover_eur=1e7, fte=50)
+    big = dict(turnover_eur=5e8, fte=50)          # Category A on turnover alone
+
+    # The one cell that rests on the guess.
+    c = cat(assumed_scope_run, high_income_country=True, **small)
+    assert c["determinable"] is False and c["category"] is None, c
+    assert c["scope_declaration_blockers"]
+
+    # Category A already settled by turnover: reached before that branch, so unaffected.
+    assert cat(assumed_scope_run, high_income_country=True, **big)["category"] == "A"
+    # A DECLARED non-high-income country excludes the branch that reads the figure, so
+    # the answer stands even though the split was guessed.
+    assert cat(assumed_scope_run, high_income_country=False, **small)["category"] == "B"
+    assert cat(assumed_scope_run, high_income_country=False, **big)["category"] == "A"
+    # An UNDECLARED one does not exclude it: with the country unknown AND the Scope 1 + 2
+    # figure assumed away, neither half of the A.1 emissions test is known.
+    c = cat(assumed_scope_run, high_income_country=None, **small)
+    assert c["determinable"] is False and c["category"] is None, c
+    # ...but a Category A already settled by turnover is still reached first.
+    assert cat(assumed_scope_run, high_income_country=None, **big)["category"] == "A"
+    # A declared split answers in every corner.
+    for hic in (True, False, None):
+        assert cat(declared_scope_run_with_scope3, high_income_country=hic,
+                   **small)["category"] == "B"
+        assert cat(declared_scope_run_with_scope3, high_income_country=hic,
+                   **big)["category"] == "A"
+
+
+def test_sbti_v2_recalculation_does_not_fall_out_of_a_refusal(db):
+    """C8.3 must not read "no recalculation is due" off a refused significance.
+
+    `recalculation_triggers` runs its crossing test only when BOTH significance results
+    are determinable, so without the scope gate here a refused `sig` yields zero triggers
+    and the block stamps determinable: True / recalculation_required: False over it.
+    """
+    from tests.scope3_util import assumed_scope_run
+    from app.reports.sbti_v2 import sbti_v2_report
+    org, run = assumed_scope_run(db)
+    r = sbti_v2_report(db, run, turnover_eur=1e7, fte=50, base_run=run)
+    rec = r["recalculation"]
+    assert rec is not None
+    assert rec["determinable"] is False, \
+        f"C8.3 answered over a guessed scope split: {rec}"
+    assert rec["blockers"], rec
+    assert any("ASSUMED" in b for b in rec["blockers"]), rec["blockers"]
+    assert "recalculation_required" not in rec

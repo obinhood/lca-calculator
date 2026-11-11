@@ -10,8 +10,10 @@ from sqlalchemy.orm import Session
 from ..models import CalculationRun, RunScope3Declaration
 from ..services.frozen import parse_detail
 from ..services.comparability import cross_run_gates
+from ..services.calc import scope_declaration_completeness
 from ..services.sbti_v2 import (
-    SBTI_V2_VERSION, company_category, significance, target_boundary,
+    SBTI_V2_VERSION, HIGH_INCOME_SCOPE12_TCO2E,
+    company_category, significance, target_boundary,
     recalculation_triggers,
     version_applicability,
 )
@@ -51,8 +53,48 @@ def sbti_v2_report(db: Session, run: CalculationRun, *,
     declared = {c for (c,) in db.query(RunScope3Declaration.category)
                 .filter(RunScope3Declaration.run_id == run.id).all()
                 if isinstance(c, int)}
-    sig = (significance(by_cat, inventoried=declared) if declared
-           else significance(by_cat))
+    # THE SCOPE SPLIT IS NOT AN INPUT TO SIGNIFICANCE — IT DEFINES THE DENOMINATOR.
+    # `_scope3_by_category` buckets every line the run froze as scope "3", and an activity
+    # category outside SCOPE_RULES is defaulted to Scope 3 and frozen `assumed_scope3`. So
+    # on a run whose categories all miss that dict the ENTIRE inventory — purchased steam
+    # (really Scope 2) and a refrigerant leak (really Scope 1) included — enters the
+    # categories-1-14 denominator as Scope 3 category emissions. Measured on the matched
+    # fixture: the denominator reports 43.096 tCO2e with category 1 at a 100% share, where
+    # the same sources, quantities and factor values with RECOGNISED categories have no
+    # Scope 3 at all. Those are emissions provably not in Scope 3 setting the 5% test.
+    #
+    # REFUSED, NOT CAVEATED, and the file's own note is the reason why rather than against:
+    # significance is determined on the PHYSICAL inventory, so it rests on that inventory's
+    # scope split exactly as the mandatory Scope 1 + 2 figure does. A guessed split makes
+    # the answer unknown, not merely uncertain, and `target_boundary` turns the 5% set into
+    # a conformance verdict — a genuinely significant category screened out as immaterial
+    # states the wrong required boundary.
+    #
+    # The refusal reuses the shape `significance()` already returns when a category was
+    # never inventoried, so `target_boundary()` derives its own refusal from it through
+    # machinery that exists instead of a second partial copy of the rule. `denominator_tco2e`
+    # is None, not 0.0: unknown is a different fact from measured-at-zero, which is what the
+    # declared-scope run with no value chain legitimately reports.
+    _scope_gate = scope_declaration_completeness(db, run)
+    if _scope_gate["blockers"]:
+        sig = {
+            "determinable": False,
+            "reason": "the scope split this run froze is not a declaration — "
+                      + "; ".join(_scope_gate["blockers"])
+                      + ". Every line assumed into Scope 3 enters the categories 1-14 "
+                        "denominator, so the 5% significance test and the C14.1 target "
+                        "boundary derived from it would be computed against a denominator "
+                        "inflated by emissions that are not Scope 3 at all.",
+            "denominator_tco2e": None,
+            "significant": [], "shares": {},
+            "categories_not_inventoried": [],
+            "scope_declaration_blockers": _scope_gate["blockers"],
+            "assumed_scope3_by_category": _scope_gate["assumed_scope3_by_category"],
+            "lines_unassessable": _scope_gate["lines_unassessable"],
+        }
+    else:
+        sig = (significance(by_cat, inventoried=declared) if declared
+               else significance(by_cat))
 
     # C8.3 recalculation triggers. README listed these as shipped while the function had
     # ZERO callers — measurable, correct, and unreachable. Supplying a base run makes the
@@ -73,6 +115,28 @@ def sbti_v2_report(db: Session, run: CalculationRun, *,
         blockers = cross_run_gates(db, base_run, run, label_a="base", label_b="current",
                                    quantity="the C8.3 recalculation test",
                                    measures="a change in significance")
+        # `cross_run_gates` DOES now carry a scope gate (#106's `scope_basis_comparable`),
+        # and it is not this one. That one asks whether the two runs share a scope BASIS,
+        # so it fires on declared-vs-assumed and is SILENT when both runs are assumed —
+        # the bases match. Verified: cross_run_gates(assumed, assumed) returns zero
+        # blockers. Two runs guessed the same way are perfectly comparable to each other
+        # and both still wrong, which is the blind spot a per-run question closes and an
+        # equality test structurally cannot.
+        #
+        # So it stays here rather than being folded in: "is this one run's split a guess?"
+        # is a different question from "can these two be subtracted?", and a single run can
+        # have a guessed split with nothing to compare. Where the bases also differ both
+        # fire, which is two true facts about the same pair, not a duplicate.
+        #
+        # Asked at all because WITHOUT it this block fails open on the refusal above:
+        # `recalculation_triggers` runs its crossing test only when BOTH significance
+        # results are determinable, so a refused `sig` silently yields zero triggers and
+        # this block would then stamp `determinable: True, recalculation_required: False`
+        # over it — "no recalculation is due" manufactured out of a refusal.
+        for _label, _r in (("base", base_run), ("current", run)):
+            blockers.extend(
+                f"{_label} run: {b}" for b in
+                scope_declaration_completeness(db, _r).get("blockers", []))
         if blockers:
             recalculation = {
                 "determinable": False,
@@ -87,10 +151,50 @@ def sbti_v2_report(db: Session, run: CalculationRun, *,
             recalculation["determinable"] = True
             recalculation["base_run_id"] = base_run.id
             recalculation["blockers"] = []
+    # company_category consults the INVENTORY in exactly one place: the A.1 high-income
+    # test "scope 1+2 >= 10,000 tCO2e", and only where no turnover/FTE threshold has
+    # already settled Category A. `_scope12_tco2e` sums scope IN ("1","2"), which on a run
+    # whose split was guessed is a sum over ZERO rows — SQL SUM returns NULL — so the
+    # figure arrives as None and that test cannot fire. Verified by execution: a
+    # high-income company with a real Scope 1 + 2 of 12,000 tCO2e is Category A; with the
+    # same emissions assumed into Scope 3 it falls through to Category B.
+    #
+    # That is exactly the harm this function's own docstring says it refuses — "defaulting
+    # to Category B would let a large company past the Category A criteria that only apply
+    # to it". It refuses when NOTHING is supplied; here turnover and FTE ARE supplied, so
+    # it answers confidently over the one figure that went missing.
     cat = company_category(turnover_eur=turnover_eur, fte=fte,
                            scope12_tco2e=_scope12_tco2e(db, run),
                            balance_sheet_eur=balance_sheet_eur,
                            high_income_country=high_income_country)
+    # All three conjuncts, because only their conjunction rests on the guess. A Category A
+    # already established by turnover or FTE is reached before the high-income branch and
+    # so is unaffected, and `company_category` consults the Scope 1 + 2 figure ONLY inside
+    # that branch — so gating a wider set would refuse answers the guess never touched.
+    #
+    # `is not False`, not a truth test. The branch that reads the figure is excluded by a
+    # DECLARED False and not by an undeclared None: with the country unknown AND the Scope
+    # 1 + 2 figure assumed away, a high-income group over 10,000 tCO2e is Category A and
+    # nothing in the run can rule that out. `company_category` already refuses an
+    # undeclared country where the size tests alone decide it; this covers the case where
+    # the emissions route is the decisive one and the emissions are what went missing.
+    if (_scope_gate["blockers"] and high_income_country is not False
+            and cat.get("category") == "B"):
+        cat = {
+            "determinable": False, "category": None,
+            "reason": "Category B here rests on a Scope 1 + 2 figure the run never "
+                      "produced: " + "; ".join(_scope_gate["blockers"])
+                      + ". In a high-income country the A.1 test 'scope 1+2 >= "
+                        f"{HIGH_INCOME_SCOPE12_TCO2E:,} tCO2e' is what separates A from B "
+                        "at this size, and every tonne that would answer it was assumed "
+                        "into Scope 3, so B cannot be distinguished from an A whose "
+                        "emissions were misfiled"
+                      + ("" if high_income_country else
+                         ". high_income_country was not supplied either, so neither half "
+                         "of that test is known; pass False to state the group is not in "
+                         "a high-income country, or declare the scope and recompute"),
+            "scope_declaration_blockers": _scope_gate["blockers"],
+        }
     from ..models import ReportingPeriod
     period_start = None
     if run.reporting_period_id:
@@ -119,6 +223,11 @@ def sbti_v2_report(db: Session, run: CalculationRun, *,
             "the run to get the stricter test."),
         "target_boundary": target_boundary(sig),
         "version_applicability": version_applicability(period_start),
+        # The gate's own finding, named, so a reader sees WHICH categories were assumed
+        # rather than only that something was refused. Always present: on a clean run it
+        # is the positive statement that the split was declared, which is not the same
+        # fact as a refusal being absent.
+        "scope_declaration": _scope_gate,
         "note": "Significance is determined on the PHYSICAL inventory. Market "
                 "instruments are accounted separately and never netted into it "
                 "(C5.4, C37.4).",
