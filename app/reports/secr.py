@@ -69,6 +69,17 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
       * True = energy weighted by the GHGP Ch.3 entity share, read from the location
         line's FROZEN share_factor (never the live entity — reproduction contract).
         Correct for ESRS E1-5, whose scope follows the consolidation scope.
+
+    Returns, beside the per-carrier kWh, the ONE completeness verdict every caller must
+    publish rather than re-derive (see "Was there anything to measure?" below):
+      * ``determinable`` — False when a `scopes` filter was applied over a scope
+        classification the run GUESSED, so the figure is whatever the filter happened to
+        match. Always True for the unscoped figure.
+      * ``complete`` — True (examined rows, omitted none), False (examined rows, omitted
+        some: `carriers_omitted` names them), or None when `determinable` is False.
+        NEVER True over an empty measurement.
+      * ``blockers`` — the refusal to wire into the caller's own, so the disclosure
+        declines to certify the figure instead of certifying an unobserved one.
     """
     # ONE pass over the run's location lines, partitioned by their FROZEN carrier: into
     # the kWh total, or into the `carriers_omitted` caveat below. The carrier filter runs
@@ -148,6 +159,57 @@ def _energy_kwh(db: Session, run: CalculationRun, scopes=None,
     if consolidated and weighted_any:
         notes.append("energy weighted by the GHGP Ch.3 entity share, on the same basis "
                      "as the emissions reported beside it")
+
+    # --- Was there anything to measure? ------------------------------------------------
+    # A SCOPE-FILTERED figure rests on the run's scope CLASSIFICATION: the `scopes` filter
+    # above decided, line by line, what belongs in the own-operations total. Where that
+    # classification was GUESSED (a category outside SCOPE_RULES defaults to Scope 3 and
+    # freezes `assumed_scope3`), the filter's verdict is a guess too — so ZERO ROWS MATCHED
+    # is not a measurement that no such energy exists, and the `omitted` dict above is
+    # empty only because nothing was ever examined. That erasure is what the three
+    # own-operations callers published as `complete: True` over a 0.0 kWh total: on the
+    # very same run the UNSCOPED figure measures three omitted carriers and reports
+    # INCOMPLETE, while the scoped one matches nothing and reports COMPLETE.
+    # So `complete` is None — cannot_determine — never True and never False: an empty
+    # measurement is neither a complete inventory nor a measured incomplete one. The
+    # verdict is computed ONCE here and read by every caller; three callers each
+    # re-deriving `not carriers_omitted` is how the published claim drifted away from
+    # what was actually measured.
+    # The UNSCOPED figure (SECR's and ESOS's deliberately scope-agnostic total energy use)
+    # never reads the classification, so it stays determinable — a guessed scope cannot
+    # move a line in or out of a total that does not filter on scope.
+    blockers: list = []
+    determinable = True
+    if scopes is not None:
+        _gate = scope_declaration_completeness(db, run)
+        if _gate["blockers"]:
+            determinable = False
+            _why = []
+            _assumed = _gate["assumed_scope3_by_category"]
+            if _assumed:
+                _why.append(f"{sum(_assumed.values())} line(s) in categories "
+                            f"{dict(sorted(_assumed.items()))} carry an ASSUMED scope")
+            if _gate["lines_unassessable"]:
+                _why.append(f"{_gate['lines_unassessable']} line(s) predate the "
+                            f"scope_source freeze, so whether their scope was DECLARED "
+                            f"or ASSUMED is not assessable from this run")
+            _msg = (
+                f"own-operations energy (Scope {'/'.join(sorted(scopes))}) cannot be "
+                f"measured from this run: {'; '.join(_why)}. The kWh total is the sum of "
+                f"the line items the scope filter matched, and it matched {len(rows)} "
+                f"line item(s) — so {round(out['total_kwh'], 3)} kWh is what the filter "
+                f"happened to find, not a measurement that no such energy was "
+                f"consumed, and an "
+                f"empty omitted-carrier list means nothing was EXAMINED rather than "
+                f"nothing omitted. A completeness claim over it would certify a figure "
+                f"the engine never observed. Declare the scope (POST /activities/scope) "
+                f"or map the category to a scope rule, then recompute")
+            blockers.append(_msg)
+            notes.append(_msg)
+    out["determinable"] = determinable
+    out["complete"] = (not omitted) if determinable else None
+    out["blockers"] = blockers
+
     out["notes"] = sorted(set(notes))
     return out
 

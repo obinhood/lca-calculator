@@ -1,6 +1,6 @@
 """An absence must never be reported as a finding.
 
-Three places had collapsed "we did not measure this" into "this is zero", each producing
+Four places had collapsed "we did not measure this" into "this is zero", each producing
 a confident positive statement out of missing data:
 
   * a crosswalk hop that fans out to 25 codes with no factors loaded reported sigma 0.0
@@ -9,10 +9,13 @@ a confident positive statement out of missing data:
     declared not significant and dropped out of the required C14.1 target boundary,
     inflating every surviving category's share as the denominator shrank;
   * ESOS discarded the carriers its own energy reader had MEASURED as omitted and
-    published the remainder as "total energy consumption".
+    published the remainder as "total energy consumption";
+  * three own-operations energy disclosures certified their kWh inventory COMPLETE
+    because the Scope 1/2 filter they read it through matched NO LINE ITEMS, so no
+    carrier could be recorded as omitted — an empty measurement read as a complete one.
 
 The doctrine is stated everywhere in this codebase and was enforced at the primitive
-level only. These pin it at the three dict boundaries where it failed.
+level only. These pin it at the four dict boundaries where it failed.
 """
 import json
 
@@ -161,3 +164,139 @@ def test_esos_is_ready_when_nothing_is_omitted(db):
     assert r["carriers_omitted"] == []
     assert r["report_ready"] is True, r["blockers"]
     assert r["total_energy_kwh"] == pytest.approx(4000.0)
+
+
+# --- own-operations energy: zero rows matched is not "nothing omitted" -------------------
+# `_energy_kwh(scopes=("1","2"))` reads the run's FROZEN scope to decide what belongs in an
+# own-operations energy total. On a run whose categories miss SCOPE_RULES every line is
+# defaulted to Scope 3 and frozen `assumed_scope3`, so that filter matches NOTHING: the
+# per-carrier totals stay 0.0 and the `omitted` dict — which measures energy-denominated
+# activities the total could not include — stays empty because no row was ever examined.
+# Three renderers published `not omitted` as their completeness flag, so each certified a
+# COMPLETE energy inventory on the strength of having measured none of it.
+
+def _energy_claims(db, org_id, run_id):
+    """Every own-operations energy completeness claim in the renderer layer, with the
+    readiness key each renderer actually uses — a probe that reads a key a payload does
+    not have reports no defect."""
+    from app.reports.ecovadis import ecovadis_readiness
+    from app.reports.gri import gri_report
+    from app.reports.esrs_e1 import esrs_e1_report
+
+    ev = ecovadis_readiness(db, org_id, run_id=run_id)
+    gri = gri_report(db, org_id, run_id=run_id, intensity_denominator=10.0,
+                     intensity_denominator_unit="t product",
+                     intensity_denominator_period_days=365)
+    esrs = esrs_e1_report(db, org_id, run_id=run_id, net_revenue_millions=5.0,
+                          revenue_period_days=365)
+    assert ev["kpis"]["energy_kwh"] is not None
+    assert gri["gri_302_3_energy_intensity"] is not None, "control needs the 302-3 block"
+    return {
+        "ecovadis kpis.energy_complete": (
+            ev["kpis"]["energy_complete"], ev["kpis"]["energy_determinable"],
+            ev["blockers"], ev["assessment_ready"]),
+        "gri 302-1 energy.complete": (
+            gri["gri_302_1_energy"]["complete"], gri["gri_302_1_energy"]["determinable"],
+            gri["blockers"], gri["disclosure_ready"]),
+        "gri 302-3 energy_intensity.complete": (
+            gri["gri_302_3_energy_intensity"]["complete"],
+            gri["gri_302_3_energy_intensity"]["determinable"],
+            gri["blockers"], gri["disclosure_ready"]),
+        "esrs e1_5_energy_consumption.complete": (
+            esrs["e1_5_energy_consumption"]["complete"],
+            esrs["e1_5_energy_consumption"]["determinable"],
+            esrs["blockers"], esrs["disclosure_ready"]),
+    }
+
+
+def test_no_renderer_certifies_an_energy_total_it_could_not_measure(db):
+    from tests.scope3_util import assumed_scope_run, ASSUMED_CATEGORIES
+    from app.reports.secr import _energy_kwh
+    org, run = assumed_scope_run(db)
+
+    # The mechanism, on ONE run read two ways. Unscoped, the reader EXAMINES all three
+    # lines and measures all three as omitted carriers. Scope-filtered, it examines none.
+    unscoped = _energy_kwh(db, run)
+    assert set(unscoped["carriers_omitted"]) == set(ASSUMED_CATEGORIES), (
+        "fixture must have energy-denominated carriers to omit once they ARE examined")
+    scoped = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
+    assert scoped["total_kwh"] == 0.0
+    assert not scoped.get("carriers_omitted"), (
+        "no row matched the Scope 1/2 filter, so nothing could be recorded as omitted — "
+        "this empty dict is the absence of a measurement, not a measurement of zero")
+    assert scoped["determinable"] is False
+    assert scoped["complete"] is None, (
+        f"complete={scoped['complete']!r} over 0.0 kWh: the same run reports "
+        f"{sorted(unscoped['carriers_omitted'])} as omitted when its lines are actually "
+        f"examined. An empty measurement is neither complete nor measured-incomplete")
+
+    # The invariant at the source, for ANY scope filter — so a fourth caller inherits it.
+    for subset in (("1",), ("2",), ("1", "2"), ("3",), ("1", "2", "3")):
+        assert _energy_kwh(db, run, scopes=subset)["complete"] is not True, subset
+
+    # And no renderer may publish the certification.
+    for name, (complete, determinable, blockers, ready) in _energy_claims(
+            db, org.id, run.id).items():
+        assert complete is None, (
+            f"{name} published complete={complete!r} over an own-operations energy total "
+            f"of 0.0 that the engine never observed")
+        assert determinable is False, name
+        assert any("cannot be measured" in b for b in blockers), (
+            f"{name}: the refusal must name the ENERGY figure, not only the emissions "
+            f"split — a disclosure over an unmeasurable total refuses, it does not "
+            f"certify. Blockers: {blockers}")
+        assert ready is False, name
+
+
+def test_a_declared_scope_makes_the_same_energy_figure_measurable_again(db):
+    """The negative control for the guard above, with the CONFOUND held still.
+
+    `explicit_scope_run` carries the same category strings as the defect fixture with the
+    scope DECLARED on the activity, so the only thing that moves is the scope mechanism.
+    `_energy_kwh` buckets carriers BY CATEGORY NAME, so a control that renamed them
+    (`declared_scope_run`) would move the carrier mechanism at the same time and could not
+    tell a working guard from one that refuses everything.
+    """
+    from tests.scope3_util import assumed_scope_run, explicit_scope_run, ASSUMED_CATEGORIES
+    from app.reports.secr import _energy_kwh
+    org, run = explicit_scope_run(db)
+    _org_a, run_a = assumed_scope_run(db)
+
+    scoped = _energy_kwh(db, run, scopes=("1", "2"), consolidated=True)
+    # Identical carrier verdict on both runs once the rows are examined: the pair differs
+    # in the scope mechanism alone.
+    assert set(scoped["carriers_omitted"]) == set(ASSUMED_CATEGORIES)
+    assert scoped["carriers_omitted"] == _energy_kwh(db, run_a)["carriers_omitted"]
+    assert scoped["determinable"] is True
+    assert scoped["complete"] is False, (
+        "every line was examined and three carriers were measured as omitted — that is a "
+        "MEASURED incomplete inventory, which must stay distinguishable from an "
+        "unmeasurable one (None)")
+    assert scoped["blockers"] == []
+
+    for name, (complete, determinable, blockers, ready) in _energy_claims(
+            db, org.id, run.id).items():
+        assert complete is False, f"{name} lost a measured verdict: {complete!r}"
+        assert determinable is True, name
+        assert not any("cannot be measured" in b for b in blockers), (
+            f"{name} refused a figure it CAN measure — a gate that refuses both members "
+            f"of the pair is refusing everything. Blockers: {blockers}")
+
+
+def test_the_unscoped_energy_total_is_unaffected_by_a_guessed_scope(db):
+    """SECR's and ESOS's total energy use never reads the scope classification, so a
+    guessed scope cannot move a line in or out of it — the figure stays determinable and
+    its refusal keeps coming from the omission measurement."""
+    from tests.scope3_util import assumed_scope_run
+    from app.reports.secr import _energy_kwh
+    org, run = assumed_scope_run(db)
+
+    e = _energy_kwh(db, run)
+    assert e["determinable"] is True
+    assert e["complete"] is False
+    assert e["blockers"] == []
+
+    r = esos_report(db, org.id, run_id=run.id)
+    assert r["report_ready"] is False
+    assert any("total" in b.lower() for b in r["blockers"])
+    assert not any("cannot be measured" in b for b in r["blockers"])

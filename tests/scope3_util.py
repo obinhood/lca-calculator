@@ -79,7 +79,14 @@ _DECLARED_SPEC = [("electricity", "kWh", 0.20, 50_000),             # Scope 2 by
 ASSUMED_CATEGORIES = tuple(c for c, *_ in _ASSUMED_SPEC)
 
 
-def _scope_run(db, spec, name, ghgp_category):
+def _scope_run(db, spec, name, ghgp_category, declare_scopes=None):
+    """``declare_scopes``: {category: "1"|"2"|"3"} written to ActivityRecord.scope, which
+    makes the run freeze ``scope_source == "explicit"`` for that line instead of guessing
+    it. Lets a control hold the CATEGORY STRINGS fixed while varying only the scope
+    mechanism — needed wherever the category name is itself read by the code under test
+    (`_energy_kwh` buckets energy carriers by category name, so a control that renames
+    categories moves the carrier mechanism and the scope mechanism at once).
+    """
     from app.models import EmissionFactor, ActivityRecord, Organisation
     org = Organisation(name=name)
     db.add(org); db.commit(); db.refresh(org)
@@ -108,6 +115,8 @@ def _scope_run(db, spec, name, ghgp_category):
         # scope, so the two runs cannot share one value.
         if line_category is not None:
             a.ghgp_category = line_category
+        if declare_scopes and cat in declare_scopes:
+            a.scope = declare_scopes[cat]
         db.add(a)
     db.commit()
     run, _period = ready_run(db, org.id)
@@ -121,6 +130,25 @@ def assumed_scope_run(db, name="UnrecognisedCats"):
     both absent and the entire inventory sits in Scope 3 — the zeros are a GUESS.
     """
     return _scope_run(db, _ASSUMED_SPEC, name, ghgp_category=1)
+
+
+# What each unrecognised category above really is. Used only by `explicit_scope_run`.
+_ASSUMED_TRUE_SCOPES = {"purchased_steam_site_a": "2",   # purchased steam
+                        "r410a_topup": "1",              # refrigerant leak
+                        "site_generator_fuel": "1"}      # on-site combustion
+
+
+def explicit_scope_run(db, name="UnrecognisedCatsDeclared"):
+    """(org, run) with the SAME categories as :func:`assumed_scope_run`, scope DECLARED.
+
+    Freezes ``scope_source == "explicit"`` on every line, so the scope split is measured
+    while every category string — and therefore every carrier-bucketing decision made on
+    it — is byte-identical to the defect fixture. The control :func:`declared_scope_run`
+    cannot do this job for code that reads the category name, because it renames the
+    categories: a gate that then behaves differently has two candidate causes.
+    """
+    return _scope_run(db, _ASSUMED_SPEC, name, ghgp_category=None,
+                      declare_scopes=_ASSUMED_TRUE_SCOPES)
 
 
 def declared_scope_run(db, name="RecognisedCats"):
