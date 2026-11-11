@@ -13,11 +13,13 @@ import io
 import json
 import logging
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.database import Base
@@ -60,13 +62,18 @@ class Captured:
 
 
 def _saved_levels():
-    return logging.getLogger().level, logging.getLogger("app").level
+    access = [(n, logging.getLogger(n).disabled, logging.getLogger(n).propagate)
+              for n in observability._ACCESS_LOGGERS]
+    return logging.getLogger().level, logging.getLogger("app").level, access
 
 
 def _restore_levels(saved):
     observability.configure_logging(level="INFO", fmt="json")       # back to stdout
     logging.getLogger().setLevel(saved[0])
     logging.getLogger("app").setLevel(saved[1])
+    for name, disabled, propagate in saved[2]:
+        logging.getLogger(name).disabled = disabled
+        logging.getLogger(name).propagate = propagate
 
 
 @pytest.fixture
@@ -330,3 +337,196 @@ def test_reconfiguring_does_not_duplicate_lines(restore_logging):
     observability.get_logger("app.test").info("once")
 
     assert [json.loads(l)["msg"] for l in buffer.getvalue().splitlines() if l.strip()] == ["once"]
+
+# --- the server's own access log, which this module must silence -------------------------
+def test_server_access_log_is_silenced_by_default(restore_logging):
+    """uvicorn writes its access line as `path?query_string` verbatim. It has its own
+    handlers and propagate=False, so configure_logging is the only thing that can stop
+    it — and must, or the leak sits on the line next to the clean record."""
+    logging.getLogger("uvicorn.access").disabled = False
+    logging.getLogger("uvicorn.access").propagate = True
+
+    observability.configure_logging(stream=io.StringIO())
+
+    for name in observability._ACCESS_LOGGERS:
+        assert logging.getLogger(name).disabled is True
+        assert logging.getLogger(name).propagate is False
+
+
+def test_access_log_record_cannot_reach_our_handler(logs):
+    # WARNING, not INFO, and deliberately: at INFO the third-party level alone would stop
+    # the record, and this test would pass whether or not the access log is suppressed.
+    # At WARNING only the suppression itself can keep it out.
+    logging.getLogger("uvicorn.access").warning(
+        '127.0.0.1:1 - "POST /assurance/findings/1/resolve?resolution_note=%s HTTP/1.1" 401',
+        NARRATIVE)
+
+    assert logs.text == ""
+    assert NARRATIVE not in logs.text
+
+
+def test_access_log_can_be_re_enabled_deliberately(monkeypatch, restore_logging):
+    monkeypatch.setenv("LOG_ACCESS_LOG", "1")
+
+    observability.configure_logging(stream=io.StringIO())
+
+    assert logging.getLogger("uvicorn.access").disabled is False
+
+
+# --- log injection -----------------------------------------------------------------------
+def test_a_request_path_cannot_forge_a_log_line_in_text_format(client, restore_logging):
+    """`GET /%0A<a plausible line>` arrives with a REAL newline in scope["path"], because
+    ASGI servers url-decode it. In a line-oriented format that would be a forged entry
+    from an unauthenticated caller."""
+    buffer = io.StringIO()
+    observability.configure_logging(level="INFO", fmt="text", stream=buffer)
+
+    client.get("/%0A2026-01-01T00:00:00Z INFO app.request FORGED-admin-login-ok")
+
+    lines = [l for l in buffer.getvalue().splitlines() if l.strip()]
+    assert len(lines) == 1                                  # one request, one line
+    assert not any(l.startswith("2026-01-01T00:00:00Z") for l in lines)
+    assert "\\x0a" in lines[0]                               # the newline, neutralised
+
+
+def test_control_characters_in_a_logged_value_are_escaped(restore_logging):
+    buffer = io.StringIO()
+    observability.configure_logging(level="INFO", fmt="text", stream=buffer)
+
+    observability.get_logger("app.test").info("a\nb\x00c")
+
+    assert len(buffer.getvalue().strip().splitlines()) == 1
+    assert "\\x0a" in buffer.getvalue() and "\\x00" in buffer.getvalue()
+
+
+def test_inert_leaves_ordinary_text_alone():
+    assert observability._inert("/assurance/findings/4071/resolve") == \
+        "/assurance/findings/4071/resolve"
+
+
+def test_unmatched_path_label_is_escaped_at_the_source():
+    """Pins the escaping where the label is built, not only in the text formatter. The
+    two are independent layers and the formatter's covers for this one end to end, so
+    without this test the source escaping could be deleted with the suite still green."""
+    label, matched = observability.route_template(
+        {"type": "http", "path": "/\n2026-01-01T00:00:00Z INFO forged"})
+
+    assert matched is False
+    assert "\n" not in label
+    assert label == "/\\x0a2026-01-01T00:00:00Z INFO forged"
+
+
+def test_unmatched_path_label_is_truncated():
+    label, matched = observability.route_template({"type": "http", "path": "/" + "a" * 500})
+
+    assert matched is False
+    assert len(label) <= observability._MAX_PATH_CHARS + 3
+    assert label.endswith("...")
+
+
+# --- the second credential path ----------------------------------------------------------
+class _StubQuery:
+    def __init__(self, result):
+        self._result = result
+
+    def filter(self, *a, **k):
+        return self
+
+    def first(self):
+        return self._result
+
+
+class _StubSession:
+    """Enough of a Session for _engagement_for_reader; an engagement needs a run row and
+    a run needs more besides, and none of that is what this test is about."""
+
+    def __init__(self, engagement, org=None):
+        self._engagement, self._org = engagement, org
+
+    def get(self, model, pk):
+        return self._engagement
+
+    def query(self, model):
+        return _StubQuery(self._org)
+
+
+def test_assurance_reader_attributes_the_tenant_on_both_credentials():
+    """_engagement_for_reader is a SECOND credential path that does not go through
+    current_org, so it has to bind the tenant itself — otherwise the log line for an
+    assurance read says nothing about whose data was read."""
+    from app.main import _engagement_for_reader, _hash_key
+
+    engagement = SimpleNamespace(id=1, organisation_id=7,
+                                 access_token_hash=_hash_key("assuror-token"))
+
+    ctx, token = observability.bind_request("rid")
+    try:
+        _, role = _engagement_for_reader(_StubSession(engagement), 1,
+                                         x_api_key=None, x_assurance_token="assuror-token")
+        assert role == "assuror"
+        assert ctx["org_id"] == 7              # the org whose data the assuror read
+    finally:
+        observability._CURRENT.reset(token)
+
+    owner_engagement = SimpleNamespace(id=1, organisation_id=7, access_token_hash=None)
+    ctx, token = observability.bind_request("rid")
+    try:
+        _, role = _engagement_for_reader(
+            _StubSession(owner_engagement, org=SimpleNamespace(id=7)), 1,
+            x_api_key="owner-key", x_assurance_token=None)
+        assert role == "owner"
+        assert ctx["org_id"] == 7
+    finally:
+        observability._CURRENT.reset(token)
+
+
+# --- browser-readable correlation id -----------------------------------------------------
+def test_correlation_id_is_readable_by_the_browser_client(client):
+    """A browser cannot read a response header unless CORS exposes it; without this the
+    product's own SPA could not show the id a user is meant to quote."""
+    response = client.get("/healthz", headers={"Origin": "http://localhost:5173"})
+
+    exposed = response.headers.get("access-control-expose-headers", "")
+    assert "X-Request-ID" in exposed
+    assert response.headers["X-Request-ID"]
+
+
+# --- documented limits -------------------------------------------------------------------
+def test_preflight_logs_a_sanitised_path_and_still_no_query_string(client, logs):
+    """A CORS preflight is answered by CORSMiddleware, so the router never runs and there
+    is no route template. The record falls back to the path — which still cannot contain
+    a query string, because ASGI keeps those in a separate scope key."""
+    client.options("/assurance/findings/4071/resolve",
+                   params={"resolution_note": NARRATIVE},
+                   headers={"Origin": "http://localhost:5173",
+                            "Access-Control-Request-Method": "POST"})
+
+    record = logs.one_request()
+    assert record["route"] == "/assurance/findings/4071/resolve"
+    assert record["route_matched"] is False
+    assert NARRATIVE not in logs.text
+    assert "resolution_note" not in logs.text
+
+
+def test_500_record_carries_the_exception_message_a_documented_limit(logs):
+    """Pins a known limit rather than a guarantee: the traceback is the exception's own
+    text, and application code may have built that message out of request data. This
+    logger does not put it there and cannot reliably take it out — the error log already
+    carried the same traceback before this module existed. 500 records therefore need the
+    same handling as the data itself."""
+    app = FastAPI()
+
+    @app.get("/boom")
+    def boom(resolution_note: str = ""):
+        int(resolution_note)                   # the ValueError embeds the value
+
+    observability.install_observability(app)
+    TestClient(app, raise_server_exceptions=False).get(
+        "/boom", params={"resolution_note": NARRATIVE})
+
+    record = logs.one_request()
+    assert record["error_type"] == "ValueError"
+    assert NARRATIVE in record["traceback"]    # the limit, asserted so nobody claims else
+    assert record["route"] == "/boom"          # the request line itself stays clean
+    assert NARRATIVE not in record["msg"]
+

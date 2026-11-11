@@ -47,13 +47,20 @@ EXPOSE 8000
 # horizontally-scaled deploy (many container instances) move `init_db` to a release step
 # instead, so instances don't race the migration.
 #
-# NO --access-logfile, deliberately. The application now emits its own structured request
-# log (app/observability.py: method, route template, status, duration, tenant, correlation
-# id), which carries strictly more than an access line. gunicorn's access log, in contrast,
-# is written by uvicorn's worker as "path?query_string" verbatim — and a number of endpoints
+# NO --access-logfile, deliberately. The application emits its own structured request log
+# (app/observability.py: method, route template, status, duration, tenant, correlation id),
+# which carries strictly more than an access line. gunicorn's access log, in contrast, is
+# written by uvicorn's worker as "path?query_string" verbatim — and a number of endpoints
 # still take narrative, person-identifying free text as QUERY parameters, so enabling it
-# would publish that text to stdout, including for requests that fail authorisation. The
-# error log stays: it carries worker/boot failures that happen outside the application.
+# would publish that text to stdout, including for requests that fail authorisation.
+#
+# Belt and braces: app/observability.py also disables the uvicorn/gunicorn access loggers
+# at configure time (LOG_ACCESS_LOG=1 opts back in), because this flag is not the only way
+# they get switched on — a bare `uvicorn app.main:app` enables access logging by default,
+# and some platforms supply their own start command. The flag is dropped here anyway so
+# the image does not ask for a logger the application then has to switch off.
+#
+# The error log stays: it carries worker/boot failures that happen outside the application.
 # Tune the application log with LOG_LEVEL (default INFO), LOG_FORMAT (json|text, default
-# json) and LOG_LEVEL_THIRD_PARTY (default WARNING).
+# json), LOG_LEVEL_THIRD_PARTY (default WARNING) and LOG_ACCESS_LOG (default off).
 CMD ["sh", "-c", "python -m scripts.init_db && exec gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:${PORT:-8000} --error-logfile -"]

@@ -27,9 +27,25 @@ that fail authorisation. This logger must not make that worse, so:
   keeps the query string in its own scope key, so simply never touching that key means no
   code path here can leak one.
 
-The only raw path that can reach a record is the path of a request that matched **no**
-route (a 404), which therefore cannot carry one of those endpoint parameters; it is
-truncated as well, so a long probe URL cannot bloat the log.
+Two honest limits on that, because the guarantee is about the query string and not about
+every byte of a request:
+
+* **Raw paths.** ``scope["route"]`` is set by FastAPI's router, so it is absent whenever
+  the router did not run or did not own the request — a CORS preflight answered by
+  ``CORSMiddleware``, a static asset or SPA fallback served by the mounted frontend, or a
+  path that matched nothing. Those records carry the request's path instead, flagged
+  ``route_matched: false``. A path never contains the query string (ASGI keeps them in
+  separate scope keys), so none of the parameters above can appear there, but a path
+  *does* carry ids. It is truncated, and every control character in it is escaped, so a
+  caller cannot forge a log line through it (see :func:`_inert`).
+* **Tracebacks.** The ``traceback`` field on a 500 is the exception's own text, and
+  application code may have built that message out of request data — ``int(note)`` on a
+  bad value puts the value in the ``ValueError``. This logger does not put it there and
+  cannot reliably take it out; the error log already carried the same traceback before
+  this module existed. Treat 500 records as needing the same handling as the data itself.
+
+The service's *other* writers of request lines are silenced here rather than left to
+contradict all of the above: see :func:`configure_logging` and ``LOG_ACCESS_LOG``.
 
 Configuration (environment)
 ---------------------------
@@ -40,6 +56,11 @@ Configuration (environment)
                            container log collector) or ``text`` (a compact human line).
 ``LOG_LEVEL_THIRD_PARTY``  level for everything else: libraries and the web server
                            (default ``WARNING``).
+``LOG_ACCESS_LOG``         ``1`` to re-enable the web server's own access log (default
+                           off). Leave it off: uvicorn writes that line as
+                           ``path?query_string`` verbatim, which publishes exactly the
+                           free text described above, for every request including the
+                           ones that fail authorisation.
 
 The two levels are separate on purpose, and it is the privacy rule above that makes them
 so. A dependency's INFO records routinely contain the full request URL with its query
@@ -85,6 +106,19 @@ _SAFE_REQUEST_ID = re.compile(r"\A[A-Za-z0-9._:-]{1,128}\Z")
 #: Cap on the unmatched-path fallback described in the module docstring.
 _MAX_PATH_CHARS = 120
 
+#: Control characters, including the newline. Anything taken from a request and written
+#: to a log line has to have these neutralised: a request for ``/%0A<a plausible line>``
+#: arrives with a real newline in ``scope["path"]`` (ASGI servers url-decode it), and in
+#: a line-oriented format that is a forged log entry from an unauthenticated caller.
+#: JSON escapes them on its own; the text format does not, so the escaping is done at the
+#: source instead of trusting the formatter.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+#: Access loggers of the servers this app runs under. They write the full request target,
+#: query string included, and cannot be reached by this module's levels (uvicorn's worker
+#: gives them their own handlers and sets ``propagate = False``).
+_ACCESS_LOGGERS = ("uvicorn.access", "gunicorn.access")
+
 _DEFAULT_LEVEL = "INFO"
 _DEFAULT_FORMAT = "json"
 _DEFAULT_THIRD_PARTY_LEVEL = "WARNING"
@@ -106,6 +140,11 @@ _CURRENT: "contextvars.ContextVar[Optional[Dict[str, Any]]]" = contextvars.Conte
 # Marks the handler this module installs, so re-configuring replaces ours and leaves
 # anyone else's alone (pytest's caplog, gunicorn's own handlers).
 _OURS = "_carbon_observability_handler"
+
+
+def _inert(text: str) -> str:
+    """Escape control characters so `text` cannot forge or break a log line."""
+    return _CONTROL_CHARS.sub(lambda m: "\\x{:02x}".format(ord(m.group())), text)
 
 
 def new_request_id() -> str:
@@ -201,10 +240,14 @@ class TextFormatter(logging.Formatter):
     """A compact single line for local work: `ts LEVEL logger message key=value ...`."""
 
     def format(self, record: logging.LogRecord) -> str:
+        # Escaped, not merely formatted: this format is line-oriented, so one newline in
+        # a logged value would otherwise become a second, forged entry. The traceback is
+        # left multi-line on purpose (it is unreadable otherwise), which is one more
+        # reason JSON is the default and the format anything machine-read should use.
         fields = _record_fields(record)
-        tail = " ".join("{}={}".format(k, fields[k]) for k in sorted(fields))
+        tail = " ".join("{}={}".format(k, _inert(str(fields[k]))) for k in sorted(fields))
         line = "{} {:<7} {} {}".format(
-            _timestamp(record), record.levelname, record.name, record.getMessage())
+            _timestamp(record), record.levelname, record.name, _inert(record.getMessage()))
         if tail:
             line = "{} {}".format(line, tail)
         if record.exc_info:
@@ -232,15 +275,41 @@ def _resolve_formatter(fmt: Optional[str]) -> Tuple[logging.Formatter, Optional[
     return JsonFormatter(), name
 
 
+def _configure_access_loggers(enabled: bool) -> None:
+    """Silence the web server's own access log unless ``LOG_ACCESS_LOG=1``.
+
+    This is the one place that can do it. uvicorn's worker hands ``uvicorn.access`` its
+    own handlers and sets ``propagate = False``, so neither the levels above nor the
+    handler below can reach it — and what it writes is
+    ``"POST /assurance/findings/4071/resolve?resolution_note=<a person's name> HTTP/1.1"``,
+    for every request, authorised or not. Without this, the structured line and the leak
+    it was written to avoid sit on adjacent lines of the same stdout, which is how the
+    documented dev command (``uvicorn app.main:app --reload``) behaved.
+
+    Suppressed here rather than only in the container's CMD, so that a developer, a
+    one-off ``uvicorn`` run and a platform that supplies its own start command all get
+    the same guarantee.
+    """
+    for name in _ACCESS_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.disabled = not enabled
+        if not enabled:
+            # Belt and braces: with no handlers of its own it would otherwise propagate
+            # up to our handler and be published after all.
+            logger.propagate = False
+
+
 def configure_logging(level: Optional[str] = None, fmt: Optional[str] = None,
                       stream: Optional[Any] = None,
-                      third_party_level: Optional[str] = None) -> logging.Handler:
+                      third_party_level: Optional[str] = None,
+                      access_log: Optional[bool] = None) -> logging.Handler:
     """Install this service's logging configuration.
 
     One handler on the root logger (so every record is formatted alike), but two levels:
     ``LOG_LEVEL`` for the ``app.*`` tree and ``LOG_LEVEL_THIRD_PARTY`` for everything
     else. See the module docstring for why that split is a privacy control and not a
-    tuning knob.
+    tuning knob. The server's own access log is silenced for the same reason — see
+    :func:`_configure_access_loggers`.
 
     Idempotent: calling it again replaces the handler this module installed and leaves
     every other handler in place, so re-configuring never duplicates our lines and never
@@ -262,6 +331,10 @@ def configure_logging(level: Optional[str] = None, fmt: Optional[str] = None,
     root.addHandler(handler)
     root.setLevel(third_numeric)
     logging.getLogger(_APP_LOGGER).setLevel(numeric)
+
+    if access_log is None:
+        access_log = os.environ.get("LOG_ACCESS_LOG", "").strip().lower() in ("1", "true", "yes")
+    _configure_access_loggers(access_log)
 
     log = get_logger("{}.observability".format(_APP_LOGGER))
     if bad_level:
@@ -300,7 +373,7 @@ def route_template(scope: Dict[str, Any]) -> Tuple[str, bool]:
     path = scope.get("path") or "-"
     if len(path) > _MAX_PATH_CHARS:
         path = path[:_MAX_PATH_CHARS] + "..."
-    return path, False
+    return _inert(path), False
 
 
 class ObservabilityMiddleware:
@@ -369,7 +442,7 @@ class ObservabilityMiddleware:
         label, matched = route_template(scope)
         fields: Dict[str, Any] = {
             "event": "http_request",
-            "method": scope.get("method") or "-",
+            "method": _inert(scope.get("method") or "-"),
             "route": label,
             "status": status,
             "duration_ms": round((time.perf_counter() - started) * 1000, 3),
